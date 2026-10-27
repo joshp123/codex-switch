@@ -80,3 +80,9 @@ code against itself proves nothing.
 Never interrupt running work. Deploy the proxy only through `deploy/deploy.sh`;
 deploy the menu separately. Do not commit email addresses, task IDs, local
 paths or agent plans.
+
+Clean up what you start. Run a test build of the menu as an app bundle, never
+by opening its bare binary: macOS runs a bare binary in a Terminal window, and
+Terminal starts it again at every login. Quit it when the test ends. Once a
+branch is merged, move its worktree folder to the Trash, run `git worktree
+prune`, and delete the branch.
