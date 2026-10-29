@@ -292,15 +292,6 @@ For a source install, update the checkout and run `deploy/install.sh` again.
 
 Maintainers: [prepare, verify and publish a release](docs/releases.md).
 
-To go back to the previous proxy:
-
-```sh
-deploy/deploy.sh back \
-  --stable ~/.local/lib/codex-switch/codex-switch \
-  --data ~/Library/Application\ Support/codex-switch \
-  --listen 127.0.0.1:2455
-```
-
 ## Uninstall
 
 First point your clients back at their providers: delete `openai_base_url` from
@@ -313,7 +304,7 @@ entries from Pi's `models.json`, then restart the clients. Then:
 ```
 
 The proxy finishes the requests it has already accepted and stops. The script
-removes its launchd job, the `codex-switch` command and the menu app. Your
+removes both launchd jobs, the `codex-switch` command and the menu app. Your
 sign-ins and usage history stay in `~/Library/Application Support/codex-switch`;
 move that folder to the Trash to remove them too.
 
