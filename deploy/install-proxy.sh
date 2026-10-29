@@ -20,20 +20,30 @@ if [ "$mode" = --back ]; then
 else
   candidate=$mode
 fi
-if [ "$manual" = false ] && [ ! -f "$candidate" ]; then echo "proxy binary not found: $candidate" >&2; exit 1; fi
-/bin/mkdir -p -m 700 "$data" "$(dirname "$binary")" "$(dirname "$plist")"
-workspace=$(/usr/bin/mktemp -d "$data/proxy-update.XXXXXX")
-if [ "$manual" = false ]; then /bin/cp "$candidate" "$workspace/codex-switch"; fi
-printf '%s\n' "$$" > "$workspace/owner"
-lock="$data/proxy-install.filelock"
+if [ -z "${CODEX_SWITCH_LOCKED_WORKSPACE:-}" ]; then
+  if [ "$manual" = false ] && [ ! -f "$candidate" ]; then echo "proxy binary not found: $candidate" >&2; exit 1; fi
+  /bin/mkdir -p -m 700 "$data" "$(dirname "$binary")" "$(dirname "$plist")"
+  workspace=$(/usr/bin/mktemp -d "$data/proxy-update.XXXXXX")
+  if [ "$manual" = false ]; then /bin/cp "$candidate" "$workspace/codex-switch"; fi
+  /bin/cp "$deployment_directory/install-proxy.sh" "$workspace/install-proxy.sh"
+  /bin/cp "$deployment_directory/installation.sh" "$workspace/installation.sh"
+  printf '%s\n' "$$" > "$workspace/owner"
+  export CODEX_SWITCH_LOCKED_WORKSPACE="$workspace"
+  # Keep the lock in this process across exec, including on macOS 14.
+  exec /usr/bin/perl -MFcntl=F_SETFD -e '
+    open(my $lock, ">>", shift) or die "open install lock: $!";
+    flock($lock, 2) or die "acquire install lock: $!";
+    fcntl($lock, F_SETFD, 0) or die "retain install lock: $!";
+    exec @ARGV or die "start installer: $!";
+  ' "$data/proxy-install.filelock" /bin/sh "$workspace/install-proxy.sh" "$mode"
+fi
+workspace=$CODEX_SWITCH_LOCKED_WORKSPACE
+unset CODEX_SWITCH_LOCKED_WORKSPACE
 cleanup() {
   /usr/bin/trash "$workspace"
 }
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
-# The kernel releases the lock if the installer exits, including on a crash.
-exec 9>"$lock"
-/usr/bin/lockf 9
 if [ "$manual" = true ]; then
   # The prior slot may change while another installer holds the lock.
   [ -f "$data/previous-binary" ] || { echo 'no previous proxy to restore' >&2; exit 1; }
@@ -131,7 +141,7 @@ choose_newest() {
   chosen="$workspace/codex-switch"
   chosen_build=$("$chosen" print-build 2>/dev/null || echo 0)
   case "$chosen_build" in ''|*[!0-9]*) chosen_build=0 ;; esac
-  [ "$manual" = false ] || return
+  [ "$manual" = false ] || return 0
   for pending in "$data"/proxy-update.*; do
     [ -f "$pending/owner" ] && [ -f "$pending/codex-switch" ] || continue
     kill -0 "$(cat "$pending/owner")" 2>/dev/null || continue
@@ -253,6 +263,9 @@ fi
 /bin/mv -f "$next_plist.next" "$next_plist"
 printf '%s\n' "$next" > "$state.next"
 /bin/mv -f "$state.next" "$state"
+if [ "$manual" = true ] && [ "${active_build:-0}" -gt 0 ] && [ "$active_build" -ne "$chosen_build" ]; then
+  printf '%s\n' "$active_build" >> "$data/skipped-builds"
+fi
 if [ "$active" != none ]; then
   # bootout signals the old service; it drains rather than accepting new work.
   stop_job "$active_label"

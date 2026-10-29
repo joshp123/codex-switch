@@ -285,7 +285,8 @@ a stalled transfer. Any remaining connections close 30 minutes after the switch
 began.
 
 To return to the previous proxy by hand, run `deploy/deploy.sh back` from a
-checkout or from the app's `Contents/Resources/deploy` directory.
+checkout or from the app's `Contents/Resources/deploy` directory. The release
+you leave is recorded as skipped.
 
 For a source install, update the checkout and run `deploy/install.sh` again.
 
