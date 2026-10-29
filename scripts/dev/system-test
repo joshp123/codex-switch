@@ -364,13 +364,18 @@ def update_during_work_finishes_on_the_old_process(system):
     held_on_new = {event['remote'] for event in rig.gateway_events('response-held', client='codex_exec')} - held_on_old
     new_work_on_new_process = new != old and held_on_new and held_on_new <= rig.gateway_connections(new)
     old_was_draining = held_on_old <= rig.gateway_connections(old)
-    system.extra = []
-    system.apply()
-    for task in (websocket_task, http_task, new_task):
-        task.finish()
-        system.record_codex_task(task.name, task.thread)
     try:
-        rig.wait_for(lambda: f'process {old} stopping' in rig.proxy_log(), 'the old slot to begin retirement', timeout=400)
+        rig.wait_for(lambda: f'process {old} stopping' in rig.proxy_log() or not rig.process_alive(old),
+                     'the old slot to begin retirement', timeout=400)
+        if f'process {old} stopping' not in rig.proxy_log():
+            raise Failure(f'Old process {old} exited without beginning its drain while model replies were in flight.')
+        if any(task.process.poll() is not None for task in (websocket_task, http_task)):
+            raise Failure('An old model reply ended before retirement began.')
+        system.extra = []
+        system.apply()
+        for task in (websocket_task, http_task, new_task):
+            task.finish()
+            system.record_codex_task(task.name, task.thread)
         tunnels.check_idle_open()
         rig.wait_for(tunnels.idle_http_closed, 'the old idle HTTP keep-alive to close', timeout=30)
         while rig.process_alive(old):
@@ -385,6 +390,8 @@ def update_during_work_finishes_on_the_old_process(system):
         if completed_after < 1790:
             raise Failure(f'The old proxy retired after {completed_after:.0f} seconds while both tunnels were open.')
     finally:
+        system.extra = []
+        system.apply()
         tunnels.close()
     try:
         exit_code = update.wait(timeout=120)
