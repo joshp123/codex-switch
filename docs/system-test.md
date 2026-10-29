@@ -66,6 +66,11 @@ candidate. The test also temporarily renames a table in the isolated database
 so the next request on an open WebSocket hits a local routing failure. The
 proxy binaries use the same source and distinct build numbers.
 
+The isolated Codex provider uses a 15-minute stream-idle timeout so a reply
+deliberately held through the five-minute proof does not hit the client's
+normal five-minute timeout first. It uses the same proxy URL, authentication,
+Responses API and WebSocket support.
+
 ## Safety
 
 The test reads the account logins from the live data directory and copies only

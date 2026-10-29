@@ -139,8 +139,10 @@ def start_proxy():
     wait_for(deploy_status, 'the proxy to serve (see data/proxy.log)', timeout=120)
     base = f'http://{listen_address()}/client/{read("data/client-capability").strip()}/backend-api/codex'
     (RUN / 'home/config.toml').write_text(
-        f'openai_base_url = "{base}"\nmodel = "{MODEL}"\nmodel_reasoning_effort = "low"\n'
-        'cli_auth_credentials_store = "file"\n[analytics]\nenabled = false\n')
+        f'model_provider = "switch-test"\nmodel = "{MODEL}"\nmodel_reasoning_effort = "low"\n'
+        'cli_auth_credentials_store = "file"\n[model_providers.switch-test]\nname = "OpenAI"\n'
+        f'base_url = "{base}"\nwire_api = "responses"\nrequires_openai_auth = true\n'
+        'supports_websockets = true\nstream_idle_timeout_ms = 900000\n[analytics]\nenabled = false\n')
     (RUN / 'pi/models.json').write_text(json.dumps({'providers': {'openai-codex': {'baseUrl': base, 'apiKey': PI_PLACEHOLDER_KEY}}}))
     return base
 
