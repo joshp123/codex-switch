@@ -98,7 +98,7 @@ func serveRelay(tcpListenAddress string, checkProviders bool) {
 			fmt.Fprintln(os.Stderr, failure)
 			os.Exit(1)
 		}
-		log.Printf("process %d: provider check passed: every signed-in account's allowance was read", os.Getpid())
+		log.Printf("process %d: provider check passed", os.Getpid())
 	}
 	usageLedger, err := usage.OpenUsageLedger(storeDatabase, dataDir(), &http.Client{Timeout: 15 * time.Second, Transport: upstreamTransport})
 	if err != nil {
@@ -173,8 +173,8 @@ func serveRelay(tcpListenAddress string, checkProviders bool) {
 
 	select {
 	case <-stopping:
-		// Start the grace period before Shutdown waits for direct API work.
-		// Model responses have no deadline; other Claude connections do.
+		// The installer enforces 30 minutes from the start of the switch.
+		// After the five-minute proof, admitted work has at most 25 minutes.
 		drainStarted := time.Now()
 		drainContext, cancelDrain := context.WithTimeout(context.Background(), 25*time.Minute)
 		defer cancelDrain()
@@ -189,7 +189,11 @@ func serveRelay(tcpListenAddress string, checkProviders bool) {
 		if err := relayHandler.WaitForRelayDrain(drainContext); err != nil {
 			log.Printf("process %d: waiting for admitted connections failed: %v", os.Getpid(), err)
 		}
-		log.Printf("process %d stopped after %s: all admitted model work finished and connections closed", os.Getpid(), time.Since(drainStarted).Round(time.Second))
+		if drainContext.Err() != nil {
+			log.Printf("process %d stopped after %s: the update deadline closed remaining connections", os.Getpid(), time.Since(drainStarted).Round(time.Second))
+		} else {
+			log.Printf("process %d stopped after %s: admitted work finished and connections closed", os.Getpid(), time.Since(drainStarted).Round(time.Second))
+		}
 	case err := <-serveFailed:
 		if err != nil && err != http.ErrServerClosed {
 			log.Fatal(err)

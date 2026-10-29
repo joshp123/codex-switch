@@ -218,6 +218,8 @@ if [ "$readiness_result" -ne 0 ]; then
   exit 1
 fi
 candidate_pid=$pid
+/bin/mkdir -p "$(dirname "$command_link")"
+/bin/ln -sf "$next_binary" "$command_link"
 if [ "$active" != none ]; then
   proof_started=$(/bin/date +%s)
   echo "proving build $chosen_build on real work"
@@ -228,6 +230,7 @@ if [ "$active" != none ]; then
     case "$failures" in ''|*[!0-9]*) failures=0 ;; esac
     if ! kill -0 "$candidate_pid" 2>/dev/null || { [ -n "$current_pid" ] && [ "$current_pid" != "$candidate_pid" ]; } || [ "$failures" -ge 3 ]; then
       [ "$manual" = true ] || printf '%s\n' "$chosen_build" >> "$data/skipped-builds"
+      /bin/ln -sf "$active_binary" "$command_link"
       stop_job "$next_label"
       /usr/bin/trash "$data/switch-started"
       if [ "$manual" = true ]; then echo 'previous proxy failed; current proxy remains serving' >&2; exit 1; fi
@@ -235,6 +238,7 @@ if [ "$active" != none ]; then
       exit 0
     fi
     if [ "$(status_field "$status" pid || true)" != "$candidate_pid" ]; then
+      /bin/ln -sf "$active_binary" "$command_link"
       stop_job "$next_label"
       /usr/bin/trash "$data/switch-started"
       echo "could not check the candidate; try again" >&2
@@ -249,8 +253,6 @@ fi
 /bin/mv -f "$next_plist.next" "$next_plist"
 printf '%s\n' "$next" > "$state.next"
 /bin/mv -f "$state.next" "$state"
-/bin/mkdir -p "$(dirname "$command_link")"
-/bin/ln -sf "$next_binary" "$command_link"
 if [ "$active" != none ]; then
   # bootout signals the old service; it drains rather than accepting new work.
   stop_job "$active_label"
