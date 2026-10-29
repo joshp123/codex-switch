@@ -253,7 +253,7 @@ func (handler *TrafficRelayHandler) serveAuthenticatedTraffic(response http.Resp
 		}
 	}
 	if err != nil {
-		if request.Context().Err() == nil && handler.onFailure != nil {
+		if request.Context().Err() == nil && !errors.Is(err, routing.ErrNoAvailableAccount) && handler.onFailure != nil {
 			handler.onFailure()
 		}
 		log.Printf("%s could not be routed: %v", describeModelRequest(taskID, client, ""), err)
@@ -282,6 +282,11 @@ func (handler *TrafficRelayHandler) serveAuthenticatedTraffic(response http.Resp
 			observer.forkSourceTaskID = forkSourceTaskForRequest(request)
 		}
 		observer.requestCounters = handler.requestCounters
+		observer.onFailure = func() {
+			if request.Context().Err() == nil && handler.onFailure != nil {
+				handler.onFailure()
+			}
+		}
 		routedRequest.responseObserver = observer
 		if request.Method == http.MethodPost {
 			observer.startModelRequest(warmup)
@@ -395,7 +400,7 @@ func (handler *TrafficRelayHandler) createBytePreservingReverseProxy() *httputil
 					log.Printf("%s: the client closed the %s request before the provider answered", subject, routedRequest.modelSlug)
 				}
 			default:
-				if handler.onFailure != nil {
+				if isUpstreamProtocolFailure(err) && handler.onFailure != nil {
 					handler.onFailure()
 				}
 				log.Printf("%s: the upstream request failed: %v; the proxy did not resend this attempt", subject, err)
@@ -456,3 +461,9 @@ func (handler *TrafficRelayHandler) closeIdleUpstreamConnections() {
 }
 
 var _ http.Handler = (*TrafficRelayHandler)(nil)
+
+// Protocol errors identify a response the relay could not interpret, unlike a
+// network failure or an HTTP error returned by the provider.
+func isUpstreamProtocolFailure(err error) bool {
+	return strings.Contains(err.Error(), "malformed HTTP response") || strings.Contains(err.Error(), "server gave HTTP response to HTTPS client")
+}

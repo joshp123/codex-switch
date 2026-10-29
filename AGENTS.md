@@ -1,4 +1,4 @@
-<!-- Written by AI on 2026.10.11 by model claude-opus-5.5, derived from the owner's steering. It is a map, not the authority: where it disagrees with the owner's own words or with the running system, they win. -->
+<!-- Written by AI on 2026.10.11 by model claude-opus-5.5; updated on 2026.10.29 by model GPT-6.1 Sol, derived from the owner's steering. It is a map, not the authority: where it disagrees with the owner's own words or with the running system, they win. -->
 
 # Codex Switch: a map for agents
 
@@ -42,13 +42,13 @@ it, or remove the feature.
 | How does the owner want engineering done? | `~/.codex/AGENTS.md` (the owner's own principles). |
 | What does the accepted menu look like? | `.project-private/m3-mockups-r2/` (the approved design), `.project-private/visual-steering/accepted-direction/` (the original direction), then OpenUsage (`robinebers/openusage`). |
 | Is the live proxy working, and how are accounts used? | `codex-switch status`; the log at `~/Library/Application Support/codex-switch/proxy.log`. |
-| Which build is live? | `GET http://127.0.0.1:<port>/client/<capability>/codex-switch/deploy-status`; the capability is in `client-capability` in the data directory. |
+| Which build is live? | `codex-switch status` names the serving build and skipped builds. `GET http://127.0.0.1:<port>/client/<capability>/codex-switch/deploy-status` reports build, PID, own failures and last completed model reply; the capability is in `client-capability` in the data directory. |
 | What runs it? | `launchctl list \| grep codex-switch`; the launchd plist names the binary, port and data directory. |
 | How do clients reach it? | Codex: `openai_base_url` in `~/.codex/config.toml` (`codex-switch print-codex-config`). Pi: `~/.pi/agent/models.json`, provider `openai-codex`. |
 | How does Codex itself behave? | The Codex source (`openai/codex`), and the installed client: `/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex`. |
 | Where does the menu get its numbers? | The serving proxy composes a snapshot once a minute and writes its private URL to `menu-snapshot-url` in the data directory; the menu and `codex-switch status` fetch it from there. |
 | Does the whole system work before a deploy? | `scripts/dev/system-test`; see `docs/system-test.md`. |
-| How is it installed, updated and removed? | `deploy/install.sh` installs, or updates through `deploy/deploy.sh new` (new work goes to the new process, admitted work finishes on the old one) and then rebuilds the menu app; `deploy/uninstall.sh` removes it. `deploy/installation.sh` names every path. Running either against the live install needs the owner's approval. |
+| How is it installed, updated and removed? | `deploy/install.sh` builds the app and proxy; the app runs `deploy/install-proxy.sh <binary>` on launch. The installer serializes updates, selects the newest build, proves it in the second launchd slot and drains the old slot. `deploy/deploy.sh back` restores the previous binary. `deploy/uninstall.sh` removes both slots. `deploy/installation.sh` names the installation paths. Running these against the live install needs the owner's approval. |
 
 ## The code
 

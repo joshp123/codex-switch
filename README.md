@@ -279,8 +279,10 @@ old proxy keeps its connections and stays ready for five minutes. If the new
 proxy fails the check, crashes or fails three requests during that time, it
 steps aside and the old proxy continues. `codex-switch status` shows skipped
 builds. Otherwise the old proxy stops accepting connections and finishes its
-work. Idle connections close; any remaining connections close 30 minutes after
-the switch began.
+work. Idle HTTP connections and WebSockets close. Encrypted tunnels stay open
+until their peers close them, because the proxy cannot tell an idle tunnel from
+a stalled transfer. Any remaining connections close 30 minutes after the switch
+began.
 
 To return to the previous proxy by hand, run `deploy/deploy.sh back` from a
 checkout or from the app's `Contents/Resources/deploy` directory.

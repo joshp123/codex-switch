@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/joshp123/codex-switch/internal/routing"
 	"github.com/joshp123/codex-switch/internal/store"
 	"github.com/joshp123/codex-switch/internal/usage"
 )
@@ -35,6 +36,7 @@ type terminalResponseObserver struct {
 	serviceTier     string
 	admissionMutex  sync.Mutex
 	requestCounters ModelRequestCounters
+	onFailure       func()
 	requests        []*observedModelRequest
 
 	// A WebSocket's state during an update; see in_flight_request_drain.go.
@@ -325,7 +327,10 @@ func (observer *terminalResponseObserver) routeClientMessage(message []byte) boo
 	if observer.taskID != "" {
 		decision, err := observer.taskRouter.RouteForTask(observer.taskID, store.ModelTurnWorkKind, request.Model)
 		if err != nil {
-			log.Printf("%s: the socket closes so the client reconnects, because no account can take its next %s request: %v", observer.describe(), request.Model, err)
+			if !errors.Is(err, routing.ErrNoAvailableAccount) && observer.onFailure != nil {
+				observer.onFailure()
+			}
+			log.Printf("%s: the socket closes so the client reconnects, because routing its next %s request failed: %v", observer.describe(), request.Model, err)
 			return true
 		}
 		if decision.Assignment != "" {

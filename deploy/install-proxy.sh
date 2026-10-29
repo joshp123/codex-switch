@@ -20,33 +20,25 @@ if [ "$mode" = --back ]; then
 else
   candidate=$mode
 fi
-[ -f "$candidate" ] || { echo "proxy binary not found: $candidate" >&2; exit 1; }
+if [ "$manual" = false ] && [ ! -f "$candidate" ]; then echo "proxy binary not found: $candidate" >&2; exit 1; fi
 /bin/mkdir -p -m 700 "$data" "$(dirname "$binary")" "$(dirname "$plist")"
 workspace=$(/usr/bin/mktemp -d "$data/proxy-update.XXXXXX")
-/bin/cp "$candidate" "$workspace/codex-switch"
+if [ "$manual" = false ]; then /bin/cp "$candidate" "$workspace/codex-switch"; fi
 printf '%s\n' "$$" > "$workspace/owner"
-lock="$data/proxy-install.lock"
-owns_lock=false
+lock="$data/proxy-install.filelock"
 cleanup() {
-  if [ "$owns_lock" = true ]; then /bin/rmdir "$lock/$$" "$lock" 2>/dev/null || true; fi
   /usr/bin/trash "$workspace"
 }
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
-while ! /bin/mkdir "$lock" 2>/dev/null; do
-  owner=""
-  for entry in "$lock"/*; do [ -d "$entry" ] && owner=${entry##*/}; done
-  if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then
-    /bin/rmdir "$lock/$owner" "$lock" 2>/dev/null || true
-  elif [ -z "$owner" ]; then
-    sleep 1
-    /bin/rmdir "$lock" 2>/dev/null || true
-  else
-    sleep 1
-  fi
-done
-/bin/mkdir "$lock/$$"
-owns_lock=true
+# The kernel releases the lock if the installer exits, including on a crash.
+exec 9>"$lock"
+/usr/bin/lockf 9
+if [ "$manual" = true ]; then
+  # The prior slot may change while another installer holds the lock.
+  [ -f "$data/previous-binary" ] || { echo 'no previous proxy to restore' >&2; exit 1; }
+  /bin/cp "$data/previous-binary" "$workspace/codex-switch"
+fi
 
 domain="gui/$(id -u)"
 state="$data/serving-slot"
@@ -106,6 +98,7 @@ if [ "$active" != legacy ] && [ "$active" != none ]; then
   stop_job "$label"
   [ ! -e "$plist" ] || /usr/bin/trash "$plist"
 fi
+[ ! -e "$data/switch-started" ] || /usr/bin/trash "$data/switch-started"
 if [ "$active" != none ] && ! job_loaded "$active_label"; then
   /bin/launchctl bootstrap "$domain" "$active_plist"
 fi
@@ -115,10 +108,15 @@ if [ "$active" != none ]; then
 fi
 wait_for_job() {
   job=$1
+  detect_exit=${2:-false}
   count=0
   while [ "$count" -lt 120 ]; do
     pid=$(job_pid "$job")
     status=$(serving_status || true)
+    if [ "$detect_exit" = true ]; then
+      exit_code=$(/bin/launchctl print "$domain/$job" 2>/dev/null | /usr/bin/awk '$1 == "last" && $2 == "exit" && $3 == "code" && $4 == "=" {print $5; exit}')
+      case "$exit_code" in ''|'(never') ;; *) return 2 ;; esac
+    fi
     if [ -n "$pid" ] && [ "$(status_field "$status" pid || true)" = "$pid" ]; then return 0; fi
     count=$((count + 1)); sleep 1
   done
@@ -182,6 +180,8 @@ if [ "$active" != none ]; then
   /bin/cp "$active_plist" "$temporary_plist"
   /usr/bin/plutil -replace Label -string "$next_label" "$temporary_plist"
   /usr/bin/plutil -replace ProgramArguments.0 -string "$next_binary" "$temporary_plist"
+  # plutil inserts at an array index even with -replace.
+  /usr/bin/plutil -remove ProgramArguments.1 "$temporary_plist"
   argument_index=4
   has_provider_check=false
   while argument=$(/usr/bin/plutil -extract "ProgramArguments.$argument_index" raw "$temporary_plist" 2>/dev/null); do
@@ -209,16 +209,19 @@ fi
 switch_started=$(/bin/date +%s)
 printf '%s\n' "$switch_started" > "$data/switch-started"
 /bin/launchctl bootstrap "$domain" "$temporary_plist"
-if ! wait_for_job "$next_label"; then
+readiness_result=0
+wait_for_job "$next_label" true || readiness_result=$?
+if [ "$readiness_result" -ne 0 ]; then
   stop_job "$next_label"
   /usr/bin/trash "$data/switch-started"
-  if [ "$active" != none ] && [ "$manual" = false ]; then printf '%s\n' "$chosen_build" >> "$data/skipped-builds"; echo "build $chosen_build was skipped"; exit 0; fi
+  if [ "$readiness_result" -eq 2 ] && [ "$active" != none ] && [ "$manual" = false ]; then printf '%s\n' "$chosen_build" >> "$data/skipped-builds"; echo "build $chosen_build was skipped"; exit 0; fi
   exit 1
 fi
 candidate_pid=$pid
 if [ "$active" != none ]; then
+  proof_started=$(/bin/date +%s)
   echo "proving build $chosen_build on real work"
-  while [ $(($(/bin/date +%s) - switch_started)) -lt 300 ]; do
+  while [ $(($(/bin/date +%s) - proof_started)) -lt 300 ]; do
     status=$(serving_status || true)
     current_pid=$(job_pid "$next_label")
     failures=$(status_field "$status" failures || echo 0)
@@ -227,6 +230,7 @@ if [ "$active" != none ]; then
       [ "$manual" = true ] || printf '%s\n' "$chosen_build" >> "$data/skipped-builds"
       stop_job "$next_label"
       /usr/bin/trash "$data/switch-started"
+      if [ "$manual" = true ]; then echo 'previous proxy failed; current proxy remains serving' >&2; exit 1; fi
       echo "build $chosen_build was skipped; the previous proxy remains serving"
       exit 0
     fi
