@@ -95,12 +95,14 @@ type gateway struct {
 //	http-only                       WebSocket upgrades are refused, so clients use HTTP
 //	hold-responses CLIENT           model responses for CLIENT (its Originator header) pause once started
 //	break-responses                 model requests receive a malformed HTTP response
+//	provider-error                  model requests receive a provider HTTP error
 type controls struct {
 	weeklyUsed    map[string]float64
 	limited       map[string]bool
 	httpOnly      bool
 	holdResponses map[string]bool
 	breakResponses bool
+	providerError  bool
 }
 
 func (gateway *gateway) readControls() (controls, error) {
@@ -120,6 +122,8 @@ func (gateway *gateway) readControls() (controls, error) {
 			parsed.httpOnly = true
 		case len(fields) == 1 && fields[0] == "break-responses":
 			parsed.breakResponses = true
+		case len(fields) == 1 && fields[0] == "provider-error":
+			parsed.providerError = true
 		case len(fields) == 2 && fields[0] == "hold-responses":
 			parsed.holdResponses[fields[1]] = true
 		case len(fields) == 2 && fields[0] == "limited" && gateway.knownAlias(fields[1]):
@@ -161,6 +165,9 @@ func (gateway *gateway) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	alias := gateway.alias(request)
 	webSocket := request.URL.Path == responsesPath && strings.EqualFold(request.Header.Get("Upgrade"), "websocket")
 	switch {
+	case controls.providerError && request.URL.Path == responsesPath:
+		gateway.logRequest("provider-error", request, http.StatusServiceUnavailable)
+		http.Error(writer, "provider unavailable (simulation)", http.StatusServiceUnavailable)
 	case controls.breakResponses && request.URL.Path == responsesPath:
 		gateway.logRequest("malformed-response", request, 0)
 		connection, _, err := writer.(http.Hijacker).Hijack()

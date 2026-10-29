@@ -4,12 +4,14 @@ evidence each of them leaves."""
 import base64
 from datetime import datetime
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path
 import plistlib
 import queue
 import re
+import select
 import shutil
 import signal
 import socket
@@ -34,12 +36,13 @@ CLAUDE = str(CLAUDE_VERSIONS[-1]) if CLAUDE_VERSIONS else shutil.which('claude')
 CLAUDE_ACCOUNT = None
 CLAUDE_SKIP_REASON = 'no Claude account is signed in' if CLAUDE else 'Claude Code is not installed'
 MODEL = 'gpt-6-luna'
-LABEL = 'dev.codex-switch.system-test-terra'
+LABEL = 'dev.codex-switch.system-test-' + hashlib.sha256(str(REPO).encode()).hexdigest()[:10] + '-terra'
 # Pi has no ChatGPT login of its own here: it needs a JWT-shaped key with a
 # chatgpt_account_id claim. The proxy replaces the credentials it carries.
 PI_PLACEHOLDER_KEY = 'eyJhbGciOiJub25lIn0.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiY29kZXgtc3dpdGNoIn19.codex-switch'
 
 started_processes = []
+started_tunnels = []
 
 
 class Failure(Exception):
@@ -157,6 +160,8 @@ def clean_up():
     """Stops every client, proxy generation and the gateway; returns anything still running."""
     for name in (signal.SIGINT, signal.SIGTERM):
         signal.signal(name, signal.SIG_IGN)  # a second interrupt must not stop the cleanup
+    for tunnel in started_tunnels:
+        tunnel.close()
     gateway = str(RUN / 'gateway')
     if (RUN / 'control').exists():
         control()  # release held responses so draining processes can finish
@@ -371,10 +376,19 @@ class TunnelPair:
         self.server = socketserver.ThreadingTCPServer(('127.0.0.1', 0), Echo)
         self.server.daemon_threads = True
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
-        target = f'127.0.0.1:{self.server.server_address[1]}'
-        auth = base64.b64encode(('codex-switch:' + read('data/client-capability').strip()).encode()).decode()
+        self.stopped, self.error = threading.Event(), None
         self.sockets = []
+        started_tunnels.append(self)
+        target = f'127.0.0.1:{self.server.server_address[1]}'
+        capability = read('data/client-capability').strip()
+        auth = base64.b64encode(('codex-switch:' + capability).encode()).decode()
         host, port = listen_address().split(':')
+        self.idle_http = http.client.HTTPConnection(host, int(port), timeout=10)
+        self.idle_http.request('GET', f'/client/{capability}/codex-switch/deploy-status')
+        response = self.idle_http.getresponse()
+        response.read()
+        if response.status != 200 or self.idle_http.sock is None:
+            raise Failure('Could not establish the idle HTTP keep-alive connection.')
         for _ in range(2):
             connection = socket.create_connection((host, int(port)))
             connection.sendall(f'CONNECT {target} HTTP/1.1\r\nHost: {target}\r\nProxy-Authorization: Basic {auth}\r\n\r\n'.encode())
@@ -387,7 +401,6 @@ class TunnelPair:
             if not response.startswith(b'HTTP/1.1 200'):
                 raise Failure(f'The proxy rejected a CONNECT tunnel: {response!r}')
             self.sockets.append(connection)
-        self.stopped, self.error = threading.Event(), None
         threading.Thread(target=self.transfer, daemon=True).start()
 
     def transfer(self):
@@ -402,21 +415,46 @@ class TunnelPair:
         except OSError as error:
             self.error = error
 
-    def check_idle_closed(self):
+    def check_idle_open(self):
         idle = self.sockets[1]
-        idle.settimeout(90)
+        idle.settimeout(65)
         try:
             if idle.recv(1) != b'':
-                raise Failure('Idle tunnel returned unexpected data instead of closing.')
+                raise Failure('The idle tunnel returned unexpected data.')
+            raise Failure('The silent tunnel was closed before the deadline.')
         except (ConnectionResetError, BrokenPipeError):
-            pass
+            raise Failure('The silent tunnel was closed before the deadline.')
         except socket.timeout:
-            raise Failure('The idle tunnel was not closed during retirement.')
+            pass
         if self.error:
             raise Failure(f'The transferring tunnel was cut: {self.error}')
 
+    def idle_closed(self):
+        idle = self.sockets[1]
+        if not select.select([idle], [], [], 0)[0]:
+            return False
+        try:
+            return idle.recv(1) == b''
+        except ConnectionResetError:
+            return True
+
+    def idle_http_closed(self):
+        connection = self.idle_http.sock
+        if connection is None:
+            return True
+        if not select.select([connection], [], [], 0)[0]:
+            return False
+        try:
+            return connection.recv(1) == b''
+        except ConnectionResetError:
+            return True
+
     def close(self):
+        if self.stopped.is_set():
+            return
         self.stopped.set()
+        if hasattr(self, 'idle_http'):
+            self.idle_http.close()
         for connection in self.sockets:
             connection.close()
         self.server.shutdown()

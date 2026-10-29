@@ -24,9 +24,10 @@ from system_test_rig import Failure  # noqa: E402
 GOAL = ('Append exactly one START line to {effect} using a tool. Then use a separate tool call to read input.txt, '
         'compute the sum of its numbers, and write only that sum to {result}. Verify both files and mark the goal '
         'complete. Never append START again.')
-SLEEPING_GOAL = ('In one tool call, append exactly one START line to {effect} and then run `sleep 40`. Afterwards use '
+SLEEPING_GOAL = ('In one tool call, append exactly one START line to {effect} and then run `sleep 180`. Afterwards use '
                  'a separate tool call to read input.txt, compute the sum of its numbers, and write only that sum to '
                  '{result}. Verify both files and mark the goal complete. Never append START again.')
+FAULT_GOAL = SLEEPING_GOAL.replace('sleep 180', 'sleep 20')
 
 
 class System:
@@ -105,6 +106,22 @@ def run_outcome(outcome, system):
         print('      ' + line)
     print(flush=True)
     return held
+
+
+def update_waits_for_work(system):
+    """An update waits until a model reply has completed"""
+    old = rig.deploy_status()['pid']
+    environment = dict(os.environ, HOME=str(rig.RUN / 'home'), CODEX_SWITCH_LAUNCHD_LABEL=rig.LABEL,
+                       CODEX_SWITCH_LISTEN=rig.listen_address())
+    update = rig.start_client([str(rig.REPO / 'deploy/install-proxy.sh'), str(rig.RUN / 'candidate')],
+                              'no-work-update', env=environment)
+    time.sleep(10)
+    if update.poll() is not None or not rig.deploy_status() or rig.deploy_status()['pid'] != old:
+        raise Failure('The installer exited or switched before any model reply completed.')
+    rig.stop_process_group(update)
+    if rig.deploy_status()['pid'] != old:
+        raise Failure('Stopping the waiting installer changed the serving proxy.')
+    return 'The installer waited with the original proxy serving until real model work was available.'
 
 
 def new_work_goes_to_the_most_allowance_left(system):
@@ -299,7 +316,7 @@ def goal_continues_when_an_account_returns(system):
 def update_during_work_finishes_on_the_old_process(system):
     """A blue-green update during work completes by itself, and admitted work finishes on the old process"""
     goal = rig.Goal('update-goal', SLEEPING_GOAL)
-    rig.wait_for(goal.effect_file.exists, 'the goal to start its 40-second tool call', timeout=180)
+    rig.wait_for(goal.effect_file.exists, 'the goal to start its 180-second tool call', timeout=180)
     # Two Codex responses are held mid-stream on the old process: one over WebSocket, one over HTTP.
     system.extra = ['hold-responses codex_exec']
     system.apply()
@@ -325,6 +342,7 @@ def update_during_work_finishes_on_the_old_process(system):
     update = rig.start_client(update_command, 'update', env=installer_environment)
     new = rig.wait_for(lambda: (status['pid'] if (status := rig.deploy_status()) and status['pid'] != old else None),
                        'the new launchd slot to take new connections', timeout=180)
+    switch_started = int(rig.read('data/switch-started').strip())
     if goal.result_file.exists():
         raise Failure('The goal finished its tool call before the update began, so it did not run across the update.')
     # New work during the drain: held too, so the process holding it can be seen.
@@ -340,15 +358,23 @@ def update_during_work_finishes_on_the_old_process(system):
         system.record_codex_task(task.name, task.thread)
     try:
         rig.wait_for(lambda: f'process {old} stopping' in rig.proxy_log(), 'the old slot to begin retirement', timeout=400)
-        tunnels.check_idle_closed()
-        # Keep transferring until ten seconds before the 30-minute limit.
-        while time.monotonic() - update_started < 1790:
-            if tunnels.error:
+        tunnels.check_idle_open()
+        rig.wait_for(tunnels.idle_http_closed, 'the old idle HTTP keep-alive to close', timeout=30)
+        while update.poll() is None:
+            if tunnels.error and time.time() - switch_started < 1800:
                 raise Failure(f'The transferring tunnel was cut before the limit: {tunnels.error}')
+            if tunnels.idle_closed() and time.time() - switch_started < 1800:
+                raise Failure('The silent tunnel was cut before the limit.')
+            if time.time() - switch_started > 1805:
+                raise Failure('The old proxy did not retire within 30 minutes.')
             time.sleep(1)
+        completed_after = time.time() - switch_started
+        if completed_after < 1790:
+            raise Failure(f'The old proxy retired after {completed_after:.0f} seconds while both tunnels were open.')
     finally:
         tunnels.close()
-    if update.wait(timeout=1900):
+    exit_code = update.returncode
+    if exit_code:
         raise Failure(f'The update command failed: {rig.read("logs/update.err")[-400:]}')
     final = rig.deploy_status()['pid']
     errors = goal.finish() + websocket_task.errors + http_task.errors + new_task.errors
@@ -360,7 +386,7 @@ def update_during_work_finishes_on_the_old_process(system):
     replies = (websocket_task.reply.lower(), http_task.reply.lower(), new_task.reply.lower())
     if canceled or 'socket' not in replies[0] or 'stream' not in replies[1] or 'new' not in replies[2]:
         raise Failure(f'{len(canceled)} held responses were cancelled; Codex replied {replies}; see process {old} in data/proxy.log.')
-    if final != new or rig.process_alive(old) or time.monotonic() - update_started > 1800:
+    if final != new or rig.process_alive(old) or completed_after > 1805:
         raise Failure(f'After the update, process {final} serves; expected {new}, old {old} gone within 30 minutes.')
     loaded = [label for label in (rig.LABEL, rig.LABEL + '.a', rig.LABEL + '.b')
               if rig.subprocess.run(['launchctl', 'print', f'gui/{os.getuid()}/{label}'], capture_output=True).returncode == 0]
@@ -375,7 +401,7 @@ def update_during_work_finishes_on_the_old_process(system):
         raise Failure(f'The update completed, but Codex showed {describe_errors(errors)}.')
     return ('The legacy launchd job was adopted while one WebSocket and one HTTP response were mid-stream. New work went to the\n'
             'new slot; both responses finished on the old process, which exited within 30 minutes. Only the new slot remained loaded.\n'
-            'An idle Claude tunnel closed; a transferring tunnel stayed open through retirement.\n'
+            'The idle HTTP connection closed. A silent Claude tunnel and a transferring tunnel stayed open until the deadline.\n'
             'A goal running a tool across the update finished with its effect run once. Nothing was replayed and Codex showed no error.')
 
 
@@ -392,6 +418,55 @@ def failed_release_steps_aside(system):
     install = rig.start_client([str(rig.REPO / 'deploy/install-proxy.sh'), str(candidate)], 'bad-update', env=environment)
     new = rig.wait_for(lambda: (status['pid'] if (status := rig.deploy_status()) and status['pid'] != old else None),
                        'the candidate to take new connections', timeout=180)
+    system.extra = ['provider-error']
+    system.apply()
+    for number in range(3):
+        try:
+            rig.post_without_task_id(system.base, f'Provider error test {number}.')
+        except rig.urllib.error.HTTPError as error:
+            if error.code != 503:
+                raise Failure(f'The simulated provider error returned HTTP {error.code}, expected 503.')
+        else:
+            raise Failure('The simulated provider error did not reach the client.')
+    if len(rig.gateway_events('provider-error')) < 3 or rig.deploy_status()['failures'] != 0:
+        raise Failure('Provider errors were counted against the candidate.')
+
+    held_before = len(rig.gateway_events('response-held', client='codex_exec'))
+    system.extra = ['hold-responses codex_exec']
+    system.apply()
+    canceled = rig.CodexTask('cancel-during-proof', 'Reply with the word canceled.')
+    rig.wait_for(lambda: len(rig.gateway_events('response-held', client='codex_exec')) > held_before,
+                 'a candidate response to begin before canceling', timeout=180)
+    rig.stop_process_group(canceled.process)
+    system.extra = []
+    system.apply()
+    rig.wait_for(lambda: rig.gateway_events('response-canceled', client='codex_exec'),
+                 'the canceled response to close', timeout=30)
+    if rig.deploy_status()['pid'] != new or rig.deploy_status()['failures'] != 0:
+        raise Failure('A client cancellation counted against the candidate.')
+
+    fault_goal = rig.Goal('websocket-routing-fault', FAULT_GOAL)
+    rig.wait_for(fault_goal.effect_file.exists, 'the WebSocket goal to start its tool', timeout=180)
+    if not rig.gateway_events('websocket-open', thread=fault_goal.thread):
+        raise Failure('The routing-fault goal did not open a WebSocket.')
+    database_path = rig.RUN / 'data/codex-switch.db'
+    with rig.sqlite3.connect(database_path) as database:
+        database.execute('ALTER TABLE task_account_pins RENAME TO held_task_account_pins')
+    try:
+        rig.wait_for(lambda: (status := rig.deploy_status()) and status['pid'] == new and status['failures'] >= 1,
+                     'the candidate to count a routing failure on the open WebSocket', timeout=60, interval=0.1)
+    finally:
+        with rig.sqlite3.connect(database_path) as database:
+            database.execute('ALTER TABLE held_task_account_pins RENAME TO task_account_pins')
+    socket_failure = [line for line in rig.proxy_log().splitlines()
+                      if fault_goal.thread in line and 'the socket closes so the client reconnects, because routing its next' in line]
+    if not socket_failure:
+        raise Failure('The candidate counted an error, but did not report a routing failure on the open WebSocket.')
+    fault_goal.finish(timeout=300)
+    system.record_codex_task('goal through WebSocket routing fault', fault_goal.thread)
+    require_no_replay('The WebSocket routing-fault goal', rig.forwarded_requests(thread=fault_goal.thread))
+    if rig.deploy_status()['pid'] != new:
+        raise Failure('One WebSocket routing failure caused the candidate to step aside.')
     system.extra = ['break-responses']
     system.apply()
     began = time.monotonic()
@@ -413,8 +488,8 @@ def failed_release_steps_aside(system):
     status = rig.proxy_command('status')
     if build not in skipped or build not in status:
         raise Failure(f'Skipped build {build} is not recorded and shown in status: {status[-500:]}')
-    if len(rig.gateway_events('malformed-response')) < 3:
-        raise Failure('The gateway did not deliver three malformed responses to the candidate.')
+    if len(rig.gateway_events('malformed-response')) < 2:
+        raise Failure('The gateway did not deliver two malformed responses to the candidate.')
     return f'Build {build} stopped taking traffic after malformed responses in {elapsed:.1f} seconds; process {old} resumed, status named the skipped build, and all three Codex tasks finished.'
 
 
@@ -508,7 +583,7 @@ def format_duration(seconds):
     return f'{minutes}m {seconds:02d}s'
 
 
-OUTCOMES = [new_work_goes_to_the_most_allowance_left, claude_works_through_the_https_proxy, request_without_task_id_is_served,
+OUTCOMES = [update_waits_for_work, new_work_goes_to_the_most_allowance_left, claude_works_through_the_https_proxy, request_without_task_id_is_served,
             exhausted_task_moves_on_its_next_turn,
             goal_continues_when_an_account_returns, update_during_work_finishes_on_the_old_process, failed_release_steps_aside,
             queued_releases_install_newest, every_response_recorded_once]

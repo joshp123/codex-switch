@@ -8,9 +8,10 @@ Run this before a live deploy:
 scripts/dev/system-test
 ```
 
-It takes at least 40 minutes: it keeps a tunnel transferring until just before the 30-minute update limit and runs further five-minute proofs. It builds the proxy from this working tree, runs
+It takes at least 40 minutes: it keeps a tunnel transferring until the 30-minute update limit and runs further five-minute proofs. It builds the proxy from this working tree, runs
 the account pool in isolation, and prints what the system did for each outcome:
 
+0. An update waits for model work before it switches.
 1. New Codex tasks and Pi sessions go to the account with the most weekly
    allowance left, and stay there when another account takes the lead.
 2. Claude Code gets a reply through the HTTPS proxy, on the Claude account,
@@ -22,10 +23,11 @@ the account pool in isolation, and prints what the system did for each outcome:
    when one account comes back.
 6. A blue-green update adopts the old single-job installation during work.
    Responses in flight over WebSocket and HTTP finish on the old process,
-   while new work starts on the new one. An idle Claude tunnel closes and a
-   transferring tunnel stays open until just before the 30-minute limit.
-7. A candidate that receives malformed upstream responses steps aside, the
-   previous proxy resumes, and status shows the skipped build.
+   while new work starts on the new one. A silent Claude tunnel and a transferring tunnel stay open until the
+   30-minute limit.
+7. Provider errors and client cancellations do not count against a candidate.
+   A local routing failure on an open WebSocket and malformed upstream responses
+   do count: the candidate steps aside and status shows the skipped build.
 8. Two releases queued during a switch converge on the newest, with at most
    two proxy processes and no downgrade.
 9. Each completed response is recorded once, with its account, task and tokens.
@@ -72,8 +74,9 @@ the Claude outcome then fails.
 It never touches the live proxy, its launchd job or data directory,
 `~/.codex/config.toml`, Pi's or Claude Code's configuration or the menu app. The clients run
 with their own homes inside the run directory. When the run ends, or fails, the
-test removes its launchd jobs (`dev.codex-switch.system-test-terra` and its
-`.a` and `.b` slots) and stops every process it started, then checks that none remain.
+test removes its launchd jobs (a label derived from the checkout path with a
+`-terra` suffix, and its `.a` and `.b` slots) and stops every process it started,
+then checks that none remain.
 
 ## When an outcome fails
 
