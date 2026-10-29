@@ -465,5 +465,5 @@ var _ http.Handler = (*TrafficRelayHandler)(nil)
 // Protocol errors identify a response the relay could not interpret, unlike a
 // network failure or an HTTP error returned by the provider.
 func isUpstreamProtocolFailure(err error) bool {
-	return strings.Contains(err.Error(), "malformed HTTP response") || strings.Contains(err.Error(), "server gave HTTP response to HTTPS client")
+	return strings.Contains(err.Error(), "malformed HTTP ") || strings.Contains(err.Error(), "server gave HTTP response to HTTPS client")
 }
