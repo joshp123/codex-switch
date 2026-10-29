@@ -538,7 +538,7 @@ def queued_releases_install_newest(system):
             status = rig.deploy_status()
             if status:
                 observed.append(int(status['build']))
-            process_counts.append(len(rig.run_processes(exclude=str(rig.RUN / 'gateway'))))
+            process_counts.append(len(rig.run_processes(only_servers=True)))
     observer = threading.Thread(target=observe, daemon=True)
     observer.start()
     # Refresh the proof-of-work signal shortly before the five minute window ends.

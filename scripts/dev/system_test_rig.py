@@ -106,6 +106,7 @@ def build():
         built = subprocess.run(['devenv', 'shell', '--', *command], cwd=REPO, env=environment, capture_output=True, text=True)
         if built.returncode:
             raise Failure(f'Build failed: {" ".join(command)}\n{built.stderr[-1500:]}')
+    shutil.copy2(RUN / 'codex-switch', RUN / 'cli')
 
 
 def start_gateway():
@@ -196,13 +197,14 @@ def stop_process_group(process):
             pass
 
 
-def run_processes(exclude=None):
+def run_processes(exclude=None, only_servers=False):
     """Processes running an executable from this run's directory."""
     listing = subprocess.run(['ps', '-axo', 'pid=,stat=,command='], capture_output=True, text=True, check=True).stdout
     owned = []
     for line in listing.splitlines():
         pid, state, command = line.split(None, 2)
-        if command.startswith(str(RUN) + '/') and not state.startswith('Z') and not (exclude and command.startswith(exclude)):
+        if (command.startswith(str(RUN) + '/') and not state.startswith('Z')
+                and not (exclude and command.startswith(exclude)) and (not only_servers or ' serve ' in command)):
             owned.append(int(pid))
     return owned
 
@@ -269,7 +271,7 @@ def run_claude(session):
                    and name not in ('NODE_EXTRA_CA_CERTS', 'NODE_TLS_REJECT_UNAUTHORIZED')}
     environment.update(HOME=str(RUN / 'claude'), CLAUDE_CONFIG_DIR=str(RUN / 'claude'),
                        CODEX_SWITCH_DATA_DIR=str(RUN / 'data'))
-    settings = subprocess.run([str(RUN / 'codex-switch'), 'print-claude-config', '--listen', listen_address()],
+    settings = subprocess.run([str(RUN / 'cli'), 'print-claude-config', '--listen', listen_address()],
                               env=environment, capture_output=True, text=True, check=True)
     environment.update(json.loads(settings.stdout)['env'])
     auth = json.loads((RUN / 'data' / CLAUDE_ACCOUNT / 'auth.json').read_text())
@@ -521,10 +523,15 @@ def pi_client_usage(session):
     return usage
 
 
+def cli_path():
+    command = RUN / 'home/.local/bin/codex-switch'
+    return command if command.exists() or command.is_symlink() else RUN / 'cli'
+
+
 def proxy_command(*arguments):
     """Runs a person-facing command against this run's isolated account data."""
     environment = dict(client_environment(), CODEX_SWITCH_DATA_DIR=str(RUN / 'data'))
-    result = subprocess.run([str(RUN / 'codex-switch'), *arguments], env=environment, capture_output=True, text=True)
+    result = subprocess.run([str(cli_path()), *arguments], env=environment, capture_output=True, text=True)
     if result.returncode:
         raise Failure(f'codex-switch {" ".join(arguments)} failed: {result.stderr.strip()}')
     return result.stdout
@@ -537,7 +544,7 @@ def account_keys_by_name():
 def weekly_used_percent():
     """Weekly allowance used per account, as `codex-switch status` shows it to a person."""
     environment = dict(client_environment(), CODEX_SWITCH_DATA_DIR=str(RUN / 'data'))
-    shown = subprocess.run([str(RUN / 'codex-switch'), 'status'], env=environment,
+    shown = subprocess.run([str(cli_path()), 'status'], env=environment,
                            capture_output=True, text=True).stdout
     key_by_name = account_keys_by_name()
     used, account = {}, None
