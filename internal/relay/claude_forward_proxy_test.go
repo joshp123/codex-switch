@@ -221,7 +221,8 @@ func TestClaudeForwardProxyTunnelsOtherHostsWithoutDecrypting(t *testing.T) {
 	}
 }
 
-func TestClaudeForwardProxyDrainProtectsOnlyModelWorkPastGrace(t *testing.T) {
+func TestClaudeForwardProxyDrainLetsStreamsFinishAndClosesIdleTunnels(t *testing.T) {
+	finishOther := make(chan struct{})
 	finishModel := make(chan struct{})
 	var finishOnce sync.Once
 	finish := func() { finishOnce.Do(func() { close(finishModel) }) }
@@ -233,7 +234,8 @@ func TestClaudeForwardProxyDrainProtectsOnlyModelWorkPastGrace(t *testing.T) {
 			<-finishModel
 			io.WriteString(writer, claudeForwardResponse)
 		} else {
-			<-request.Context().Done()
+			<-finishOther
+			io.WriteString(writer, ": finished\n\n")
 		}
 	}))
 	defer upstream.Close()
@@ -280,6 +282,7 @@ func TestClaudeForwardProxyDrainProtectsOnlyModelWorkPastGrace(t *testing.T) {
 	tunnelClosed := make(chan error, 1)
 	go func() { _, err := io.ReadAll(reader); tunnelClosed <- err }()
 
+	drainStarted := time.Now()
 	proxy.drainConnectionsWithin(100 * time.Millisecond)
 	if err := server.Config.Shutdown(context.Background()); err != nil {
 		t.Fatal(err)
@@ -287,19 +290,26 @@ func TestClaudeForwardProxyDrainProtectsOnlyModelWorkPastGrace(t *testing.T) {
 	proxy.relay.BeginRelayDrain()
 	drained := make(chan error, 1)
 	go func() { drained <- proxy.relay.WaitForRelayDrain(context.Background()) }()
-	for _, closed := range []<-chan error{otherClosed, tunnelClosed} {
+	for _, closed := range []<-chan error{tunnelClosed} {
 		select {
 		case err := <-closed:
 			if timeout, ok := err.(net.Error); ok && timeout.Timeout() {
 				t.Fatalf("non-model connection timed out instead of closing: %v", err)
 			}
-			if time.Now().Before(proxy.drainDeadline) {
+			if time.Since(drainStarted) < 100*time.Millisecond {
 				t.Fatal("non-model connection was cut before its grace expired")
 			}
 		case <-time.After(time.Second):
 			t.Fatal("non-model connection survived its grace")
 		}
 	}
+	select {
+	case <-otherClosed:
+		t.Fatal("drain cut the active non-model stream")
+	default:
+	}
+	close(finishOther)
+	<-otherClosed
 	select {
 	case <-drained:
 		t.Fatal("drain cut the model response after the grace period")

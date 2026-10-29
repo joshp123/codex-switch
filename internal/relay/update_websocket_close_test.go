@@ -8,7 +8,7 @@ import (
 // An update must let a streaming response finish, then close its WebSocket,
 // so the client's next request reaches the new process and the old one exits.
 func TestUpdateClosesWebSocketOnlyAfterItsResponseEnds(t *testing.T) {
-	handler := &TrafficRelayHandler{openWebSockets: map[*terminalResponseObserver]struct{}{}, drainComplete: make(chan struct{})}
+	handler := &TrafficRelayHandler{openWebSockets: map[*terminalResponseObserver]struct{}{}, drainComplete: make(chan struct{}), stopping: make(chan struct{})}
 
 	streaming := newTerminalResponseObserver("", "test-client", "account-1", nil, &recordedHTTPCompletion{})
 	streamingClosed := make(chan time.Time, 1)

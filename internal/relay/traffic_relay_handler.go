@@ -58,6 +58,7 @@ type RelayHandlerOptions struct {
 	CompletionLedger     CompletionLedger
 	RequestCounters      ModelRequestCounters
 	HTTPTransport        http.RoundTripper
+	OnFailure            func()
 }
 
 // TrafficRelayHandler stays alive with admitted streams so deployment does not cut off model work.
@@ -79,6 +80,8 @@ type TrafficRelayHandler struct {
 	drainComplete      chan struct{}
 	openWebSockets     map[*terminalResponseObserver]struct{}
 	closingWebSockets  bool
+	stopping           chan struct{}
+	onFailure          func()
 }
 
 // CreateTrafficRelayHandler leaves listener ownership and signal handling with the command layer.
@@ -122,6 +125,7 @@ func CreateTrafficRelayHandler(options RelayHandlerOptions) (*TrafficRelayHandle
 		upstreamTransport:    upstreamTransport,
 		drainComplete:        make(chan struct{}),
 		openWebSockets:       make(map[*terminalResponseObserver]struct{}),
+		stopping:             make(chan struct{}), onFailure: options.OnFailure,
 	}
 	relayHandler.reverseProxy = relayHandler.createBytePreservingReverseProxy()
 	relayHandler.authenticatedHandler = clientcapability.RequirePathPrefix(options.ClientCapability, http.HandlerFunc(relayHandler.serveAuthenticatedTraffic))
@@ -235,6 +239,11 @@ func (handler *TrafficRelayHandler) serveAuthenticatedTraffic(response http.Resp
 			case <-request.Context().Done():
 				log.Printf("%s stopped waiting for an account after %s: the client closed the request", describeModelRequest(taskID, client, ""), time.Since(waitStarted).Round(time.Second))
 				return
+			case <-handler.stopping:
+				response.Header().Set("Connection", "close")
+				response.Header().Set("Retry-After", "1")
+				http.Error(response, "proxy updating; retry request", http.StatusServiceUnavailable)
+				return
 			case <-recheck.C:
 				routeDecision, err = handler.taskRouter.RouteForProviderTask(taskID, workKind, modelSlug, provider, parentTaskID)
 			}
@@ -244,6 +253,9 @@ func (handler *TrafficRelayHandler) serveAuthenticatedTraffic(response http.Resp
 		}
 	}
 	if err != nil {
+		if request.Context().Err() == nil && handler.onFailure != nil {
+			handler.onFailure()
+		}
 		log.Printf("%s could not be routed: %v", describeModelRequest(taskID, client, ""), err)
 		http.Error(response, "codex-switch could not choose an account for this request; see the codex-switch proxy log", http.StatusServiceUnavailable)
 		return
@@ -383,6 +395,9 @@ func (handler *TrafficRelayHandler) createBytePreservingReverseProxy() *httputil
 					log.Printf("%s: the client closed the %s request before the provider answered", subject, routedRequest.modelSlug)
 				}
 			default:
+				if handler.onFailure != nil {
+					handler.onFailure()
+				}
 				log.Printf("%s: the upstream request failed: %v; the proxy did not resend this attempt", subject, err)
 			}
 			http.Error(response, "upstream service unavailable", http.StatusBadGateway)

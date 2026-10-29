@@ -62,7 +62,7 @@ running_matching_app=$(
 }
 
 version=${CODEX_SWITCH_VERSION:-0.1.0}
-build_number=${CODEX_SWITCH_BUILD:-1}
+build_number=${CODEX_SWITCH_BUILD:-$(git -C "$repo_dir" rev-list --count HEAD)}
 identity=${CODEX_SWITCH_SIGN_IDENTITY:--}
 feed_url=${CODEX_SWITCH_FEED_URL:-https://github.com/joshp123/codex-switch/releases/latest/download/appcast.xml}
 public_key=${CODEX_SWITCH_SPARKLE_PUBLIC_KEY:-}
@@ -97,7 +97,7 @@ resource_bundle="$bin_dir/CodexSwitchMenu_CodexSwitchMenu.bundle"
 
 sparkle_framework="$swift_scratch/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
 /usr/bin/ditto "$sparkle_framework" "$staged_app/Contents/Frameworks/Sparkle.framework"
-"$repo_dir/scripts/dev/build-proxy" "$staged_app/Contents/Helpers/codex-switch"
+CODEX_SWITCH_BUILD="$build_number" "$repo_dir/scripts/dev/build-proxy" "$staged_app/Contents/Helpers/codex-switch"
 for script in deploy.sh installation.sh install-proxy.sh uninstall.sh; do
     /bin/cp "$repo_dir/deploy/$script" "$staged_app/Contents/Resources/deploy/"
 done

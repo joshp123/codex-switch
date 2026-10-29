@@ -11,8 +11,10 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -34,6 +36,17 @@ const deployStatusEndpoint = "/codex-switch/deploy-status"
 // Explicit stamps support build tools that cannot discover Git worktrees.
 var sourceRevision string
 var sourceModified string
+var buildNumber string
+
+func buildNumberValue() int {
+	n, _ := strconv.Atoi(buildNumber)
+	return n
+}
+
+type deploymentActivity struct {
+	failures      atomic.Int64
+	lastCompleted atomic.Int64
+}
 
 // serveRelay runs the recovered serving path: SQLite-backed pins, the one
 // routing rule, and the byte-preserving relay. The command layer owns the
@@ -104,6 +117,7 @@ func serveRelay(tcpListenAddress string, checkProviders bool) {
 		log.Fatal(err)
 	}
 	snapshots := newMenuSnapshots(dataDir(), taskRouter, storeDatabase, usageLedger, codexReader)
+	activity := &deploymentActivity{}
 	relayHandler, err := relay.CreateTrafficRelayHandler(relay.RelayHandlerOptions{
 		UpstreamOrigin:       upstreamOrigin,
 		ClaudeUpstreamOrigin: claudeUpstreamOrigin,
@@ -112,14 +126,15 @@ func serveRelay(tcpListenAddress string, checkProviders bool) {
 		CacheAffinity:        storeDatabase,
 		ClientCapability:     capability,
 		TaskRouter:           taskRouter,
-		CompletionLedger:     composeAfterCompletedResponse{ledger: storeDatabase, snapshots: snapshots},
+		CompletionLedger:     composeAfterCompletedResponse{ledger: storeDatabase, snapshots: snapshots, activity: activity},
 		RequestCounters:      storeDatabase,
+		OnFailure:            func() { activity.failures.Add(1) },
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	forwardProxy, err := relay.CreateClaudeForwardProxy(dataDir(), capability, relayHandler, snapshots.serveOrRelay(capability, profileOrRelay(capability, deployStatusOrRelay(capability, relayHandler))))
+	forwardProxy, err := relay.CreateClaudeForwardProxy(dataDir(), capability, relayHandler, snapshots.serveOrRelay(capability, profileOrRelay(capability, deployStatusOrRelay(capability, relayHandler, activity))))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -161,15 +176,17 @@ func serveRelay(tcpListenAddress string, checkProviders bool) {
 		// Start the grace period before Shutdown waits for direct API work.
 		// Model responses have no deadline; other Claude connections do.
 		drainStarted := time.Now()
+		drainContext, cancelDrain := context.WithTimeout(context.Background(), 25*time.Minute)
+		defer cancelDrain()
 		log.Printf("process %d stopping: it accepts no new requests and finishes model work in progress", os.Getpid())
 		snapshots.StopWaiting()
 		relayHandler.CloseWebSocketsOnceIdle()
 		forwardProxy.DrainConnections()
-		if err := server.Shutdown(context.Background()); err != nil {
+		if err := server.Shutdown(drainContext); err != nil {
 			log.Printf("process %d: closing the listener failed: %v", os.Getpid(), err)
 		}
 		relayHandler.BeginRelayDrain()
-		if err := relayHandler.WaitForRelayDrain(context.Background()); err != nil {
+		if err := relayHandler.WaitForRelayDrain(drainContext); err != nil {
 			log.Printf("process %d: waiting for admitted connections failed: %v", os.Getpid(), err)
 		}
 		log.Printf("process %d stopped after %s: all admitted model work finished and connections closed", os.Getpid(), time.Since(drainStarted).Round(time.Second))
@@ -183,19 +200,27 @@ func serveRelay(tcpListenAddress string, checkProviders bool) {
 // deployStatusResponse identifies the running generation. Revision and pid
 // are deploy-time evidence, deliberately absent from the menu contract.
 type deployStatusResponse struct {
-	Revision string `json:"revision"`
-	Dirty    bool   `json:"dirty"`
-	PID      int    `json:"pid"`
+	Revision      string     `json:"revision"`
+	Dirty         bool       `json:"dirty"`
+	PID           int        `json:"pid"`
+	Build         int        `json:"build"`
+	Failures      int64      `json:"failures"`
+	LastCompleted *time.Time `json:"last_completed"`
 }
 
-func deployStatusOrRelay(capability string, relayHandler http.Handler) http.Handler {
+func deployStatusOrRelay(capability string, relayHandler http.Handler, activity *deploymentActivity) http.Handler {
 	statusPath := clientcapability.PathPrefix(capability) + deployStatusEndpoint
 	predecessorStatusPath := clientcapability.PathPrefix(capability) + "/status"
 	revision, dirty := buildRevision()
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Method == http.MethodGet && request.URL.Path == statusPath {
 			writer.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(writer).Encode(deployStatusResponse{Revision: revision, Dirty: dirty, PID: os.Getpid()})
+			var lastCompleted *time.Time
+			if seconds := activity.lastCompleted.Load(); seconds != 0 {
+				t := time.Unix(0, seconds).UTC()
+				lastCompleted = &t
+			}
+			_ = json.NewEncoder(writer).Encode(deployStatusResponse{Revision: revision, Dirty: dirty, PID: os.Getpid(), Build: buildNumberValue(), Failures: activity.failures.Load(), LastCompleted: lastCompleted})
 			return
 		}
 		// Reject the retired control route without forwarding it to OpenAI.

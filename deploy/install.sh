@@ -15,8 +15,15 @@ trap '/usr/bin/trash "$build"' EXIT
 "$repository/macos/CodexSwitchMenu/package_app.sh" --live --destination "$build/CodexSwitchMenu.app"
 
 "$repository/deploy/install-proxy.sh" "$build/CodexSwitchMenu.app/Contents/Helpers/codex-switch"
-binary=$(/usr/bin/plutil -extract ProgramArguments.0 raw "$plist")
-listen=$(/usr/bin/plutil -extract ProgramArguments.3 raw "$plist")
+binary=$(/bin/realpath "$command_link")
+case "$binary" in
+  *.a) active_slot=a ;;
+  *.b) active_slot=b ;;
+  *) echo 'could not identify the serving proxy slot' >&2; exit 1 ;;
+esac
+active_plist="$HOME/Library/LaunchAgents/$label.$active_slot.plist"
+data=$(/usr/bin/plutil -extract EnvironmentVariables.CODEX_SWITCH_DATA_DIR raw "$active_plist")
+listen=$(/usr/bin/plutil -extract ProgramArguments.3 raw "$active_plist")
 config_line=$("$binary" print-codex-config --listen "$listen")
 
 quit_menu_app

@@ -44,6 +44,7 @@ fi
 [[ "$(plutil -extract SUEnableAutomaticChecks raw -o - "$info")" == true ]]
 [[ "$(plutil -extract CSManagesProxy raw -o - "$info")" == true ]]
 [[ "$("$proxy" print-revision)" == "$revision" ]] || fail "bundled proxy revision differs from app revision"
+[[ "$("$proxy" print-build)" == "$(<"$candidate/BUILD")" ]] || fail "bundled proxy build differs from app build"
 feed_url="$(plutil -extract SUFeedURL raw -o - "$info")"
 valid_feed_url "$feed_url" || fail "invalid update feed"
 if [[ "$allow_loopback_feed" -eq 0 ]]; then

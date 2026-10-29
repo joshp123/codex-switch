@@ -106,9 +106,13 @@ func newMenuSnapshots(dataDirectory string, router *routing.TaskRouter, database
 type composeAfterCompletedResponse struct {
 	ledger    relay.CompletionLedger
 	snapshots *menuSnapshots
+	activity  *deploymentActivity
 }
 
 func (recorder composeAfterCompletedResponse) RecordCompletedResponse(record store.CompletedResponseRecord) error {
+	if recorder.activity != nil {
+		recorder.activity.lastCompleted.Store(time.Now().UnixNano())
+	}
 	if err := recorder.ledger.RecordCompletedResponse(record); err != nil {
 		return err
 	}

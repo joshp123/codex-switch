@@ -5,6 +5,12 @@ set -eu
 
 repository=$(CDPATH='' cd -P "$(dirname "$0")/.." && pwd)
 . "$repository/deploy/installation.sh"
+for installed_plist in "$plist" "$HOME/Library/LaunchAgents/$label.a.plist" "$HOME/Library/LaunchAgents/$label.b.plist"; do
+  if [ -f "$installed_plist" ]; then
+    data=$(/usr/bin/plutil -extract EnvironmentVariables.CODEX_SWITCH_DATA_DIR raw "$installed_plist")
+    break
+  fi
+done
 
 # Codex and Pi would fail every request once the proxy is gone.
 if [ -f "$data/client-capability" ] &&
@@ -14,9 +20,11 @@ if [ -f "$data/client-capability" ] &&
 fi
 
 # The proxy finishes the requests it has already accepted, then exits.
-/bin/launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+for installed_label in "$label" "$label.a" "$label.b"; do
+  /bin/launchctl bootout "gui/$(id -u)/$installed_label" 2>/dev/null || true
+done
 quit_menu_app
-for installed in "$plist" "$(dirname "$binary")" "$command_link" "$app"; do
+for installed in "$plist" "$HOME/Library/LaunchAgents/$label.a.plist" "$HOME/Library/LaunchAgents/$label.b.plist" "$(dirname "$binary")" "$command_link" "$app" "$data/serving-slot" "$data/switch-started" "$data/previous-binary"; do
   if [ -e "$installed" ] || [ -L "$installed" ]; then
     /usr/bin/trash "$installed"
   fi

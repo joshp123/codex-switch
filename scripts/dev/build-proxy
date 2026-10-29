@@ -4,9 +4,10 @@ repository_root=$(CDPATH='' cd -P "$(dirname "$0")/../.." && pwd)
 cd "$repository_root"
 output=${1:?output path required}
 revision=$(git rev-parse HEAD)
+build_number=${CODEX_SWITCH_BUILD:-$(git rev-list --count HEAD)}
 modified=false
 [ -z "$(git status --porcelain)" ] || modified=true
-go build -ldflags "-X main.sourceRevision=$revision -X main.sourceModified=$modified" -o "$output" ./cmd/codex-switch
+go build -ldflags "-X main.sourceRevision=$revision -X main.sourceModified=$modified -X main.buildNumber=$build_number" -o "$output" ./cmd/codex-switch
 # macOS pins a login item's ad hoc binary by its exact hash, so launchd refuses
 # the first restart after an update. A Developer ID signature, when this Mac has
 # one, keeps the same identity across builds.

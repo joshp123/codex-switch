@@ -20,6 +20,9 @@ const updateWebSocketQuietPeriod = time.Second
 // request on a new connection, which reaches the new process.
 func (handler *TrafficRelayHandler) CloseWebSocketsOnceIdle() {
 	handler.drainMutex.Lock()
+	if !handler.closingWebSockets {
+		close(handler.stopping)
+	}
 	handler.closingWebSockets = true
 	openWebSockets := make([]*terminalResponseObserver, 0, len(handler.openWebSockets))
 	for observer := range handler.openWebSockets {

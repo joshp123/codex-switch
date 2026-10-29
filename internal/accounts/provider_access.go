@@ -49,6 +49,9 @@ func (monitor *Monitor) CheckProviderAccess(ctx context.Context) error {
 					}
 				}
 			}
+			if requiresSignIn(err) {
+				err = nil
+			}
 			if err != nil {
 				err = fmt.Errorf("%s: %w", account.DisplayName, err)
 			}

@@ -34,6 +34,8 @@ func main() {
 		printCodexConfigCommand(args)
 	case "print-claude-config":
 		printClaudeConfigCommand(args)
+	case "print-build":
+		fmt.Println(buildNumberValue())
 	case "print-revision":
 		printBinaryRevision(args)
 	case "start-detached":
@@ -48,7 +50,7 @@ func selectCommand(args []string) (string, []string) {
 		return "status", args
 	}
 	switch args[0] {
-	case "login", "accounts", "remove", "reserve", "serve", "status", "print-codex-config", "print-claude-config", "print-revision", "start-detached":
+	case "login", "accounts", "remove", "reserve", "serve", "status", "print-codex-config", "print-claude-config", "print-revision", "print-build", "start-detached":
 		return args[0], args[1:]
 	default:
 		return "status", args

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -32,8 +33,31 @@ func status(args []string) {
 	if err != nil {
 		log.Fatalf("cannot read current Codex Switch status: %v", err)
 	}
+	writeDeploymentStatus(os.Stdout, dataDir())
 	writeCurrentStatus(os.Stdout, snapshot)
 	fmt.Printf("\nProxy log: %s\n", proxyLogPath(dataDir()))
+}
+
+func writeDeploymentStatus(output io.Writer, dataDirectory string) {
+	published, err := os.ReadFile(filepath.Join(dataDirectory, menuSnapshotURLFilename))
+	if err == nil {
+		u, parseErr := url.Parse(strings.TrimSpace(string(published)))
+		if parseErr == nil && u.Scheme == "http" && validateLocalListenAddress(u.Host) == nil {
+			u.Path = strings.TrimSuffix(u.Path, menuSnapshotEndpoint) + deployStatusEndpoint
+			u.RawQuery = ""
+			client := http.Client{Timeout: 5 * time.Second}
+			if response, err := client.Get(u.String()); err == nil {
+				var status deployStatusResponse
+				if response.StatusCode == http.StatusOK && json.NewDecoder(io.LimitReader(response.Body, 4096)).Decode(&status) == nil {
+					fmt.Fprintf(output, "Proxy build: %d\n", status.Build)
+				}
+				response.Body.Close()
+			}
+		}
+	}
+	if skipped, err := os.ReadFile(filepath.Join(dataDirectory, "skipped-builds")); err == nil && strings.TrimSpace(string(skipped)) != "" {
+		fmt.Fprintf(output, "Skipped builds: %s\n", strings.Join(strings.Fields(string(skipped)), ", "))
+	}
 }
 
 // fetchMenuSnapshot reads the snapshot the serving proxy last composed.
