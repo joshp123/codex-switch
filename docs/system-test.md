@@ -8,29 +8,31 @@ Run this before a live deploy:
 scripts/dev/system-test
 ```
 
-It takes at least 40 minutes: it keeps a tunnel transferring until the 30-minute update limit and runs further five-minute proofs. It builds the proxy from this working tree, runs
-the account pool in isolation, and prints what the system did for each outcome:
+It takes at least 40 minutes. It keeps a tunnel transferring until the
+30-minute update limit, then runs further five-minute proofs. It builds the
+proxy from this working tree, runs the account pool in isolation, and prints
+what the system did for each outcome:
 
-0. An update waits for model work before it switches.
-1. New Codex tasks and Pi sessions go to the account with the most weekly
+1. An update waits for model work before it switches.
+2. New Codex tasks and Pi sessions go to the account with the most weekly
    allowance left, and stay there when another account takes the lead.
-2. Claude Code gets a reply through the HTTPS proxy, on the Claude account,
+3. Claude Code gets a reply through the HTTPS proxy, on the Claude account,
    recorded once with its tokens.
-3. A request without a task ID is served.
-4. When a task's account runs out, its next turn moves to another account. No
+4. A request without a task ID is served.
+5. When a task's account runs out, its next turn moves to another account. No
    model work is replayed, no tool effect repeats, and Codex shows no error.
-5. With every account out of allowance, a running goal continues by itself
+6. With every account out of allowance, a running goal continues by itself
    when one account comes back.
-6. A blue-green update adopts the old single-job installation during work.
+7. A blue-green update adopts the old single-job installation during work.
    Responses in flight over WebSocket and HTTP finish on the old process,
-   while new work starts on the new one. A silent Claude tunnel and a transferring tunnel stay open until the
-   30-minute limit.
-7. Provider errors and client cancellations do not count against a candidate.
+   while new work starts on the new one. An idle HTTP connection closes;
+   silent and transferring Claude tunnels stay open until the 30-minute limit.
+8. Provider errors and client cancellations do not count against a candidate.
    A local routing failure on an open WebSocket and malformed upstream responses
    do count: the candidate steps aside and status shows the skipped build.
-8. Two releases queued during a switch converge on the newest, with at most
+9. Two releases queued during a switch converge on the newest, with at most
    two proxy processes and no downgrade.
-9. Each completed response is recorded once, with its account, task and tokens.
+10. Each completed response is recorded once, with its account, task and tokens.
 
 The command exits 0 only if every outcome held and nothing is left running.
 
@@ -60,7 +62,9 @@ so the test can see that none was sent twice. Its control file simulates what a
 test cannot wait for: a weekly allowance level, an account that runs out after
 a given number of requests, refused WebSockets, and responses held mid-stream
 for one client. It can also send malformed HTTP responses to test a failed
-candidate. The proxy binaries use the same source and distinct build numbers.
+candidate. The test also temporarily renames a table in the isolated database
+so the next request on an open WebSocket hits a local routing failure. The
+proxy binaries use the same source and distinct build numbers.
 
 ## Safety
 

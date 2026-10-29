@@ -334,6 +334,19 @@ def update_during_work_finishes_on_the_old_process(system):
     if sorted(event['method'] for event in held) != ['GET', 'POST'] or not held_on_old <= rig.gateway_connections(old):
         raise Failure(f'Expected one WebSocket and one HTTP response held on the serving process {old}; held {held}.')
 
+    # Preserve a recognisable account identity but remove its isolated access
+    # token, as happens when that account needs signing in again.
+    signed_out = rig.RUN / 'data/account-9999'
+    signed_out.mkdir()
+    auth = rig.json.loads((rig.RUN / 'data' / system.accounts[0] / 'auth.json').read_text())
+    auth['tokens']['access_token'] = ''
+    auth['tokens']['account_id'] = 'signed-out-test-account'
+    token_parts = auth['tokens']['id_token'].split('.')
+    claims = rig.json.loads(rig.base64.urlsafe_b64decode(token_parts[1] + '==='))
+    claims.setdefault('https://api.openai.com/auth', {})['chatgpt_user_id'] = 'signed-out-test-user'
+    token_parts[1] = rig.base64.urlsafe_b64encode(rig.json.dumps(claims).encode()).decode().rstrip('=')
+    auth['tokens']['id_token'] = '.'.join(token_parts)
+    (signed_out / 'auth.json').write_text(rig.json.dumps(auth))
     tunnels = rig.TunnelPair()
     installer_environment = dict(os.environ, HOME=str(rig.RUN / 'home'), CODEX_SWITCH_LAUNCHD_LABEL=rig.LABEL,
                                  CODEX_SWITCH_LISTEN=rig.listen_address())
@@ -360,22 +373,26 @@ def update_during_work_finishes_on_the_old_process(system):
         rig.wait_for(lambda: f'process {old} stopping' in rig.proxy_log(), 'the old slot to begin retirement', timeout=400)
         tunnels.check_idle_open()
         rig.wait_for(tunnels.idle_http_closed, 'the old idle HTTP keep-alive to close', timeout=30)
-        while update.poll() is None:
+        while rig.process_alive(old):
             if tunnels.error and time.time() - switch_started < 1800:
                 raise Failure(f'The transferring tunnel was cut before the limit: {tunnels.error}')
             if tunnels.idle_closed() and time.time() - switch_started < 1800:
                 raise Failure('The silent tunnel was cut before the limit.')
-            if time.time() - switch_started > 1805:
+            if time.time() - switch_started > 1801:
                 raise Failure('The old proxy did not retire within 30 minutes.')
-            time.sleep(1)
+            time.sleep(0.1)
         completed_after = time.time() - switch_started
         if completed_after < 1790:
             raise Failure(f'The old proxy retired after {completed_after:.0f} seconds while both tunnels were open.')
     finally:
         tunnels.close()
-    exit_code = update.returncode
+    try:
+        exit_code = update.wait(timeout=120)
+    except rig.subprocess.TimeoutExpired:
+        raise Failure('The installer did not finish cleanup after the old proxy exited.')
     if exit_code:
         raise Failure(f'The update command failed: {rig.read("logs/update.err")[-400:]}')
+    signed_out.rename(rig.RUN / 'data/reauth-account')
     final = rig.deploy_status()['pid']
     errors = goal.finish() + websocket_task.errors + http_task.errors + new_task.errors
     system.record_codex_task('goal across the update', goal.thread)
@@ -386,21 +403,22 @@ def update_during_work_finishes_on_the_old_process(system):
     replies = (websocket_task.reply.lower(), http_task.reply.lower(), new_task.reply.lower())
     if canceled or 'socket' not in replies[0] or 'stream' not in replies[1] or 'new' not in replies[2]:
         raise Failure(f'{len(canceled)} held responses were cancelled; Codex replied {replies}; see process {old} in data/proxy.log.')
-    if final != new or rig.process_alive(old) or completed_after > 1805:
+    if final != new or rig.process_alive(old) or completed_after > 1801:
         raise Failure(f'After the update, process {final} serves; expected {new}, old {old} gone within 30 minutes.')
     loaded = [label for label in (rig.LABEL, rig.LABEL + '.a', rig.LABEL + '.b')
               if rig.subprocess.run(['launchctl', 'print', f'gui/{os.getuid()}/{label}'], capture_output=True).returncode == 0]
     if len(loaded) != 1 or loaded[0] == rig.LABEL:
         raise Failure(f'Expected one new slot after adopting the legacy job, got {loaded}.')
     same_bundle = rig.start_client(update_command, 'same-bundle', env=installer_environment)
-    if same_bundle.wait(timeout=30) or rig.deploy_status()['pid'] != final:
+    if same_bundle.wait(timeout=120) or rig.deploy_status()['pid'] != final:
         raise Failure(f'Reopening the same bundle restarted the proxy or failed: {rig.read("logs/same-bundle.err")[-400:]}')
     for label, thread in (('A held task', websocket_task.thread), ('A held task', http_task.thread), ('The new task', new_task.thread), ('The goal', goal.thread)):
         require_no_replay(label, rig.forwarded_requests(thread=thread))
     if errors:
         raise Failure(f'The update completed, but Codex showed {describe_errors(errors)}.')
     return ('The legacy launchd job was adopted while one WebSocket and one HTTP response were mid-stream. New work went to the\n'
-            'new slot; both responses finished on the old process, which exited within 30 minutes. Only the new slot remained loaded.\n'
+            'new slot despite an account needing sign-in; both responses finished on the old process, which exited within 30 minutes.\n'
+            'Only the new slot remained loaded.\n'
             'The idle HTTP connection closed. A silent Claude tunnel and a transferring tunnel stayed open until the deadline.\n'
             'A goal running a tool across the update finished with its effect run once. Nothing was replayed and Codex showed no error.')
 
