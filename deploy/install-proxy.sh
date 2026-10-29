@@ -63,9 +63,13 @@ slot_plist() { printf '%s/Library/LaunchAgents/%s.%s.plist' "$HOME" "$label" "$1
 slot_binary() { printf '%s.%s' "$binary" "$1"; }
 stop_job() {
   stop_label=$1
+  stop_binary=$2
+  job_loaded "$stop_label" || return 0
+  # Keep launchd supervising the draining process, but prevent KeepAlive from
+  # starting another copy as soon as it exits.
+  if [ -f "$stop_binary" ]; then /bin/mv "$stop_binary" "$stop_binary.draining.$$"; fi
   stop_pid=$(job_pid "$stop_label")
-  /bin/launchctl bootout "$domain/$stop_label" 2>/dev/null &
-  stop_command=$!
+  if [ -n "$stop_pid" ]; then kill -TERM "$stop_pid" 2>/dev/null || true; fi
   while [ -n "$stop_pid" ] && kill -0 "$stop_pid" 2>/dev/null; do
     if [ $(($(/bin/date +%s) - switch_started)) -ge 1800 ]; then
       kill -KILL "$stop_pid" 2>/dev/null || true
@@ -73,7 +77,10 @@ stop_job() {
     fi
     sleep 1
   done
-  wait "$stop_command" || true
+  /bin/launchctl bootout "$domain/$stop_label" 2>/dev/null || true
+  for drained_binary in "$stop_binary".draining.*; do
+    [ ! -e "$drained_binary" ] || /usr/bin/trash "$drained_binary"
+  done
 }
 # Old installations are kept running in their original job during adoption.
 if [ -f "$state" ]; then
@@ -100,12 +107,14 @@ fi
 switch_started=$(cat "$data/switch-started" 2>/dev/null || /bin/date +%s)
 for slot in a b; do
   [ "$slot" = "$active" ] && continue
-  stop_job "$label.$slot"
+  stop_job "$label.$slot" "$(slot_binary "$slot")"
   unused_plist=$(slot_plist "$slot")
   [ ! -e "$unused_plist" ] || /usr/bin/trash "$unused_plist"
 done
 if [ "$active" != legacy ] && [ "$active" != none ]; then
-  stop_job "$label"
+  legacy_binary=$binary
+  if [ -f "$plist" ]; then legacy_binary=$(/usr/bin/plutil -extract ProgramArguments.0 raw "$plist"); fi
+  stop_job "$label" "$legacy_binary"
   [ ! -e "$plist" ] || /usr/bin/trash "$plist"
 fi
 [ ! -e "$data/switch-started" ] || /usr/bin/trash "$data/switch-started"
@@ -222,7 +231,7 @@ printf '%s\n' "$switch_started" > "$data/switch-started"
 readiness_result=0
 wait_for_job "$next_label" true || readiness_result=$?
 if [ "$readiness_result" -ne 0 ]; then
-  stop_job "$next_label"
+  stop_job "$next_label" "$next_binary"
   /usr/bin/trash "$data/switch-started"
   if [ "$readiness_result" -eq 2 ] && [ "$active" != none ] && [ "$manual" = false ]; then printf '%s\n' "$chosen_build" >> "$data/skipped-builds"; echo "build $chosen_build was skipped"; exit 0; fi
   exit 1
@@ -241,7 +250,7 @@ if [ "$active" != none ]; then
     if ! kill -0 "$candidate_pid" 2>/dev/null || { [ -n "$current_pid" ] && [ "$current_pid" != "$candidate_pid" ]; } || [ "$failures" -ge 3 ]; then
       [ "$manual" = true ] || printf '%s\n' "$chosen_build" >> "$data/skipped-builds"
       /bin/ln -sf "$active_binary" "$command_link"
-      stop_job "$next_label"
+      stop_job "$next_label" "$next_binary"
       /usr/bin/trash "$data/switch-started"
       if [ "$manual" = true ]; then echo 'previous proxy failed; current proxy remains serving' >&2; exit 1; fi
       echo "build $chosen_build was skipped; the previous proxy remains serving"
@@ -249,7 +258,7 @@ if [ "$active" != none ]; then
     fi
     if [ "$(status_field "$status" pid || true)" != "$candidate_pid" ]; then
       /bin/ln -sf "$active_binary" "$command_link"
-      stop_job "$next_label"
+      stop_job "$next_label" "$next_binary"
       /usr/bin/trash "$data/switch-started"
       echo "could not check the candidate; try again" >&2
       exit 1
@@ -267,8 +276,8 @@ if [ "$manual" = true ] && [ "${active_build:-0}" -gt 0 ] && [ "$active_build" -
   printf '%s\n' "$active_build" >> "$data/skipped-builds"
 fi
 if [ "$active" != none ]; then
-  # bootout signals the old service; it drains rather than accepting new work.
-  stop_job "$active_label"
+  # Finish admitted work before removing the old launchd job.
+  stop_job "$active_label" "$active_binary"
   [ ! -e "$active_plist" ] || /usr/bin/trash "$active_plist"
 fi
 /usr/bin/trash "$data/switch-started"
