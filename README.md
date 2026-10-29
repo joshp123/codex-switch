@@ -269,20 +269,21 @@ clear both.
 
 ## How updates work
 
-The app updates itself. Sparkle downloads each signed, notarised release in the
-background and installs it when the app next quits; **Check for Updates…** in its
-Options menu does it now. When the app reopens, it compares its bundled proxy
-with the serving version and hands over through the same blue-green deployment
-used by source installs.
+The app checks for signed, notarised releases every hour and installs them as
+they arrive. The proxy waits until it has completed a model reply in the last
+two minutes before switching. Updates run one at a time, and the newest build
+wins.
 
-A new proxy process starts on the same port. Before it takes any requests, it
-reads every account's allowance through the same connections your traffic uses;
-if it can't, it exits and the old process carries on. Otherwise it takes all new
-requests. The old process finishes the model work it has already accepted;
-other connections get a fixed grace period. Launchd then runs the new build.
-Running agents carry on. A failed handover is logged in
-`~/Library/Application Support/codex-switch/proxy-install.log` and retried while
-the app is open.
+The new proxy checks the signed-in accounts, then takes new connections. The
+old proxy keeps its connections and stays ready for five minutes. If the new
+proxy fails the check, crashes or fails three requests during that time, it
+steps aside and the old proxy continues. `codex-switch status` shows skipped
+builds. Otherwise the old proxy stops accepting connections and finishes its
+work. Idle connections close; any remaining connections close 30 minutes after
+the switch began.
+
+To return to the previous proxy by hand, run `deploy/deploy.sh back` from a
+checkout or from the app's `Contents/Resources/deploy` directory.
 
 For a source install, update the checkout and run `deploy/install.sh` again.
 

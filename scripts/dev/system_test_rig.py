@@ -13,6 +13,7 @@ import re
 import shutil
 import signal
 import socket
+import socketserver
 import sqlite3
 import subprocess
 import threading
@@ -33,7 +34,7 @@ CLAUDE = str(CLAUDE_VERSIONS[-1]) if CLAUDE_VERSIONS else shutil.which('claude')
 CLAUDE_ACCOUNT = None
 CLAUDE_SKIP_REASON = 'no Claude account is signed in' if CLAUDE else 'Claude Code is not installed'
 MODEL = 'gpt-6-luna'
-LABEL = 'dev.codex-switch.system-test'
+LABEL = 'dev.codex-switch.system-test-terra'
 # Pi has no ChatGPT login of its own here: it needs a JWT-shaped key with a
 # chatgpt_account_id claim. The proxy replaces the credentials it carries.
 PI_PLACEHOLDER_KEY = 'eyJhbGciOiJub25lIn0.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiY29kZXgtc3dpdGNoIn19.codex-switch'
@@ -93,13 +94,15 @@ def prepare():
 
 
 def build():
-    """Builds the proxy and the gateway. The update installs a copy of the same proxy build."""
-    for command in (['scripts/dev/build-proxy', str(RUN / 'codex-switch')],
-                    ['go', 'build', '-o', str(RUN / 'gateway'), './scripts/dev/system-test-gateway']):
-        built = subprocess.run(['devenv', 'shell', '--', *command], cwd=REPO, capture_output=True, text=True)
+    """Build the same source with distinct release numbers and the traffic gateway."""
+    base = int(subprocess.check_output(['git', 'rev-list', '--count', 'HEAD'], cwd=REPO, text=True))
+    builds = [(str(RUN / name), base + number) for number, name in enumerate(('codex-switch', 'candidate', 'candidate-2', 'candidate-3', 'candidate-4', 'candidate-5'))]
+    commands = [(['scripts/dev/build-proxy', path], dict(os.environ, CODEX_SWITCH_BUILD=str(number))) for path, number in builds]
+    commands.append((['go', 'build', '-o', str(RUN / 'gateway'), './scripts/dev/system-test-gateway'], os.environ))
+    for command, environment in commands:
+        built = subprocess.run(['devenv', 'shell', '--', *command], cwd=REPO, env=environment, capture_output=True, text=True)
         if built.returncode:
             raise Failure(f'Build failed: {" ".join(command)}\n{built.stderr[-1500:]}')
-    shutil.copy2(RUN / 'codex-switch', RUN / 'candidate')
 
 
 def start_gateway():
@@ -126,7 +129,8 @@ def start_proxy():
         'StandardOutPath': str(RUN / 'logs/launchd.log'),
         'StandardErrorPath': str(RUN / 'logs/launchd.log'),
     }))
-    subprocess.run(['launchctl', 'bootout', launchd_target()], capture_output=True)
+    for label in (LABEL, LABEL + '.a', LABEL + '.b'):
+        subprocess.run(['launchctl', 'bootout', f'gui/{os.getuid()}/{label}'], capture_output=True)
     subprocess.run(['launchctl', 'bootstrap', f'gui/{os.getuid()}', str(plist)], check=True)
     wait_for(deploy_status, 'the proxy to serve (see data/proxy.log)', timeout=120)
     base = f'http://{listen_address()}/client/{read("data/client-capability").strip()}/backend-api/codex'
@@ -159,7 +163,8 @@ def clean_up():
     for process in started_processes:
         if process.args[0] != gateway:
             stop_process_group(process)
-    subprocess.run(['launchctl', 'bootout', launchd_target()], capture_output=True)
+    for label in (LABEL, LABEL + '.a', LABEL + '.b'):
+        subprocess.run(['launchctl', 'bootout', f'gui/{os.getuid()}/{label}'], capture_output=True)
     for pid in run_processes(exclude=gateway):
         try:
             os.kill(pid, signal.SIGTERM)
@@ -169,8 +174,9 @@ def clean_up():
     for process in started_processes:
         stop_process_group(process)
     leftovers = [f'process {pid}' for pid in run_processes()]
-    if subprocess.run(['launchctl', 'print', launchd_target()], capture_output=True).returncode == 0:
-        leftovers.append('launchd job ' + LABEL)
+    for label in (LABEL, LABEL + '.a', LABEL + '.b'):
+        if subprocess.run(['launchctl', 'print', f'gui/{os.getuid()}/{label}'], capture_output=True).returncode == 0:
+            leftovers.append('launchd job ' + label)
     return leftovers
 
 
@@ -353,6 +359,68 @@ class Goal:
         self.process.stdin.close()
         self.process.wait(timeout=30)
         return [message for message in self.notifications if message.get('method') == 'error']
+
+
+class TunnelPair:
+    """Two CONNECT tunnels to an echo server, one transferring and one idle."""
+    def __init__(self):
+        class Echo(socketserver.BaseRequestHandler):
+            def handle(self):
+                while data := self.request.recv(4096):
+                    self.request.sendall(data)
+        self.server = socketserver.ThreadingTCPServer(('127.0.0.1', 0), Echo)
+        self.server.daemon_threads = True
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        target = f'127.0.0.1:{self.server.server_address[1]}'
+        auth = base64.b64encode(('codex-switch:' + read('data/client-capability').strip()).encode()).decode()
+        self.sockets = []
+        host, port = listen_address().split(':')
+        for _ in range(2):
+            connection = socket.create_connection((host, int(port)))
+            connection.sendall(f'CONNECT {target} HTTP/1.1\r\nHost: {target}\r\nProxy-Authorization: Basic {auth}\r\n\r\n'.encode())
+            response = b''
+            while not response.endswith(b'\r\n\r\n'):
+                part = connection.recv(1)
+                if not part:
+                    raise Failure('The proxy closed the CONNECT handshake.')
+                response += part
+            if not response.startswith(b'HTTP/1.1 200'):
+                raise Failure(f'The proxy rejected a CONNECT tunnel: {response!r}')
+            self.sockets.append(connection)
+        self.stopped, self.error = threading.Event(), None
+        threading.Thread(target=self.transfer, daemon=True).start()
+
+    def transfer(self):
+        connection = self.sockets[0]
+        connection.settimeout(10)
+        try:
+            while not self.stopped.is_set():
+                connection.sendall(b'work')
+                if connection.recv(4) != b'work':
+                    raise OSError('tunnel closed during transfer')
+                self.stopped.wait(5)
+        except OSError as error:
+            self.error = error
+
+    def check_idle_closed(self):
+        idle = self.sockets[1]
+        idle.settimeout(90)
+        try:
+            if idle.recv(1) != b'':
+                raise Failure('Idle tunnel returned unexpected data instead of closing.')
+        except (ConnectionResetError, BrokenPipeError):
+            pass
+        except socket.timeout:
+            raise Failure('The idle tunnel was not closed during retirement.')
+        if self.error:
+            raise Failure(f'The transferring tunnel was cut: {self.error}')
+
+    def close(self):
+        self.stopped.set()
+        for connection in self.sockets:
+            connection.close()
+        self.server.shutdown()
+        self.server.server_close()
 
 
 # Evidence

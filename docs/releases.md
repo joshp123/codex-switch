@@ -34,8 +34,9 @@ app to Apple, staples its notarisation ticket, then signs the ZIP with the
 Codex Switch Sparkle key. It produces the exact ZIP, appcast and checksums that
 publication uploads. It does not publish to GitHub.
 
-The default build number is the source revision count. Use `--build INTEGER`
-for acceptance releases; every installed update needs a larger build number.
+The default build number is the source revision count. The app and bundled
+proxy carry the same number. Use `--build INTEGER` for acceptance releases;
+every installed update needs a larger build number.
 `--identity` selects a Developer ID Application identity when several exist.
 `--notes FILE` supplies release notes.
 
@@ -62,11 +63,10 @@ export CODEX_SWITCH_LISTEN=127.0.0.1:24681
 3. Unpack the source ZIP into `dist/update-check/installed` and open that copy
    of the app. It installs an empty proxy pool in the isolated root, under the
    separate launchd label. It does not register itself to open at login.
-4. Open Options → Check for Updates…, install the target and let it reopen.
-   Check the app version and the isolated proxy's `deploy-status` revision.
-   Check `proxy-install.log` and `proxy.log` under the isolated root: the old
-   generation must drain, launchd must start the new stable binary on its first
-   spawn, and the bridge must exit.
+4. Let the app check for and install the update. Send model work through the
+   isolated proxy, then check the app version and the proxy's `deploy-status`
+   build number. Check `proxy-install.log` and `proxy.log` under the isolated
+   root: the new proxy must prove itself and the old one must drain and exit.
 5. Uninstall the isolated copy with its bundled script, retaining the settings:
    `HOME="$CODEX_SWITCH_INSTALL_ROOT" CODEX_SWITCH_MENU_APP="$PWD/dist/update-check/installed/CodexSwitchMenu.app" sh dist/update-check/installed/CodexSwitchMenu.app/Contents/Resources/deploy/uninstall.sh`.
    Quit the test HTTP server and check that the isolated label and processes

@@ -1,4 +1,4 @@
-<!-- Written by AI on 2026.10.11 by model claude-opus-5.5; updated on 2026.10.14 by model GPT-6.1 Sol. -->
+<!-- Written by AI on 2026.10.11 by model claude-opus-5.5; updated on 2026.10.29 by model GPT-6.1 Terra. -->
 
 # System test
 
@@ -8,7 +8,7 @@ Run this before a live deploy:
 scripts/dev/system-test
 ```
 
-It takes about four minutes. It builds the proxy from this working tree, runs
+It takes at least 40 minutes: it keeps a tunnel transferring until just before the 30-minute update limit and runs further five-minute proofs. It builds the proxy from this working tree, runs
 the account pool in isolation, and prints what the system did for each outcome:
 
 1. New Codex tasks and Pi sessions go to the account with the most weekly
@@ -20,11 +20,15 @@ the account pool in isolation, and prints what the system did for each outcome:
    model work is replayed, no tool effect repeats, and Codex shows no error.
 5. With every account out of allowance, a running goal continues by itself
    when one account comes back.
-6. A blue-green update during work completes by itself. Responses in flight
-   over WebSocket and HTTP finish on the old process, while new work starts
-   on the new one.
-7. Each completed response is recorded once, with its account, task and
-   tokens.
+6. A blue-green update adopts the old single-job installation during work.
+   Responses in flight over WebSocket and HTTP finish on the old process,
+   while new work starts on the new one. An idle Claude tunnel closes and a
+   transferring tunnel stays open until just before the 30-minute limit.
+7. A candidate that receives malformed upstream responses steps aside, the
+   previous proxy resumes, and status shows the skipped build.
+8. Two releases queued during a switch converge on the newest, with at most
+   two proxy processes and no downgrade.
+9. Each completed response is recorded once, with its account, task and tokens.
 
 The command exits 0 only if every outcome held and nothing is left running.
 
@@ -44,7 +48,7 @@ The command exits 0 only if every outcome held and nothing is left running.
   one short prompt on the latest Haiku at low effort, using `HTTPS_PROXY` and
   `NODE_EXTRA_CA_CERTS` from `print-claude-config`. The proxy connects directly
   to `api.anthropic.com` over TLS; Claude traffic never goes through the gateway.
-- The update path: `deploy/deploy.sh new` against the private launchd job.
+- The update path: `deploy/install-proxy.sh` against private launchd jobs.
 
 ## What is simulated
 
@@ -53,8 +57,8 @@ forwards real traffic and logs a fingerprint of every model request it sends,
 so the test can see that none was sent twice. Its control file simulates what a
 test cannot wait for: a weekly allowance level, an account that runs out after
 a given number of requests, refused WebSockets, and responses held mid-stream
-for one client. The update installs a copy of the same build, so the old and
-new processes differ by process, not by source.
+for one client. It can also send malformed HTTP responses to test a failed
+candidate. The proxy binaries use the same source and distinct build numbers.
 
 ## Safety
 
@@ -62,13 +66,14 @@ The test reads the account logins from the live data directory and copies only
 the access tokens. Refresh tokens stay behind, so the test cannot rotate a live
 login. Each account needs an access token valid for at least another hour.
 The test copies one signed-in Claude account. It prints `SKIP Claude Code` if
-none is signed in, none has an hour left on its token, or Claude Code is absent.
+none is signed in, none has an hour left on its token, or Claude Code is absent;
+the Claude outcome then fails.
 
 It never touches the live proxy, its launchd job or data directory,
 `~/.codex/config.toml`, Pi's or Claude Code's configuration or the menu app. The clients run
 with their own homes inside the run directory. When the run ends, or fails, the
-test removes its launchd job (`dev.codex-switch.system-test`) and stops every
-process it started, then checks that none remain.
+test removes its launchd jobs (`dev.codex-switch.system-test-terra` and its
+`.a` and `.b` slots) and stops every process it started, then checks that none remain.
 
 ## When an outcome fails
 
