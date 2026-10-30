@@ -14,6 +14,10 @@ import (
 
 var errWhamUsageUnauthorized = errors.New("wham/usage rejected account credentials")
 
+// A provider that refuses another allowance read for now has still answered:
+// this says nothing about the account or the build reading it.
+var errUsageReadThrottled = errors.New("usage read throttled")
+
 // observeAccount reads current credentials, allowance and, when readModelList
 // is set, model availability, starting from the fact as it was when the read
 // was scheduled. Failures are carried on the fact, and the monitor logs a
@@ -99,6 +103,9 @@ func (monitor *Monitor) readAllowanceSample(ctx context.Context, account PoolAcc
 		statusError := fmt.Errorf("wham/usage returned HTTP %d for %s", response.StatusCode, account.DisplayName)
 		if response.StatusCode == http.StatusUnauthorized {
 			return AllowanceSample{}, fmt.Errorf("%w: %v", errWhamUsageUnauthorized, statusError)
+		}
+		if response.StatusCode == http.StatusTooManyRequests {
+			return AllowanceSample{}, fmt.Errorf("%w: %v", errUsageReadThrottled, statusError)
 		}
 		return AllowanceSample{}, statusError
 	}

@@ -374,3 +374,23 @@ func TestAccountMonitorWaitsWhileOverdueReadIsInFlight(t *testing.T) {
 		t.Fatalf("in-flight read scheduled an overdue timer: next read %s, now %s", nextRead, after)
 	}
 }
+
+func TestProviderCheckPassesThrottledReadsAndFailsOutages(t *testing.T) {
+	for _, test := range []struct {
+		status int
+		passes bool
+	}{
+		{http.StatusTooManyRequests, true},
+		{http.StatusServiceUnavailable, false},
+	} {
+		data := t.TempDir()
+		writeAccountFixture(t, filepath.Join(data, "account-1"), "account-1", "account-1@example.test", unexpiringAccessToken("account-1"))
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(test.status) }))
+		defer upstream.Close()
+		origin, _ := url.Parse(upstream.URL)
+		monitor := NewMonitor(data, origin, "", upstream.Client(), monitorTestDatabase(t))
+		if err := monitor.CheckProviderAccess(t.Context()); (err == nil) != test.passes {
+			t.Fatalf("usage status %d: check returned %v", test.status, err)
+		}
+	}
+}

@@ -117,6 +117,9 @@ func (monitor *Monitor) readClaudeAllowance(ctx context.Context, account PoolAcc
 		if response.StatusCode == http.StatusUnauthorized {
 			err = signInRequired(err)
 		}
+		if response.StatusCode == http.StatusTooManyRequests {
+			err = fmt.Errorf("%w: %v", errUsageReadThrottled, err)
+		}
 		return AllowanceSample{}, claudeRetryAfter(response.Header, time.Now()), err
 	}
 	var usage claudeUsageResponse

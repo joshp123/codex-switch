@@ -102,6 +102,9 @@ def run_outcome(outcome, system):
         observed, held = str(failure), False
     except Exception as error:  # a defect in this test, reported without stopping the run
         observed, held = f'The test itself failed: {error!r}', False
+    if not held:
+        system.extra = []  # a response left held would hang every later outcome
+        system.apply()
     print(('PASS  ' if held else 'FAIL  ') + outcome.__doc__.strip())
     for line in observed.splitlines():
         print('      ' + line)

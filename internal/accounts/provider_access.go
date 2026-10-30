@@ -49,7 +49,7 @@ func (monitor *Monitor) CheckProviderAccess(ctx context.Context) error {
 					}
 				}
 			}
-			if requiresSignIn(err) {
+			if requiresSignIn(err) || errors.Is(err, errUsageReadThrottled) {
 				err = nil
 			}
 			if err != nil {
