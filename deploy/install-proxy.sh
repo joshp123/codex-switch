@@ -177,11 +177,12 @@ if [ "$active" != none ]; then
     echo 'waiting for model work before switching'
     while :; do
       status=$(serving_status || true)
-      last=$(status_field "$status" last_completed || true)
+      # A request counts whatever becomes of it: a broken version must not
+      # block the release that fixes it.
+      last=$(status_field "$status" last_request || true)
       last=$(printf '%s' "$last" | /usr/bin/sed -E 's/\.[0-9]+Z$/Z/')
       last_epoch=$(/bin/date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$last" '+%s' 2>/dev/null || echo 0)
-      # Older versions record completions in the shared database but have no
-      # last_completed status field.
+      # Older versions report no requests, but record replies in the shared database.
       if [ "$active" = legacy ] && [ "$last_epoch" -eq 0 ] && [ -f "$data/codex-switch.db" ]; then
         last_epoch=$(/usr/bin/sqlite3 "$data/codex-switch.db" 'SELECT coalesce(max(completed_at_unix_nano)/1000000000,0) FROM completed_responses;' 2>/dev/null || echo 0)
       fi
@@ -205,9 +206,8 @@ temporary_plist="$workspace/$next_label.plist"
 if [ "$active" != none ]; then
   /bin/cp "$active_plist" "$temporary_plist"
   /usr/bin/plutil -replace Label -string "$next_label" "$temporary_plist"
-  /usr/bin/plutil -replace ProgramArguments.0 -string "$next_binary" "$temporary_plist"
-  # plutil inserts at an array index even with -replace.
-  /usr/bin/plutil -remove ProgramArguments.1 "$temporary_plist"
+  /usr/bin/plutil -remove ProgramArguments.0 "$temporary_plist"
+  /usr/bin/plutil -insert ProgramArguments.0 -string "$next_binary" "$temporary_plist"
 else
   /usr/bin/plutil -create xml1 "$temporary_plist"
   /usr/bin/plutil -insert Label -string "$next_label" "$temporary_plist"
@@ -232,34 +232,47 @@ if [ "$readiness_result" -ne 0 ]; then
   stop_job "$next_label" "$next_binary"
   /usr/bin/trash "$data/switch-started"
   if [ "$readiness_result" -eq 2 ] && [ "$active" != none ] && [ "$manual" = false ]; then printf '%s\n' "$chosen_build" >> "$data/skipped-builds"; echo "build $chosen_build was skipped"; exit 0; fi
+  if [ "$readiness_result" -eq 3 ]; then echo "a provider could not be read; see $data/proxy.log; the switch is tried again" >&2; fi
   exit 1
 fi
 candidate_pid=$pid
 /bin/mkdir -p "$(dirname "$command_link")"
 /bin/ln -sf "$next_binary" "$command_link"
 if [ "$active" != none ]; then
+  step_aside() {
+    /bin/ln -sf "$active_binary" "$command_link"
+    stop_job "$next_label" "$next_binary"
+    /usr/bin/trash "$data/switch-started"
+  }
   proof_started=$(/bin/date +%s)
   echo "proving build $chosen_build on real work"
-  while [ $(($(/bin/date +%s) - proof_started)) -lt 300 ]; do
+  while :; do
     status=$(serving_status || true)
     current_pid=$(job_pid "$next_label")
     failures=$(status_field "$status" failures || echo 0)
     case "$failures" in ''|*[!0-9]*) failures=0 ;; esac
     if ! kill -0 "$candidate_pid" 2>/dev/null || { [ -n "$current_pid" ] && [ "$current_pid" != "$candidate_pid" ]; } || [ "$failures" -ge 3 ]; then
       [ "$manual" = true ] || printf '%s\n' "$chosen_build" >> "$data/skipped-builds"
-      /bin/ln -sf "$active_binary" "$command_link"
-      stop_job "$next_label" "$next_binary"
-      /usr/bin/trash "$data/switch-started"
+      step_aside
       if [ "$manual" = true ]; then echo 'previous proxy failed; current proxy remains serving' >&2; exit 1; fi
       echo "build $chosen_build was skipped; the previous proxy remains serving"
       exit 0
     fi
     if [ "$(status_field "$status" pid || true)" != "$candidate_pid" ]; then
-      /bin/ln -sf "$active_binary" "$command_link"
-      stop_job "$next_label" "$next_binary"
-      /usr/bin/trash "$data/switch-started"
+      step_aside
       echo "could not check the candidate; try again" >&2
       exit 1
+    fi
+    proof_seconds=$(($(/bin/date +%s) - proof_started))
+    if [ "$proof_seconds" -ge 300 ]; then
+      # Only a reply of its own proves a build. Leave the old proxy five minutes
+      # of the 30 to finish its work.
+      if [ "$manual" = true ] || [ -n "$(status_field "$status" last_completed || true)" ]; then break; fi
+      if [ "$proof_seconds" -ge 1500 ]; then
+        step_aside
+        echo "build $chosen_build completed no reply; the switch is tried again" >&2
+        exit 1
+      fi
     fi
     sleep 1
   done
@@ -274,6 +287,15 @@ if [ "$manual" = true ] && [ "${active_build:-0}" -gt 0 ] && [ "$active_build" -
   printf '%s\n' "$active_build" >> "$data/skipped-builds"
 fi
 if [ "$active" != none ]; then
+  # A release from before these slots cuts every tunnel a minute after it is
+  # told to stop, so let what it still holds finish first, up to near the limit.
+  if [ "$active" = legacy ]; then
+    legacy_pid=$(job_pid "$active_label")
+    while [ $(($(/bin/date +%s) - switch_started)) -lt 1680 ] &&
+      /usr/sbin/lsof -nP -a -p "$legacy_pid" -iTCP:"${listen##*:}" -sTCP:ESTABLISHED >/dev/null 2>&1; do
+      sleep 5
+    done
+  fi
   # Finish admitted work before removing the old launchd job.
   stop_job "$active_label" "$active_binary"
   [ ! -e "$active_plist" ] || /usr/bin/trash "$active_plist"

@@ -37,6 +37,7 @@ type terminalResponseObserver struct {
 	admissionMutex  sync.Mutex
 	requestCounters ModelRequestCounters
 	onFailure       func()
+	onModelRequest  func()
 	requests        []*observedModelRequest
 
 	// A WebSocket's state during an update; see in_flight_request_drain.go.
@@ -306,6 +307,9 @@ func (observer *terminalResponseObserver) routeClientMessage(message []byte) boo
 	}
 	if json.Unmarshal(message, &request) != nil || request.Type != "response.create" {
 		return false
+	}
+	if observer.onModelRequest != nil {
+		observer.onModelRequest()
 	}
 	observer.admissionMutex.Lock()
 	defer observer.admissionMutex.Unlock()

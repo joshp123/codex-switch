@@ -23,13 +23,10 @@ final class ProxyInstallation {
                 at: dataDirectory, withIntermediateDirectories: true,
                 attributes: [.posixPermissions: 0o700]
             )
-            let log = dataDirectory.appending(path: "proxy-install.log")
-            if !FileManager.default.fileExists(atPath: log.path) {
-                FileManager.default.createFile(atPath: log.path, contents: nil, attributes: [.posixPermissions: 0o600])
-            }
-            let output = try FileHandle(forWritingTo: log)
-            defer { try? output.close() }
-            try output.seekToEnd()
+            // Append: an installer from before a relaunch may still be writing.
+            let logDescriptor = open(dataDirectory.appending(path: "proxy-install.log").path, O_WRONLY | O_APPEND | O_CREAT, 0o600)
+            guard logDescriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            let output = FileHandle(fileDescriptor: logDescriptor, closeOnDealloc: true)
             let child = Process()
             child.executableURL = URL(filePath: "/bin/sh")
             child.arguments = [install.path, proxy.path]

@@ -52,6 +52,7 @@ func buildNumberValue() int {
 
 type deploymentActivity struct {
 	failures      atomic.Int64
+	lastRequest   atomic.Int64
 	lastCompleted atomic.Int64
 }
 
@@ -138,6 +139,7 @@ func serveRelay(tcpListenAddress string) {
 		CompletionLedger:     composeAfterCompletedResponse{ledger: storeDatabase, snapshots: snapshots, activity: activity},
 		RequestCounters:      storeDatabase,
 		OnFailure:            func() { activity.failures.Add(1) },
+		OnModelRequest:       func() { activity.lastRequest.Store(time.Now().UnixNano()) },
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -218,7 +220,16 @@ type deployStatusResponse struct {
 	PID           int        `json:"pid"`
 	Build         int        `json:"build"`
 	Failures      int64      `json:"failures"`
+	LastRequest   *time.Time `json:"last_request"`
 	LastCompleted *time.Time `json:"last_completed"`
+}
+
+func timeFromNanoseconds(nanoseconds int64) *time.Time {
+	if nanoseconds == 0 {
+		return nil
+	}
+	value := time.Unix(0, nanoseconds).UTC()
+	return &value
 }
 
 func deployStatusOrRelay(capability string, relayHandler http.Handler, activity *deploymentActivity) http.Handler {
@@ -228,12 +239,8 @@ func deployStatusOrRelay(capability string, relayHandler http.Handler, activity 
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Method == http.MethodGet && request.URL.Path == statusPath {
 			writer.Header().Set("Content-Type", "application/json")
-			var lastCompleted *time.Time
-			if nanoseconds := activity.lastCompleted.Load(); nanoseconds != 0 {
-				completed := time.Unix(0, nanoseconds).UTC()
-				lastCompleted = &completed
-			}
-			_ = json.NewEncoder(writer).Encode(deployStatusResponse{Revision: revision, Dirty: dirty, PID: os.Getpid(), Build: buildNumberValue(), Failures: activity.failures.Load(), LastCompleted: lastCompleted})
+			_ = json.NewEncoder(writer).Encode(deployStatusResponse{Revision: revision, Dirty: dirty, PID: os.Getpid(), Build: buildNumberValue(), Failures: activity.failures.Load(),
+				LastRequest: timeFromNanoseconds(activity.lastRequest.Load()), LastCompleted: timeFromNanoseconds(activity.lastCompleted.Load())})
 			return
 		}
 		// Reject the retired control route without forwarding it to OpenAI.

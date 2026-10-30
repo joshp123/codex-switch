@@ -42,7 +42,7 @@ it, or remove the feature.
 | How does the owner want engineering done? | `~/.codex/AGENTS.md` (the owner's own principles). |
 | What does the accepted menu look like? | `.project-private/m3-mockups-r2/` (the approved design), `.project-private/visual-steering/accepted-direction/` (the original direction), then OpenUsage (`robinebers/openusage`). |
 | Is the live proxy working, and how are accounts used? | `codex-switch status`; the log at `~/Library/Application Support/codex-switch/proxy.log`. |
-| Which build is live? | `codex-switch status` names the serving build and skipped builds. `GET http://127.0.0.1:<port>/client/<capability>/codex-switch/deploy-status` reports build, PID, own failures and last completed model reply; the capability is in `client-capability` in the data directory. |
+| Which build is live? | `codex-switch status` names the serving build and skipped builds. `GET http://127.0.0.1:<port>/client/<capability>/codex-switch/deploy-status` reports build, PID, own failures, last model request and last completed reply; the capability is in `client-capability` in the data directory. |
 | What runs it? | `launchctl list \| grep codex-switch`; the launchd plist names the binary, port and data directory. |
 | How do clients reach it? | Codex: `openai_base_url` in `~/.codex/config.toml` (`codex-switch print-codex-config`). Pi: `~/.pi/agent/models.json`, provider `openai-codex`. |
 | How does Codex itself behave? | The Codex source (`openai/codex`), and the installed client: `/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex`. |

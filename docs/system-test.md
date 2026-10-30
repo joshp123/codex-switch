@@ -25,12 +25,13 @@ pool in isolation, and prints what the system did for each outcome:
    when one account comes back.
 7. An update adopts the published release's single job during work. Responses
    in flight over WebSocket and HTTP finish on the old process, while new work
-   starts on the new one.
-8. A retiring proxy closes an idle HTTP connection at once and a silent tunnel
-   after a minute. A transferring tunnel keeps going until the 30-minute limit,
-   when the old process has gone.
-9. During a provider outage, launchd restarts a killed proxy and it serves. A
-   candidate that cannot read the accounts stops, and its build is not skipped.
+   starts on the new one and proves it.
+8. A retiring proxy finishes a reply it holds, closes an idle HTTP connection at
+   once and a silent tunnel after a minute. A transferring tunnel keeps going
+   until the 30-minute limit, when the old process has gone.
+9. During a provider outage, launchd restarts a killed proxy, and a failed
+   request is enough to start a waiting update. A candidate that cannot read
+   the accounts stops, and its build is not skipped.
 10. Provider errors and client cancellations do not count against a candidate.
     A local routing failure on an open WebSocket and malformed upstream
     responses do count: the candidate steps aside and status shows the skipped

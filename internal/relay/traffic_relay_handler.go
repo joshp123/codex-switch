@@ -59,6 +59,7 @@ type RelayHandlerOptions struct {
 	RequestCounters      ModelRequestCounters
 	HTTPTransport        http.RoundTripper
 	OnFailure            func()
+	OnModelRequest       func()
 }
 
 // TrafficRelayHandler stays alive with admitted streams so deployment does not cut off model work.
@@ -82,6 +83,7 @@ type TrafficRelayHandler struct {
 	closingWebSockets  bool
 	stopping           chan struct{}
 	onFailure          func()
+	onModelRequest     func()
 }
 
 // CreateTrafficRelayHandler leaves listener ownership and signal handling with the command layer.
@@ -127,6 +129,7 @@ func CreateTrafficRelayHandler(options RelayHandlerOptions) (*TrafficRelayHandle
 		openWebSockets:       make(map[*terminalResponseObserver]struct{}),
 		stopping:             make(chan struct{}),
 		onFailure:            options.OnFailure,
+		onModelRequest:       options.OnModelRequest,
 	}
 	relayHandler.reverseProxy = relayHandler.createBytePreservingReverseProxy()
 	relayHandler.authenticatedHandler = clientcapability.RequirePathPrefix(options.ClientCapability, http.HandlerFunc(relayHandler.serveAuthenticatedTraffic))
@@ -158,6 +161,9 @@ func (handler *TrafficRelayHandler) serveAuthenticatedTraffic(response http.Resp
 	var parentTaskID store.TaskID
 	var cachePrefixes []string
 	workKind := workKindForRequest(request)
+	if workKind == store.ModelTurnWorkKind && handler.onModelRequest != nil {
+		handler.onModelRequest()
+	}
 	client := clientNameForRequest(request)
 	var modelSlug, serviceTier, inferenceGeo string
 	var responseStreamRequested bool
@@ -288,6 +294,7 @@ func (handler *TrafficRelayHandler) serveAuthenticatedTraffic(response http.Resp
 				handler.onFailure()
 			}
 		}
+		observer.onModelRequest = handler.onModelRequest
 		routedRequest.responseObserver = observer
 		if request.Method == http.MethodPost {
 			observer.startModelRequest(warmup)

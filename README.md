@@ -270,16 +270,16 @@ clear both.
 ## How updates work
 
 The app checks for signed, notarised releases every hour and installs them as
-they arrive. The proxy waits until it has completed a model reply in the last
-two minutes before switching. Updates run one at a time, and the newest build
-wins.
+they arrive. The proxy switches only when a model request has arrived in the
+last two minutes. Updates run one at a time, and the newest build wins.
 
 The new proxy checks the signed-in accounts, then takes new connections. The
-old proxy keeps its connections and stays ready for five minutes. If the new
+old proxy keeps its connections and stays ready for five minutes, or until the
+new proxy has completed a reply of its own if that takes longer. If the new
 proxy crashes or fails three requests during that time, it steps aside, the old
 proxy continues, and that build is skipped; `codex-switch status` shows skipped
-builds. If a provider cannot be read, nothing changes and the switch is tried
-again a minute later.
+builds. If a provider cannot be read, or 25 minutes pass with no completed
+reply, the new proxy steps aside and the switch is tried again.
 
 The old proxy then stops accepting connections and finishes its work. Model
 replies finish. Idle connections close at once. After a minute, Claude's event

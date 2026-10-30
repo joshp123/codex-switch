@@ -38,7 +38,7 @@ class System:
         self.accounts, self.base = accounts, None
         # Distinct weekly levels, so exactly one account has the most allowance left.
         self.weekly = {account: max(5, 90 - 10 * number) for number, account in enumerate(accounts, 1)}
-        self.limited, self.extra, self.records = set(), [], []
+        self.limited, self.extra, self.records, self.taskless_usage = set(), [], [], []
 
     def apply(self):
         rig.control(*[f'weekly-used {account} {used}' for account, used in self.weekly.items()],
@@ -121,7 +121,7 @@ def wait_for_candidate(old):
 
 
 def update_waits_for_work(system):
-    """An update waits until a model reply has completed"""
+    """An update waits until model work arrives"""
     old = rig.deploy_status()['pid']
     update = start_installer('candidate', 'no-work-update')
     time.sleep(10)
@@ -231,11 +231,15 @@ def request_without_task_id_is_served(system):
         raise Failure('The request was served, but the proxy pinned the empty task ID to an account.')
     if rows[-1][0] != best:
         raise Failure(f'The request was served by {rows[-1][0]}, but {best} had the most weekly allowance left.')
-    usage = completed[0]['usage']
-    received = (usage['input_tokens'], usage['input_tokens_details']['cached_tokens'], usage['output_tokens'],
-                usage['output_tokens_details']['reasoning_tokens'])
-    system.records.append(('request without a task ID', '', lambda: [received], lambda: rig.forwarded_requests(thread='', session='', client='')))
+    record_taskless_usage(system, completed)
+    system.records.append(('requests without a task ID', '', lambda: system.taskless_usage, lambda: rig.forwarded_requests(thread='', session='', client='')))
     return f'A streamed request with no task ID got a complete answer from {best}, which had the most weekly allowance left. No task was pinned.'
+
+
+def record_taskless_usage(system, completed):
+    usage = completed[0]['usage']
+    system.taskless_usage.append((usage['input_tokens'], usage['input_tokens_details']['cached_tokens'], usage['output_tokens'],
+                                  usage['output_tokens_details']['reasoning_tokens']))
 
 
 def claude_works_through_the_https_proxy(system):
@@ -356,6 +360,7 @@ def update_during_work_finishes_on_the_old_process(system):
     token_parts[1] = rig.base64.urlsafe_b64encode(rig.json.dumps(claims).encode()).decode().rstrip('=')
     auth['tokens']['id_token'] = '.'.join(token_parts)
     (signed_out / 'auth.json').write_text(rig.json.dumps(auth))
+    update_started = time.monotonic()
     update = start_installer('candidate', 'update')
     new = wait_for_candidate(old)
     if goal.result_file.exists():
@@ -367,21 +372,20 @@ def update_during_work_finishes_on_the_old_process(system):
     new_work_on_new_process = new != old and held_on_new and held_on_new <= rig.gateway_connections(new)
     old_was_draining = held_on_old <= rig.gateway_connections(old)
     try:
-        rig.wait_for(lambda: f'process {old} stopping' in rig.proxy_log() or not rig.process_alive(old),
-                     'the old slot to begin retirement', timeout=400)
-        if f'process {old} stopping' not in rig.proxy_log():
-            raise Failure(f'Old process {old} exited without beginning its drain while model replies were in flight.')
-        if any(task.process.poll() is not None for task in (websocket_task, http_task)):
-            raise Failure('An old model reply ended before retirement began.')
-        system.extra = []
-        system.apply()
-        for task in (websocket_task, http_task, new_task):
-            task.finish()
-            system.record_codex_task(task.name, task.thread)
-        rig.wait_for(lambda: not rig.process_alive(old), 'the old process to finish its replies and exit', timeout=120)
+        # Both versions run for the proof; the old one keeps the replies it holds.
+        time.sleep(max(0, 290 - (time.monotonic() - update_started)))
+        if any(task.process.poll() is not None for task in (websocket_task, http_task)) or not rig.process_alive(old):
+            raise Failure('An old model reply ended, or the old process went, before the proof finished.')
     finally:
         system.extra = []
         system.apply()
+    for task in (websocket_task, http_task, new_task):
+        task.finish()
+        system.record_codex_task(task.name, task.thread)
+    errors = goal.finish() + websocket_task.errors + http_task.errors + new_task.errors
+    system.record_codex_task('goal across the update', goal.thread)
+    # With its clients gone, the old process has nothing left to protect.
+    rig.wait_for(lambda: not rig.process_alive(old), 'the old process to retire once its clients left', timeout=120)
     try:
         exit_code = update.wait(timeout=120)
     except rig.subprocess.TimeoutExpired:
@@ -390,8 +394,6 @@ def update_during_work_finishes_on_the_old_process(system):
         raise Failure(f'The update command failed: {rig.read("logs/update.err")[-400:]}')
     signed_out.rename(rig.RUN / 'data/reauth-account')
     final = rig.deploy_status()['pid']
-    errors = goal.finish() + websocket_task.errors + http_task.errors + new_task.errors
-    system.record_codex_task('goal across the update', goal.thread)
 
     if not new_work_on_new_process or not old_was_draining:
         raise Failure(f'New work did not start on new process {new} while old process {old} still held its two responses.')
@@ -413,23 +415,43 @@ def update_during_work_finishes_on_the_old_process(system):
     if errors:
         raise Failure(f'The update completed, but Codex showed {describe_errors(errors)}.')
     return ('The published release\'s launchd job was adopted while one WebSocket and one HTTP response were mid-stream. New work\n'
-            'went to the new slot despite an account needing sign-in; both responses finished on the old process, which then exited.\n'
+            'went to the new slot despite an account needing sign-in; both responses finished on the old process, which left with its clients.\n'
             'Only the new slot remained loaded.\n'
             'A goal running a tool across the update finished with its effect run once. Nothing was replayed and Codex showed no error.')
 
 
 def retiring_proxy_keeps_only_working_connections(system):
-    """A retiring proxy closes idle connections, keeps a transferring tunnel, and is gone 30 minutes after the switch began"""
+    """A retiring proxy finishes its replies, closes idle connections, keeps a transferring tunnel, and is gone 30 minutes after the switch began"""
     warm = rig.CodexTask('retire-warmup', 'Reply with the word ready.').finish()
     system.record_codex_task('retire warmup', warm.thread)
     old = rig.deploy_status()['pid']
+    held_before = len(rig.gateway_events('response-held', client='codex_exec'))
+    canceled_before = len(rig.gateway_events('response-canceled'))
+    system.extra = ['hold-responses codex_exec']
+    system.apply()
+    held = rig.CodexTask('retire-held', 'Reply with the word held.')
+    rig.wait_for(lambda: len(rig.gateway_events('response-held', client='codex_exec')) > held_before, 'a reply to be held', timeout=180)
     tunnels = rig.TunnelPair()
     update = start_installer('candidate-2', 'retire-update')
-    new = wait_for_candidate(old)
-    switch_started = int(rig.read('data/switch-started').strip())
     try:
+        new = wait_for_candidate(old)
+        switch_started = int(rig.read('data/switch-started').strip())
+        status, completed = rig.post_without_task_id(system.base, 'Reply with the word proof.')
+        if status != 200 or len(completed) != 1:
+            raise Failure(f'The candidate answered {status} with {len(completed)} completed responses.')
+        record_taskless_usage(system, completed)
         rig.wait_for(lambda: f'process {old} stopping' in rig.proxy_log(), 'the old proxy to begin retiring', timeout=400)
         retirement_began = time.monotonic()
+        if held.process.poll() is not None:
+            raise Failure('The held reply ended before retirement began.')
+    finally:
+        system.extra = []
+        system.apply()
+    try:
+        held.finish()
+        system.record_codex_task('reply held across retirement', held.thread)
+        if 'held' not in held.reply.lower() or held.errors or len(rig.gateway_events('response-canceled')) != canceled_before:
+            raise Failure(f'The held reply was cut: Codex replied {held.reply!r} and showed {describe_errors(held.errors)}.')
         rig.wait_for(tunnels.idle_http_closed, 'the idle HTTP connection to close', timeout=30)
         rig.wait_for(tunnels.idle_closed, 'the silent tunnel to close', timeout=90)
         silent_for = time.monotonic() - retirement_began
@@ -450,27 +472,35 @@ def retiring_proxy_keeps_only_working_connections(system):
         raise Failure(f'The update command failed: {rig.read("logs/retire-update.err")[-400:]}')
     if rig.deploy_status()['pid'] != new:
         raise Failure(f'After retirement process {rig.deploy_status()["pid"]} serves, not {new}.')
-    return (f'The idle HTTP connection closed at once and the silent tunnel {silent_for:.0f} seconds into retirement. The transferring tunnel\n'
-            f'kept moving data until the limit, and the old process was gone {completed_after:.0f} seconds after the switch began.')
+    return (f'A held reply finished on the old process. The idle HTTP connection closed at once and the silent tunnel {silent_for:.0f} seconds into\n'
+            f'retirement. The transferring tunnel kept moving data until the limit, and the old process was gone {completed_after:.0f} seconds after the switch began.')
 
 
 def provider_outage_blocks_neither_restart_nor_release(system):
-    """During a provider outage a crashed proxy restarts, and a release waits instead of being skipped"""
+    """During a provider outage a crashed proxy restarts, and a release starts on failed work and waits instead of being skipped"""
     old = rig.deploy_status()['pid']
-    system.extra = ['usage-error']
+    build = rig.subprocess.check_output([str(rig.RUN / 'candidate-3'), 'print-build'], text=True).strip()
+    system.extra = ['usage-error', 'provider-error']
     system.apply()
     try:
         os.kill(old, signal.SIGKILL)
         restarted = rig.wait_for(lambda: (status['pid'] if (status := rig.deploy_status()) and status['pid'] != old else None),
                                  'launchd to restart the proxy during the outage', timeout=60)
-        work = rig.CodexTask('outage-work', 'Reply with the word ready.').finish()
-        system.record_codex_task('work during the outage', work.thread)
-        build = rig.subprocess.check_output([str(rig.RUN / 'candidate-3'), 'print-build'], text=True).strip()
         update = start_installer('candidate-3', 'outage-update')
+        time.sleep(10)
+        if update.poll() is not None or rig.deploy_status()['pid'] != restarted:
+            raise Failure('The installer did not wait for work during the outage.')
+        try:
+            rig.post_without_task_id(system.base, 'Provider outage test.')
+        except rig.urllib.error.HTTPError as error:
+            if error.code != 503:
+                raise Failure(f'The simulated provider error returned HTTP {error.code}, expected 503.')
+        else:
+            raise Failure('The simulated provider error did not reach the client.')
         try:
             exit_code = update.wait(timeout=180)
         except rig.subprocess.TimeoutExpired:
-            raise Failure('The installer did not stop when it could not read the accounts.')
+            raise Failure('A failed request did not start the waiting update.')
     finally:
         system.extra = []
         system.apply()
@@ -479,9 +509,8 @@ def provider_outage_blocks_neither_restart_nor_release(system):
         raise Failure(f'The installer exited with {exit_code} and skipped builds are {skipped}; the release should be tried again.')
     if rig.deploy_status()['pid'] != restarted:
         raise Failure('The serving proxy changed although the candidate could not read the accounts.')
-    return ('With every usage read failing, launchd restarted a killed proxy and it served a real reply. A candidate that could not\n'
-            f'read the accounts stopped; build {build} was not skipped, so the installer tries it again.')
-
+    return ('With every usage read failing, launchd restarted a killed proxy. One failed request started the waiting update; the candidate\n'
+            f'could not read the accounts and stopped, and build {build} was not skipped, so the installer tries it again.')
 
 
 def failed_release_steps_aside(system):
@@ -593,6 +622,9 @@ def queued_releases_install_newest(system):
     if first.wait(timeout=1900):
         raise Failure(f'First queued update failed: {rig.read("logs/queue-first.err")[-400:]}')
     expected = int(rig.subprocess.check_output([str(rig.RUN / 'candidate-6'), 'print-build'], text=True).strip())
+    rig.wait_for(lambda: (status := rig.deploy_status()) and int(status['build']) == expected, 'the newest build to take new connections', timeout=300)
+    newest_traffic = rig.CodexTask('queue-newest-traffic', 'Reply with the word newest.').finish()
+    system.record_codex_task('traffic on the newest queued build', newest_traffic.thread)
     deadline = time.monotonic() + 1900
     while time.monotonic() < deadline and (middle.poll() is None or newest.poll() is None):
         time.sleep(1)
