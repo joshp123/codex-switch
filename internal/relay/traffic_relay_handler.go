@@ -125,7 +125,8 @@ func CreateTrafficRelayHandler(options RelayHandlerOptions) (*TrafficRelayHandle
 		upstreamTransport:    upstreamTransport,
 		drainComplete:        make(chan struct{}),
 		openWebSockets:       make(map[*terminalResponseObserver]struct{}),
-		stopping:             make(chan struct{}), onFailure: options.OnFailure,
+		stopping:             make(chan struct{}),
+		onFailure:            options.OnFailure,
 	}
 	relayHandler.reverseProxy = relayHandler.createBytePreservingReverseProxy()
 	relayHandler.authenticatedHandler = clientcapability.RequirePathPrefix(options.ClientCapability, http.HandlerFunc(relayHandler.serveAuthenticatedTraffic))

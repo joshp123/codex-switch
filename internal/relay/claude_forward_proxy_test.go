@@ -1,12 +1,15 @@
 package relay
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -218,8 +221,7 @@ func TestClaudeForwardProxyTunnelsOtherHostsWithoutDecrypting(t *testing.T) {
 	}
 }
 
-func TestClaudeForwardProxyDrainLetsStreamsFinish(t *testing.T) {
-	finishOther := make(chan struct{})
+func TestClaudeForwardProxyDrainProtectsOnlyModelWorkPastGrace(t *testing.T) {
 	finishModel := make(chan struct{})
 	var finishOnce sync.Once
 	finish := func() { finishOnce.Do(func() { close(finishModel) }) }
@@ -231,8 +233,7 @@ func TestClaudeForwardProxyDrainLetsStreamsFinish(t *testing.T) {
 			<-finishModel
 			io.WriteString(writer, claudeForwardResponse)
 		} else {
-			<-finishOther
-			io.WriteString(writer, ": finished\n\n")
+			<-request.Context().Done()
 		}
 	}))
 	defer upstream.Close()
@@ -252,29 +253,62 @@ func TestClaudeForwardProxyDrainLetsStreamsFinish(t *testing.T) {
 	otherClosed := make(chan error, 1)
 	go func() { _, err := io.ReadAll(otherResponse.Body); otherClosed <- err }()
 
-	proxy.DrainConnections()
+	peer, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peer.Close()
+	go func() {
+		connection, err := peer.Accept()
+		if err == nil {
+			defer connection.Close()
+			_, _ = io.Copy(connection, connection)
+		}
+	}()
+	tunnel, err := net.Dial("tcp", strings.TrimPrefix(server.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tunnel.Close()
+	tunnel.SetDeadline(time.Now().Add(5 * time.Second))
+	fmt.Fprintf(tunnel, "CONNECT %s HTTP/1.1\r\nHost: %s\r\nProxy-Authorization: Basic %s\r\n\r\n", peer.Addr(), peer.Addr(), base64.StdEncoding.EncodeToString([]byte("codex-switch:"+forwardProxyCapability)))
+	reader := bufio.NewReader(tunnel)
+	connected, err := http.ReadResponse(reader, &http.Request{Method: "CONNECT"})
+	if err != nil || connected.StatusCode != 200 {
+		t.Fatalf("CONNECT failed: %v", err)
+	}
+	tunnelClosed := make(chan error, 1)
+	go func() { _, err := io.ReadAll(reader); tunnelClosed <- err }()
+
+	proxy.drainConnectionsWithin(100 * time.Millisecond)
 	if err := server.Config.Shutdown(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	proxy.relay.BeginRelayDrain()
 	drained := make(chan error, 1)
 	go func() { drained <- proxy.relay.WaitForRelayDrain(context.Background()) }()
-	select {
-	case <-otherClosed:
-		t.Fatal("drain cut the active non-model stream")
-	default:
+	for _, closed := range []<-chan error{otherClosed, tunnelClosed} {
+		select {
+		case err := <-closed:
+			if timeout, ok := err.(net.Error); ok && timeout.Timeout() {
+				t.Fatalf("non-model connection timed out instead of closing: %v", err)
+			}
+			if time.Now().Before(proxy.drainDeadline) {
+				t.Fatal("non-model connection was cut before its grace expired")
+			}
+		case <-time.After(time.Second):
+			t.Fatal("non-model connection survived its grace")
+		}
 	}
-	close(finishOther)
-	<-otherClosed
 	select {
 	case <-drained:
-		t.Fatal("drain cut the model response")
+		t.Fatal("drain cut the model response after the grace period")
 	default:
 	}
 	finish()
 	body, err := io.ReadAll(modelResponse.Body)
 	if err != nil || string(body) != ": stream admitted\n\n"+claudeForwardResponse {
-		t.Fatalf("model stream did not finish intact: %v %q", err, body)
+		t.Fatalf("model stream did not finish intact past the grace: %v %q", err, body)
 	}
 	select {
 	case err := <-drained:
@@ -288,5 +322,66 @@ func TestClaudeForwardProxyDrainLetsStreamsFinish(t *testing.T) {
 	defer ledger.mutex.Unlock()
 	if len(ledger.records) != 1 {
 		t.Fatal("model response lost its completion record")
+	}
+}
+
+func TestClaudeForwardProxyDrainKeepsTunnelsWithTraffic(t *testing.T) {
+	upstream := httptest.NewServer(http.NotFoundHandler())
+	defer upstream.Close()
+	proxy, server, _, _, _, _ := startTestClaudeForwardProxy(t, upstream)
+	peer, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peer.Close()
+	go func() {
+		for {
+			connection, err := peer.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer connection.Close()
+				_, _ = io.Copy(connection, connection)
+			}()
+		}
+	}()
+	openTunnel := func() (net.Conn, *bufio.Reader) {
+		tunnel, err := net.Dial("tcp", strings.TrimPrefix(server.URL, "http://"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { tunnel.Close() })
+		tunnel.SetDeadline(time.Now().Add(5 * time.Second))
+		fmt.Fprintf(tunnel, "CONNECT %s HTTP/1.1\r\nHost: %s\r\nProxy-Authorization: Basic %s\r\n\r\n", peer.Addr(), peer.Addr(), base64.StdEncoding.EncodeToString([]byte("codex-switch:"+forwardProxyCapability)))
+		reader := bufio.NewReader(tunnel)
+		connected, err := http.ReadResponse(reader, &http.Request{Method: "CONNECT"})
+		if err != nil || connected.StatusCode != 200 {
+			t.Fatalf("CONNECT failed: %v", err)
+		}
+		return tunnel, reader
+	}
+	transferring, transferringReader := openTunnel()
+	_, silentReader := openTunnel()
+	silentClosed := make(chan error, 1)
+	go func() { _, err := silentReader.ReadByte(); silentClosed <- err }()
+
+	const grace = 200 * time.Millisecond
+	proxy.drainConnectionsWithin(grace)
+	for finish := time.Now().Add(3 * grace); time.Now().Before(finish); time.Sleep(grace / 10) {
+		if _, err := transferring.Write([]byte("x")); err != nil {
+			t.Fatalf("the transferring tunnel was cut: %v", err)
+		}
+		if _, err := transferringReader.ReadByte(); err != nil {
+			t.Fatalf("the transferring tunnel was cut: %v", err)
+		}
+	}
+	select {
+	case err := <-silentClosed:
+		if timeout, ok := err.(net.Error); ok && timeout.Timeout() {
+			t.Fatalf("silent tunnel timed out instead of closing: %v", err)
+		}
+	default:
+		t.Fatal("the silent tunnel outlasted the grace period")
 	}
 }
