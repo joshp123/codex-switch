@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -348,4 +349,46 @@ func jwt(t *testing.T, expiry time.Time, account string) string {
 	header, _ := json.Marshal(map[string]string{"alg": "none"})
 	payload, _ := json.Marshal(map[string]any{"exp": expiry.Unix(), "chatgpt_account_id": account})
 	return base64.RawURLEncoding.EncodeToString(header) + "." + base64.RawURLEncoding.EncodeToString(payload) + ".x"
+}
+
+func TestRefreshInvalidGrantRequiresSignInAndOtherBadRequestsRemainTemporary(t *testing.T) {
+	for _, test := range []struct {
+		name, body  string
+		status      int
+		needsSignIn bool
+	}{
+		{"invalid grant", `{"error":"invalid_grant","error_description":"secret detail"}`, http.StatusBadRequest, true},
+		{"bad client request", `{"error":"invalid_request","error_description":"secret detail"}`, http.StatusBadRequest, false},
+		{"provider outage", `{"error":"invalid_grant","error_description":"secret detail"}`, http.StatusBadGateway, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			home := t.TempDir()
+			writeTestAuth(t, home, jwt(t, time.Now().Add(-time.Minute), "account"), "refresh", "account")
+			before, err := os.ReadFile(filepath.Join(home, "auth.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				writer.WriteHeader(test.status)
+				io.WriteString(writer, test.body)
+			}))
+			defer server.Close()
+			login := newSavedLogin(home, server.Client())
+			login.token = server.URL
+			_, err = login.Credentials(t.Context())
+			if err == nil || requiresSignIn(err) != test.needsSignIn {
+				t.Fatalf("refresh error = %v; needs sign in %t", err, test.needsSignIn)
+			}
+			if strings.Contains(err.Error(), "secret detail") {
+				t.Fatal("refresh error exposed response content")
+			}
+			after, err := os.ReadFile(filepath.Join(home, "auth.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(before, after) {
+				t.Fatal("rejected refresh changed stored credentials")
+			}
+		})
+	}
 }

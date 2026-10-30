@@ -208,8 +208,12 @@ func (s *savedLogin) refresh(ctx context.Context, auth *authFile) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
-		if resp.StatusCode == http.StatusUnauthorized {
+		failureBody, _ := io.ReadAll(io.LimitReader(resp.Body, maximumRefreshResponseBytes))
+		var failure struct {
+			Error string `json:"error"`
+		}
+		invalidGrant := resp.StatusCode == http.StatusBadRequest && json.Unmarshal(failureBody, &failure) == nil && failure.Error == "invalid_grant"
+		if resp.StatusCode == http.StatusUnauthorized || invalidGrant {
 			return signInRequired(fmt.Errorf("refresh credentials: status %d", resp.StatusCode))
 		}
 		return temporary(fmt.Errorf("refresh credentials: status %d", resp.StatusCode))
