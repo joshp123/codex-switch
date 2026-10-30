@@ -29,7 +29,7 @@ import (
 
 const defaultUpstreamOrigin = "https://chatgpt.com"
 
-// deployStatusEndpoint lets deploy.sh distinguish generations of the same
+// deployStatusEndpoint lets the installer distinguish generations of the same
 // revision by pid, per the deployment contract.
 const deployStatusEndpoint = "/codex-switch/deploy-status"
 
@@ -37,6 +37,13 @@ const deployStatusEndpoint = "/codex-switch/deploy-status"
 var sourceRevision string
 var sourceModified string
 var buildNumber string
+
+// The installer writes this file for the length of a switch.
+const switchStartedFilename = "switch-started"
+
+// A failed account check says nothing about the build, so the installer tries
+// the switch again instead of skipping the release.
+const providerCheckFailedExitCode = 75
 
 func buildNumberValue() int {
 	n, _ := strconv.Atoi(buildNumber)
@@ -51,7 +58,7 @@ type deploymentActivity struct {
 // serveRelay runs the recovered serving path: SQLite-backed pins, the one
 // routing rule, and the byte-preserving relay. The command layer owns the
 // listener and signals; the relay owns admitted work during a drain.
-func serveRelay(tcpListenAddress string, checkProviders bool) {
+func serveRelay(tcpListenAddress string) {
 	// Every generation appends to one log in the data directory, so a blue-green
 	// update keeps one timeline and the status command can name the file.
 	proxyLog, err := os.OpenFile(proxyLogPath(dataDir()), os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
@@ -91,12 +98,14 @@ func serveRelay(tcpListenAddress string, checkProviders bool) {
 		log.Fatal(err)
 	}
 	accountMonitor.SetClaudeUpstreamOrigin(claudeUpstreamOrigin)
-	if checkProviders {
+	// A process that starts during a switch is its candidate. Any other start
+	// must succeed during a provider outage, so launchd can restart the proxy.
+	if _, err := os.Stat(filepath.Join(dataDir(), switchStartedFilename)); err == nil {
 		if err := accountMonitor.CheckProviderAccess(context.Background()); err != nil {
 			failure := fmt.Sprintf("provider check failed: %s; old generation keeps serving", strings.ReplaceAll(err.Error(), "\n", "; "))
 			log.Printf("process %d: %s", os.Getpid(), failure)
 			fmt.Fprintln(os.Stderr, failure)
-			os.Exit(1)
+			os.Exit(providerCheckFailedExitCode)
 		}
 		log.Printf("process %d: provider check passed", os.Getpid())
 	}
@@ -220,9 +229,9 @@ func deployStatusOrRelay(capability string, relayHandler http.Handler, activity 
 		if request.Method == http.MethodGet && request.URL.Path == statusPath {
 			writer.Header().Set("Content-Type", "application/json")
 			var lastCompleted *time.Time
-			if seconds := activity.lastCompleted.Load(); seconds != 0 {
-				t := time.Unix(0, seconds).UTC()
-				lastCompleted = &t
+			if nanoseconds := activity.lastCompleted.Load(); nanoseconds != 0 {
+				completed := time.Unix(0, nanoseconds).UTC()
+				lastCompleted = &completed
 			}
 			_ = json.NewEncoder(writer).Encode(deployStatusResponse{Revision: revision, Dirty: dirty, PID: os.Getpid(), Build: buildNumberValue(), Failures: activity.failures.Load(), LastCompleted: lastCompleted})
 			return
@@ -256,17 +265,13 @@ func buildRevision() (string, bool) {
 	return revision, dirty
 }
 
-// printBinaryRevision lets deploy.sh learn the target revision without
-// starting a server.
+// printBinaryRevision lets release checks learn a binary's revision without
+// starting it.
 func printBinaryRevision(args []string) {
-	revision, dirty := buildRevision()
-	if len(args) == 1 && args[0] == "--dirty" {
-		fmt.Println(dirty)
-		return
-	}
 	if len(args) != 0 {
-		log.Fatal("usage: codex-switch print-revision [--dirty]")
+		log.Fatal("usage: codex-switch print-revision")
 	}
+	revision, _ := buildRevision()
 	fmt.Println(revision)
 }
 

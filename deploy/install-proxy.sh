@@ -134,7 +134,11 @@ wait_for_job() {
     status=$(serving_status || true)
     if [ "$detect_exit" = true ]; then
       exit_code=$(/bin/launchctl print "$domain/$job" 2>/dev/null | /usr/bin/awk '$1 == "last" && $2 == "exit" && $3 == "code" && $4 == "=" {print $5; exit}')
-      case "$exit_code" in ''|'(never') ;; *) return 2 ;; esac
+      case "$exit_code" in
+        ''|'(never') ;;
+        75) return 3 ;; # An account read failed; this says nothing about the build.
+        *) return 2 ;;
+      esac
     fi
     if [ -n "$pid" ] && [ "$(status_field "$status" pid || true)" = "$pid" ]; then return 0; fi
     count=$((count + 1)); sleep 1
@@ -153,7 +157,10 @@ choose_newest() {
   [ "$manual" = false ] || return 0
   for pending in "$data"/proxy-update.*; do
     [ -f "$pending/owner" ] && [ -f "$pending/codex-switch" ] || continue
-    kill -0 "$(cat "$pending/owner")" 2>/dev/null || continue
+    if ! kill -0 "$(cat "$pending/owner")" 2>/dev/null; then
+      /usr/bin/trash "$pending"
+      continue
+    fi
     pending_build=$("$pending/codex-switch" print-build 2>/dev/null || echo 0)
     case "$pending_build" in ''|*[!0-9]*) continue ;; esac
     if [ "$pending_build" -gt "$chosen_build" ]; then chosen="$pending/codex-switch"; chosen_build=$pending_build; fi
@@ -201,15 +208,6 @@ if [ "$active" != none ]; then
   /usr/bin/plutil -replace ProgramArguments.0 -string "$next_binary" "$temporary_plist"
   # plutil inserts at an array index even with -replace.
   /usr/bin/plutil -remove ProgramArguments.1 "$temporary_plist"
-  argument_index=4
-  has_provider_check=false
-  while argument=$(/usr/bin/plutil -extract "ProgramArguments.$argument_index" raw "$temporary_plist" 2>/dev/null); do
-    [ "$argument" != --check-providers ] || has_provider_check=true
-    argument_index=$((argument_index + 1))
-  done
-  if [ "$has_provider_check" = false ]; then
-    /usr/bin/plutil -insert ProgramArguments -string --check-providers -append "$temporary_plist"
-  fi
 else
   /usr/bin/plutil -create xml1 "$temporary_plist"
   /usr/bin/plutil -insert Label -string "$next_label" "$temporary_plist"
