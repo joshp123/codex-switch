@@ -36,9 +36,11 @@ pool in isolation, and prints what the system did for each outcome:
     A local routing failure on an open WebSocket and malformed upstream
     responses do count: the candidate steps aside and status shows the skipped
     build.
-11. Two releases queued during a switch converge on the newest, with at most
+11. A serving proxy that stops answering is replaced by the next release,
+    without waiting for work.
+12. Two releases queued during a switch converge on the newest, with at most
     two proxy processes and no downgrade.
-12. Each completed response is recorded once, with its account, task and tokens.
+13. Each completed response is recorded once, with its account, task and tokens.
 
 The command exits 0 only if every outcome held and nothing is left running.
 

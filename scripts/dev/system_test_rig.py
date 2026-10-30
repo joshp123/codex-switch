@@ -100,7 +100,7 @@ def build():
     """Build the same source with distinct release numbers and the traffic gateway.
     The first job runs the newest published release, so the first update is one Macs really make."""
     base = int(subprocess.check_output(['git', 'rev-list', '--count', 'HEAD'], cwd=REPO, text=True))
-    builds = [(str(RUN / name), base + number) for number, name in enumerate(('cli', 'candidate', 'candidate-2', 'candidate-3', 'candidate-4', 'candidate-5', 'candidate-6'))]
+    builds = [(str(RUN / name), base + number) for number, name in enumerate(('cli', 'candidate', 'candidate-2', 'candidate-3', 'candidate-4', 'candidate-5', 'candidate-6', 'candidate-7'))]
     commands = [(['scripts/dev/build-proxy', path], dict(os.environ, CODEX_SWITCH_BUILD=str(number))) for path, number in builds]
     commands.append((['go', 'build', '-o', str(RUN / 'gateway'), './scripts/dev/system-test-gateway'], os.environ))
     for command, environment in commands:

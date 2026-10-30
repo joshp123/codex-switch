@@ -596,15 +596,37 @@ def failed_release_steps_aside(system):
     return f'Build {build} stopped taking traffic after malformed responses in {elapsed:.1f} seconds; process {old} resumed, status named the skipped build, and all three Codex tasks finished.'
 
 
+def unresponsive_proxy_is_replaced(system):
+    """A serving proxy that stops answering is replaced by the next release, without waiting for work"""
+    old = rig.deploy_status()['pid']
+    slot_before = rig.read('data/serving-slot')
+    os.kill(old, signal.SIGSTOP)
+    try:
+        update = start_installer('candidate-4', 'hung-update')
+        new = wait_for_candidate(old)
+        status, completed = rig.post_without_task_id(system.base, 'Reply with the word replaced.')
+        if status != 200 or len(completed) != 1:
+            raise Failure(f'The replacement answered {status} with {len(completed)} completed responses.')
+        record_taskless_usage(system, completed)
+        rig.wait_for(lambda: rig.read('data/serving-slot') != slot_before, 'the replacement to be promoted', timeout=400)
+    finally:
+        os.kill(old, signal.SIGCONT)
+    if update.wait(timeout=120):
+        raise Failure(f'The update command failed: {rig.read("logs/hung-update.err")[-400:]}')
+    if rig.deploy_status()['pid'] != new or rig.process_alive(old):
+        raise Failure(f'After the update, process {rig.deploy_status()["pid"]} serves; expected {new}, with old process {old} gone.')
+    return f'Process {old} stopped answering. The next release started without waiting for work, proved itself on a real reply and replaced it.'
+
+
 def queued_releases_install_newest(system):
     """Queued releases converge on the newest without overlapping switches"""
     warm = rig.CodexTask('queue-warmup', 'Reply with the word ready.').finish()
     system.record_codex_task('queue warmup', warm.thread)
     original = rig.deploy_status()['pid']
-    first = start_installer('candidate-4', 'queue-first')
+    first = start_installer('candidate-5', 'queue-first')
     wait_for_candidate(original)
-    middle = start_installer('candidate-5', 'queue-middle')
-    newest = start_installer('candidate-6', 'queue-newest')
+    middle = start_installer('candidate-6', 'queue-middle')
+    newest = start_installer('candidate-7', 'queue-newest')
     observed, process_counts = [], []
     monitoring = threading.Event()
     def observe():
@@ -621,7 +643,7 @@ def queued_releases_install_newest(system):
     system.record_codex_task('traffic during queued update', traffic.thread)
     if first.wait(timeout=1900):
         raise Failure(f'First queued update failed: {rig.read("logs/queue-first.err")[-400:]}')
-    expected = int(rig.subprocess.check_output([str(rig.RUN / 'candidate-6'), 'print-build'], text=True).strip())
+    expected = int(rig.subprocess.check_output([str(rig.RUN / 'candidate-7'), 'print-build'], text=True).strip())
     rig.wait_for(lambda: (status := rig.deploy_status()) and int(status['build']) == expected, 'the newest build to take new connections', timeout=300)
     newest_traffic = rig.CodexTask('queue-newest-traffic', 'Reply with the word newest.').finish()
     system.record_codex_task('traffic on the newest queued build', newest_traffic.thread)
@@ -689,7 +711,7 @@ OUTCOMES = [update_waits_for_work, new_work_goes_to_the_most_allowance_left, cla
             exhausted_task_moves_on_its_next_turn,
             goal_continues_when_an_account_returns, update_during_work_finishes_on_the_old_process,
             retiring_proxy_keeps_only_working_connections, provider_outage_blocks_neither_restart_nor_release, failed_release_steps_aside,
-            queued_releases_install_newest, every_response_recorded_once]
+            unresponsive_proxy_is_replaced, queued_releases_install_newest, every_response_recorded_once]
 
 if __name__ == '__main__':
     main()

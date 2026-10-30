@@ -128,25 +128,27 @@ fi
 wait_for_job() {
   job=$1
   detect_exit=${2:-false}
-  count=0
-  while [ "$count" -lt 120 ]; do
+  wait_started=$(/bin/date +%s)
+  while [ $(($(/bin/date +%s) - wait_started)) -lt 120 ]; do
     pid=$(job_pid "$job")
     status=$(serving_status || true)
     if [ "$detect_exit" = true ]; then
       exit_code=$(/bin/launchctl print "$domain/$job" 2>/dev/null | /usr/bin/awk '$1 == "last" && $2 == "exit" && $3 == "code" && $4 == "=" {print $5; exit}')
       case "$exit_code" in
         ''|'(never') ;;
-        75) return 3 ;; # An account read failed; this says nothing about the build.
+        75:) return 3 ;; # An account read failed; this says nothing about the build.
         *) return 2 ;;
       esac
     fi
     if [ -n "$pid" ] && [ "$(status_field "$status" pid || true)" = "$pid" ]; then return 0; fi
-    count=$((count + 1)); sleep 1
+    sleep 1
   done
   echo "the proxy job $job did not answer on $listen; see $data/launchd.log" >&2
   return 1
 }
-if [ "$active" != none ]; then wait_for_job "$active_label"; fi
+# A version that stopped answering must not block the release that fixes it.
+serving_answers=true
+if [ "$active" != none ] && ! wait_for_job "$active_label"; then serving_answers=false; fi
 
 # Compare all waiting installers after acquiring the lock. Their staged copies
 # survive replacement of the app bundle while a previous switch is in progress.
@@ -173,7 +175,7 @@ if [ "$active" != none ]; then
   case "$active_build" in ''|*[!0-9]*) active_build=0 ;; esac
   if [ "$manual" = false ] && [ "$chosen_build" -le "$active_build" ]; then echo 'the newest proxy is already serving'; exit 0; fi
   if [ "$manual" = false ] && [ -f "$data/skipped-builds" ] && /usr/bin/grep -qxF "$chosen_build" "$data/skipped-builds"; then echo "build $chosen_build was skipped"; exit 0; fi
-  if [ "$manual" = false ]; then
+  if [ "$manual" = false ] && [ "$serving_answers" = true ]; then
     echo 'waiting for model work before switching'
     while :; do
       status=$(serving_status || true)
