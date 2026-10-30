@@ -77,8 +77,8 @@ code against itself proves nothing.
 
 ## Live system
 
-Never interrupt running work. Deploy the proxy only through `deploy/deploy.sh`;
-deploy the menu separately. Do not commit email addresses, task IDs, local
+Never interrupt running work. Deploy the proxy only through
+`deploy/install-proxy.sh`; deploy the menu separately. Do not commit email addresses, task IDs, local
 paths or agent plans.
 
 Clean up what you start. Run a test build of the menu as an app bundle, never

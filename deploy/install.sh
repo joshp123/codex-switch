@@ -2,9 +2,9 @@
 # Installs Codex Switch from this checkout, or updates the installation.
 #
 # The first run builds the proxy, runs it under a launchd job that keeps it
-# running, and installs the menu app. Later runs hand the proxy over with
-# deploy.sh, so new work goes to the new build while running work finishes on
-# the old one, then rebuild and reopen the menu app.
+# running, and installs the menu app. Later runs switch the proxy with
+# install-proxy.sh, so new work goes to the new build while running work
+# finishes on the old one, then rebuild and reopen the menu app.
 set -eu
 
 repository=$(CDPATH='' cd -P "$(dirname "$0")/.." && pwd)

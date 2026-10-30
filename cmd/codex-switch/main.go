@@ -38,8 +38,6 @@ func main() {
 		fmt.Println(buildNumberValue())
 	case "print-revision":
 		printBinaryRevision(args)
-	case "start-detached":
-		startDetachedCommand(args)
 	default:
 		status(args)
 	}
@@ -50,7 +48,7 @@ func selectCommand(args []string) (string, []string) {
 		return "status", args
 	}
 	switch args[0] {
-	case "login", "accounts", "remove", "reserve", "serve", "status", "print-codex-config", "print-claude-config", "print-revision", "print-build", "start-detached":
+	case "login", "accounts", "remove", "reserve", "serve", "status", "print-codex-config", "print-claude-config", "print-revision", "print-build":
 		return args[0], args[1:]
 	default:
 		return "status", args

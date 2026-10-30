@@ -19,12 +19,11 @@ if [ -f "$data/client-capability" ] &&
   exit 1
 fi
 
-# The proxy finishes the requests it has already accepted, then exits.
 for installed_label in "$label" "$label.a" "$label.b"; do
   /bin/launchctl bootout "gui/$(id -u)/$installed_label" 2>/dev/null || true
 done
 quit_menu_app
-for installed in "$plist" "$HOME/Library/LaunchAgents/$label.a.plist" "$HOME/Library/LaunchAgents/$label.b.plist" "$(dirname "$binary")" "$command_link" "$app" "$data/serving-slot" "$data/switch-started" "$data/previous-binary"; do
+for installed in "$plist" "$HOME/Library/LaunchAgents/$label.a.plist" "$HOME/Library/LaunchAgents/$label.b.plist" "$(dirname "$binary")" "$command_link" "$app" "$data/serving-slot" "$data/switch-started" "$data/previous-binary" "$data/skipped-builds"; do
   if [ -e "$installed" ] || [ -L "$installed" ]; then
     /usr/bin/trash "$installed"
   fi

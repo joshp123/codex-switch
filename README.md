@@ -276,13 +276,16 @@ wins.
 
 The new proxy checks the signed-in accounts, then takes new connections. The
 old proxy keeps its connections and stays ready for five minutes. If the new
-proxy fails the check, crashes or fails three requests during that time, it
-steps aside and the old proxy continues. `codex-switch status` shows skipped
-builds. Otherwise the old proxy stops accepting connections and finishes its
-work. Idle HTTP connections and WebSockets close. Encrypted tunnels stay open
-until their peers close them, because the proxy cannot tell an idle tunnel from
-a stalled transfer. Any remaining connections close 30 minutes after the switch
-began.
+proxy crashes or fails three requests during that time, it steps aside, the old
+proxy continues, and that build is skipped; `codex-switch status` shows skipped
+builds. If a provider cannot be read, nothing changes and the switch is tried
+again a minute later.
+
+The old proxy then stops accepting connections and finishes its work. Model
+replies finish. Idle connections close at once. After a minute, Claude's event
+streams and any tunnel with no traffic close too, and clients reopen them on
+the new proxy. Tunnels still moving data carry on. Anything open 30 minutes
+after the switch began closes.
 
 To return to the previous proxy by hand, run `deploy/deploy.sh back` from a
 checkout or from the app's `Contents/Resources/deploy` directory. The release
