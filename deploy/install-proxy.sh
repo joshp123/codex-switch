@@ -51,6 +51,9 @@ if [ "$manual" = true ]; then
 fi
 
 domain="gui/$(id -u)"
+# The system test shortens these; every Mac uses the defaults.
+proving_seconds=${CODEX_SWITCH_PROVING_SECONDS:-300}
+switch_limit_seconds=${CODEX_SWITCH_SWITCH_LIMIT_SECONDS:-1800}
 state="$data/serving-slot"
 status_field() { printf '%s' "$1" | /usr/bin/plutil -extract "$2" raw -o - - 2>/dev/null; }
 serving_status() {
@@ -71,7 +74,7 @@ stop_job() {
   stop_pid=$(job_pid "$stop_label")
   if [ -n "$stop_pid" ]; then kill -TERM "$stop_pid" 2>/dev/null || true; fi
   while [ -n "$stop_pid" ] && kill -0 "$stop_pid" 2>/dev/null; do
-    if [ $(($(/bin/date +%s) - switch_started)) -ge 1800 ]; then
+    if [ $(($(/bin/date +%s) - switch_started)) -ge "$switch_limit_seconds" ]; then
       kill -KILL "$stop_pid" 2>/dev/null || true
       break
     fi
@@ -265,12 +268,12 @@ if [ "$active" != none ]; then
       echo "could not check the candidate; try again" >&2
       exit 1
     fi
-    proof_seconds=$(($(/bin/date +%s) - proof_started))
-    if [ "$proof_seconds" -ge 300 ]; then
-      # Only a reply of its own proves a build. Leave the old proxy five minutes
-      # of the 30 to finish its work.
+    proved_for=$(($(/bin/date +%s) - proof_started))
+    if [ "$proved_for" -ge "$proving_seconds" ]; then
+      # Only a reply of its own proves a build. Leave the old proxy time to
+      # finish its work before the limit.
       if [ "$manual" = true ] || [ -n "$(status_field "$status" last_completed || true)" ]; then break; fi
-      if [ "$proof_seconds" -ge 1500 ]; then
+      if [ "$proved_for" -ge $((switch_limit_seconds - proving_seconds)) ]; then
         step_aside
         echo "build $chosen_build completed no reply; the switch is tried again" >&2
         exit 1
@@ -289,15 +292,6 @@ if [ "$manual" = true ] && [ "${active_build:-0}" -gt 0 ] && [ "$active_build" -
   printf '%s\n' "$active_build" >> "$data/skipped-builds"
 fi
 if [ "$active" != none ]; then
-  # A release from before these slots cuts every tunnel a minute after it is
-  # told to stop, so let what it still holds finish first, up to near the limit.
-  if [ "$active" = legacy ]; then
-    legacy_pid=$(job_pid "$active_label")
-    while [ $(($(/bin/date +%s) - switch_started)) -lt 1680 ] &&
-      /usr/sbin/lsof -nP -a -p "$legacy_pid" -iTCP:"${listen##*:}" -sTCP:ESTABLISHED >/dev/null 2>&1; do
-      sleep 5
-    done
-  fi
   # Finish admitted work before removing the old launchd job.
   stop_job "$active_label" "$active_binary"
   [ ! -e "$active_plist" ] || /usr/bin/trash "$active_plist"
