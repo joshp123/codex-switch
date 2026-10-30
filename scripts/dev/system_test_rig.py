@@ -100,7 +100,7 @@ def build():
     """Build the same source with distinct release numbers and the traffic gateway.
     The first job runs the newest published release, so the first update is one Macs really make."""
     base = int(subprocess.check_output(['git', 'rev-list', '--count', 'HEAD'], cwd=REPO, text=True))
-    builds = [(str(RUN / name), base + number) for number, name in enumerate(('cli', 'candidate', 'candidate-2', 'candidate-3', 'candidate-4', 'candidate-5', 'candidate-6', 'candidate-7'))]
+    builds = [(str(RUN / name), base + number) for number, name in enumerate(('cli', 'candidate', 'candidate-2', 'candidate-3', 'candidate-4', 'candidate-5', 'candidate-6'))]
     commands = [(['scripts/dev/build-proxy', path], dict(os.environ, CODEX_SWITCH_BUILD=str(number))) for path, number in builds]
     commands.append((['go', 'build', '-o', str(RUN / 'gateway'), './scripts/dev/system-test-gateway'], os.environ))
     for command, environment in commands:
@@ -146,7 +146,7 @@ def start_proxy():
         f'model_provider = "switch-test"\nmodel = "{MODEL}"\nmodel_reasoning_effort = "low"\n'
         'cli_auth_credentials_store = "file"\n[model_providers.switch-test]\nname = "OpenAI"\n'
         f'base_url = "{base}"\nwire_api = "responses"\nrequires_openai_auth = true\n'
-        'supports_websockets = true\nstream_idle_timeout_ms = 900000\n[analytics]\nenabled = false\n')
+        'supports_websockets = true\n[analytics]\nenabled = false\n')
     (RUN / 'pi/models.json').write_text(json.dumps({'providers': {'openai-codex': {'baseUrl': base, 'apiKey': PI_PLACEHOLDER_KEY}}}))
     return base
 

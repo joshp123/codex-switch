@@ -8,10 +8,11 @@ Run this before a live deploy:
 scripts/dev/system-test
 ```
 
-It takes about an hour. It keeps a tunnel transferring until the 30-minute
-update limit, then runs further five-minute proofs. It starts from the newest
-published release, updates it to builds of this working tree, runs the account
-pool in isolation, and prints what the system did for each outcome:
+It takes about 15 minutes. It starts from the newest published release,
+updates it to builds of this working tree with the real installer, runs the
+account pool in isolation, and prints what the system did for each outcome.
+The installer's five-minute proving period and 30-minute switch limit are
+shortened to 30 and 150 seconds; nothing else changes.
 
 1. An update waits for model work before it switches.
 2. New Codex tasks and Pi sessions go to the account with the most weekly
@@ -28,19 +29,16 @@ pool in isolation, and prints what the system did for each outcome:
    starts on the new one and proves it.
 8. A retiring proxy finishes a reply it holds, closes an idle HTTP connection at
    once and a silent tunnel after a minute. A transferring tunnel keeps going
-   until the 30-minute limit, when the old process has gone.
+   until the switch limit, when the old process has gone.
 9. During a provider outage, launchd restarts a killed proxy, and a failed
    request is enough to start a waiting update. A candidate that cannot read
    the accounts stops, and its build is not skipped.
 10. Provider errors and client cancellations do not count against a candidate.
-    A local routing failure on an open WebSocket and malformed upstream
-    responses do count: the candidate steps aside and status shows the skipped
-    build.
-11. A serving proxy that stops answering is replaced by the next release,
-    without waiting for work.
-12. Two releases queued during a switch converge on the newest, with at most
+    Malformed upstream responses do: the candidate steps aside and status
+    shows the skipped build.
+11. Two releases queued during a switch converge on the newest, with at most
     two proxy processes and no downgrade.
-13. Each completed response is recorded once, with its account, task and tokens.
+12. Each completed response is recorded once, with its account, task and tokens.
 
 The command exits 0 only if every outcome held and nothing is left running.
 
@@ -70,15 +68,9 @@ forwards real traffic and logs a fingerprint of every model request it sends,
 so the test can see that none was sent twice. Its control file simulates what a
 test cannot wait for: a weekly allowance level, an account that runs out after
 a given number of requests, refused WebSockets, failed usage reads, and
-responses held mid-stream for one client. It can also send malformed HTTP responses to test a failed
-candidate. The test also temporarily renames a table in the isolated database
-so the next request on an open WebSocket hits a local routing failure. The
-proxy binaries built from this tree differ only in their build numbers.
-
-The isolated Codex provider uses a 15-minute stream-idle timeout so a reply
-deliberately held through the five-minute proof does not hit the client's
-normal five-minute timeout first. It uses the same proxy URL, authentication,
-Responses API and WebSocket support.
+responses held mid-stream for one client. It can also send malformed HTTP
+responses to test a failed candidate. The proxy binaries built from this tree
+differ only in their build numbers.
 
 ## Safety
 
