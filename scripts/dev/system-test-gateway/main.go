@@ -96,13 +96,15 @@ type gateway struct {
 //	hold-responses CLIENT           model responses for CLIENT (its Originator header) pause once started
 //	break-responses                 model requests receive a malformed HTTP response
 //	provider-error                  model requests receive a provider HTTP error
+//	usage-error                     usage reads receive a provider HTTP error
 type controls struct {
-	weeklyUsed    map[string]float64
-	limited       map[string]bool
-	httpOnly      bool
-	holdResponses map[string]bool
+	weeklyUsed     map[string]float64
+	limited        map[string]bool
+	httpOnly       bool
+	holdResponses  map[string]bool
 	breakResponses bool
 	providerError  bool
+	usageError     bool
 }
 
 func (gateway *gateway) readControls() (controls, error) {
@@ -124,6 +126,8 @@ func (gateway *gateway) readControls() (controls, error) {
 			parsed.breakResponses = true
 		case len(fields) == 1 && fields[0] == "provider-error":
 			parsed.providerError = true
+		case len(fields) == 1 && fields[0] == "usage-error":
+			parsed.usageError = true
 		case len(fields) == 2 && fields[0] == "hold-responses":
 			parsed.holdResponses[fields[1]] = true
 		case len(fields) == 2 && fields[0] == "limited" && gateway.knownAlias(fields[1]):
@@ -165,6 +169,9 @@ func (gateway *gateway) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	alias := gateway.alias(request)
 	webSocket := request.URL.Path == responsesPath && strings.EqualFold(request.Header.Get("Upgrade"), "websocket")
 	switch {
+	case controls.usageError && request.URL.Path == usagePath:
+		gateway.logRequest("usage-error", request, http.StatusServiceUnavailable)
+		http.Error(writer, "provider unavailable (simulation)", http.StatusServiceUnavailable)
 	case controls.providerError && request.URL.Path == responsesPath:
 		gateway.logRequest("provider-error", request, http.StatusServiceUnavailable)
 		http.Error(writer, "provider unavailable (simulation)", http.StatusServiceUnavailable)

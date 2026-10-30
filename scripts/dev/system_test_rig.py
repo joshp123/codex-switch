@@ -36,7 +36,7 @@ CLAUDE = str(CLAUDE_VERSIONS[-1]) if CLAUDE_VERSIONS else shutil.which('claude')
 CLAUDE_ACCOUNT = None
 CLAUDE_SKIP_REASON = 'no Claude account is signed in' if CLAUDE else 'Claude Code is not installed'
 MODEL = 'gpt-6-luna'
-LABEL = 'dev.codex-switch.system-test-' + hashlib.sha256(str(REPO).encode()).hexdigest()[:10] + '-terra'
+LABEL = 'dev.codex-switch.system-test-' + hashlib.sha256(str(REPO).encode()).hexdigest()[:10]
 # Pi has no ChatGPT login of its own here: it needs a JWT-shaped key with a
 # chatgpt_account_id claim. The proxy replaces the credentials it carries.
 PI_PLACEHOLDER_KEY = 'eyJhbGciOiJub25lIn0.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiY29kZXgtc3dpdGNoIn19.codex-switch'
@@ -97,16 +97,20 @@ def prepare():
 
 
 def build():
-    """Build the same source with distinct release numbers and the traffic gateway."""
+    """Build the same source with distinct release numbers and the traffic gateway.
+    The first job runs the newest published release, so the first update is one Macs really make."""
     base = int(subprocess.check_output(['git', 'rev-list', '--count', 'HEAD'], cwd=REPO, text=True))
-    builds = [(str(RUN / name), base + number) for number, name in enumerate(('codex-switch', 'candidate', 'candidate-2', 'candidate-3', 'candidate-4', 'candidate-5'))]
+    builds = [(str(RUN / name), base + number) for number, name in enumerate(('cli', 'candidate', 'candidate-2', 'candidate-3', 'candidate-4', 'candidate-5', 'candidate-6'))]
     commands = [(['scripts/dev/build-proxy', path], dict(os.environ, CODEX_SWITCH_BUILD=str(number))) for path, number in builds]
     commands.append((['go', 'build', '-o', str(RUN / 'gateway'), './scripts/dev/system-test-gateway'], os.environ))
     for command, environment in commands:
         built = subprocess.run(['devenv', 'shell', '--', *command], cwd=REPO, env=environment, capture_output=True, text=True)
         if built.returncode:
             raise Failure(f'Build failed: {" ".join(command)}\n{built.stderr[-1500:]}')
-    shutil.copy2(RUN / 'codex-switch', RUN / 'cli')
+    release = RUN / 'published-release'
+    subprocess.run(['gh', 'release', 'download', '--repo', 'joshp123/codex-switch', '--pattern', 'CodexSwitchMenu.zip', '--dir', str(release)], check=True)
+    subprocess.run(['ditto', '-x', '-k', str(release / 'CodexSwitchMenu.zip'), str(release)], check=True)
+    shutil.copy2(release / 'CodexSwitchMenu.app/Contents/Helpers/codex-switch', RUN / 'codex-switch')
 
 
 def start_gateway():
@@ -129,7 +133,7 @@ def start_proxy():
         'EnvironmentVariables': proxy_environment(),
         'KeepAlive': True,
         'RunAtLoad': True,
-        'ExitTimeOut': 0,  # launchd must never kill admitted work after a deadline
+        'ExitTimeOut': 0,
         'StandardOutPath': str(RUN / 'logs/launchd.log'),
         'StandardErrorPath': str(RUN / 'logs/launchd.log'),
     }))
@@ -375,8 +379,11 @@ class TunnelPair:
     def __init__(self):
         class Echo(socketserver.BaseRequestHandler):
             def handle(self):
-                while data := self.request.recv(4096):
-                    self.request.sendall(data)
+                try:
+                    while data := self.request.recv(4096):
+                        self.request.sendall(data)
+                except ConnectionError:
+                    pass  # the proxy closed this tunnel
         self.server = socketserver.ThreadingTCPServer(('127.0.0.1', 0), Echo)
         self.server.daemon_threads = True
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -418,20 +425,6 @@ class TunnelPair:
                 self.stopped.wait(5)
         except OSError as error:
             self.error = error
-
-    def check_idle_open(self):
-        idle = self.sockets[1]
-        idle.settimeout(65)
-        try:
-            if idle.recv(1) != b'':
-                raise Failure('The idle tunnel returned unexpected data.')
-            raise Failure('The silent tunnel was closed before the deadline.')
-        except (ConnectionResetError, BrokenPipeError):
-            raise Failure('The silent tunnel was closed before the deadline.')
-        except socket.timeout:
-            pass
-        if self.error:
-            raise Failure(f'The transferring tunnel was cut: {self.error}')
 
     def idle_closed(self):
         idle = self.sockets[1]

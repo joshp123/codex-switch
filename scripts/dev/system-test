@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Codex Switch system test: the whole system, on the real path, in one run.
 
-Builds the proxy from this working tree and runs it under a private launchd job
-on a spare port, with its own data directory and copies of the account logins.
+Starts the newest published release under a private launchd job on a spare port,
+with its own data directory and copies of the account logins, then updates it to
+builds of this working tree.
 Drives the official Codex client and, if installed, Pi on Luna at low effort
 against real OpenAI, and Claude Code on Haiku through the HTTPS proxy to Anthropic.
 A gateway between the proxy and OpenAI simulates exhausted
@@ -108,13 +109,21 @@ def run_outcome(outcome, system):
     return held
 
 
+def start_installer(candidate, name):
+    environment = dict(os.environ, HOME=str(rig.RUN / 'home'), CODEX_SWITCH_LAUNCHD_LABEL=rig.LABEL,
+                       CODEX_SWITCH_LISTEN=rig.listen_address())
+    return rig.start_client([str(rig.REPO / 'deploy/install-proxy.sh'), str(rig.RUN / candidate)], name, env=environment)
+
+
+def wait_for_candidate(old):
+    return rig.wait_for(lambda: (status['pid'] if (status := rig.deploy_status()) and status['pid'] != old else None),
+                        'the candidate to take new connections', timeout=180)
+
+
 def update_waits_for_work(system):
     """An update waits until a model reply has completed"""
     old = rig.deploy_status()['pid']
-    environment = dict(os.environ, HOME=str(rig.RUN / 'home'), CODEX_SWITCH_LAUNCHD_LABEL=rig.LABEL,
-                       CODEX_SWITCH_LISTEN=rig.listen_address())
-    update = rig.start_client([str(rig.REPO / 'deploy/install-proxy.sh'), str(rig.RUN / 'candidate')],
-                              'no-work-update', env=environment)
+    update = start_installer('candidate', 'no-work-update')
     time.sleep(10)
     if update.poll() is not None or not rig.deploy_status() or rig.deploy_status()['pid'] != old:
         raise Failure('The installer exited or switched before any model reply completed.')
@@ -347,15 +356,8 @@ def update_during_work_finishes_on_the_old_process(system):
     token_parts[1] = rig.base64.urlsafe_b64encode(rig.json.dumps(claims).encode()).decode().rstrip('=')
     auth['tokens']['id_token'] = '.'.join(token_parts)
     (signed_out / 'auth.json').write_text(rig.json.dumps(auth))
-    tunnels = rig.TunnelPair()
-    installer_environment = dict(os.environ, HOME=str(rig.RUN / 'home'), CODEX_SWITCH_LAUNCHD_LABEL=rig.LABEL,
-                                 CODEX_SWITCH_LISTEN=rig.listen_address())
-    update_command = [str(rig.REPO / 'deploy/install-proxy.sh'), str(rig.RUN / 'candidate')]
-    update_started = time.monotonic()
-    update = rig.start_client(update_command, 'update', env=installer_environment)
-    new = rig.wait_for(lambda: (status['pid'] if (status := rig.deploy_status()) and status['pid'] != old else None),
-                       'the new launchd slot to take new connections', timeout=180)
-    switch_started = int(rig.read('data/switch-started').strip())
+    update = start_installer('candidate', 'update')
+    new = wait_for_candidate(old)
     if goal.result_file.exists():
         raise Failure('The goal finished its tool call before the update began, so it did not run across the update.')
     # New work during the drain: held too, so the process holding it can be seen.
@@ -376,23 +378,10 @@ def update_during_work_finishes_on_the_old_process(system):
         for task in (websocket_task, http_task, new_task):
             task.finish()
             system.record_codex_task(task.name, task.thread)
-        tunnels.check_idle_open()
-        rig.wait_for(tunnels.idle_http_closed, 'the old idle HTTP keep-alive to close', timeout=30)
-        while rig.process_alive(old):
-            if tunnels.error and time.time() - switch_started < 1800:
-                raise Failure(f'The transferring tunnel was cut before the limit: {tunnels.error}')
-            if tunnels.idle_closed() and time.time() - switch_started < 1800:
-                raise Failure('The silent tunnel was cut before the limit.')
-            if time.time() - switch_started > 1801:
-                raise Failure('The old proxy did not retire within 30 minutes.')
-            time.sleep(0.1)
-        completed_after = time.time() - switch_started
-        if completed_after < 1790:
-            raise Failure(f'The old proxy retired after {completed_after:.0f} seconds while both tunnels were open.')
+        rig.wait_for(lambda: not rig.process_alive(old), 'the old process to finish its replies and exit', timeout=120)
     finally:
         system.extra = []
         system.apply()
-        tunnels.close()
     try:
         exit_code = update.wait(timeout=120)
     except rig.subprocess.TimeoutExpired:
@@ -410,24 +399,88 @@ def update_during_work_finishes_on_the_old_process(system):
     replies = (websocket_task.reply.lower(), http_task.reply.lower(), new_task.reply.lower())
     if canceled or 'socket' not in replies[0] or 'stream' not in replies[1] or 'new' not in replies[2]:
         raise Failure(f'{len(canceled)} held responses were cancelled; Codex replied {replies}; see process {old} in data/proxy.log.')
-    if final != new or rig.process_alive(old) or completed_after > 1801:
-        raise Failure(f'After the update, process {final} serves; expected {new}, old {old} gone within 30 minutes.')
+    if final != new or rig.process_alive(old):
+        raise Failure(f'After the update, process {final} serves; expected {new}, with old process {old} gone.')
     loaded = [label for label in (rig.LABEL, rig.LABEL + '.a', rig.LABEL + '.b')
               if rig.subprocess.run(['launchctl', 'print', f'gui/{os.getuid()}/{label}'], capture_output=True).returncode == 0]
     if len(loaded) != 1 or loaded[0] == rig.LABEL:
         raise Failure(f'Expected one new slot after adopting the legacy job, got {loaded}.')
-    same_bundle = rig.start_client(update_command, 'same-bundle', env=installer_environment)
+    same_bundle = start_installer('candidate', 'same-bundle')
     if same_bundle.wait(timeout=120) or rig.deploy_status()['pid'] != final:
         raise Failure(f'Reopening the same bundle restarted the proxy or failed: {rig.read("logs/same-bundle.err")[-400:]}')
     for label, thread in (('A held task', websocket_task.thread), ('A held task', http_task.thread), ('The new task', new_task.thread), ('The goal', goal.thread)):
         require_no_replay(label, rig.forwarded_requests(thread=thread))
     if errors:
         raise Failure(f'The update completed, but Codex showed {describe_errors(errors)}.')
-    return ('The legacy launchd job was adopted while one WebSocket and one HTTP response were mid-stream. New work went to the\n'
-            'new slot despite an account needing sign-in; both responses finished on the old process, which exited within 30 minutes.\n'
+    return ('The published release\'s launchd job was adopted while one WebSocket and one HTTP response were mid-stream. New work\n'
+            'went to the new slot despite an account needing sign-in; both responses finished on the old process, which then exited.\n'
             'Only the new slot remained loaded.\n'
-            'The idle HTTP connection closed. A silent Claude tunnel and a transferring tunnel stayed open until the deadline.\n'
             'A goal running a tool across the update finished with its effect run once. Nothing was replayed and Codex showed no error.')
+
+
+def retiring_proxy_keeps_only_working_connections(system):
+    """A retiring proxy closes idle connections, keeps a transferring tunnel, and is gone 30 minutes after the switch began"""
+    warm = rig.CodexTask('retire-warmup', 'Reply with the word ready.').finish()
+    system.record_codex_task('retire warmup', warm.thread)
+    old = rig.deploy_status()['pid']
+    tunnels = rig.TunnelPair()
+    update = start_installer('candidate-2', 'retire-update')
+    new = wait_for_candidate(old)
+    switch_started = int(rig.read('data/switch-started').strip())
+    try:
+        rig.wait_for(lambda: f'process {old} stopping' in rig.proxy_log(), 'the old proxy to begin retiring', timeout=400)
+        retirement_began = time.monotonic()
+        rig.wait_for(tunnels.idle_http_closed, 'the idle HTTP connection to close', timeout=30)
+        rig.wait_for(tunnels.idle_closed, 'the silent tunnel to close', timeout=90)
+        silent_for = time.monotonic() - retirement_began
+        if silent_for < 55:
+            raise Failure(f'The silent tunnel closed {silent_for:.0f} seconds into retirement, before its minute.')
+        while rig.process_alive(old):
+            if tunnels.error:
+                raise Failure(f'The transferring tunnel was cut {time.time() - switch_started:.0f} seconds after the switch began: {tunnels.error}')
+            if time.time() - switch_started > 1801:
+                raise Failure('The old proxy did not retire within 30 minutes.')
+            time.sleep(0.1)
+        completed_after = time.time() - switch_started
+    finally:
+        tunnels.close()
+    if completed_after < 1790:
+        raise Failure(f'The old proxy retired {completed_after:.0f} seconds after the switch began, with a tunnel still transferring.')
+    if update.wait(timeout=120):
+        raise Failure(f'The update command failed: {rig.read("logs/retire-update.err")[-400:]}')
+    if rig.deploy_status()['pid'] != new:
+        raise Failure(f'After retirement process {rig.deploy_status()["pid"]} serves, not {new}.')
+    return (f'The idle HTTP connection closed at once and the silent tunnel {silent_for:.0f} seconds into retirement. The transferring tunnel\n'
+            f'kept moving data until the limit, and the old process was gone {completed_after:.0f} seconds after the switch began.')
+
+
+def provider_outage_blocks_neither_restart_nor_release(system):
+    """During a provider outage a crashed proxy restarts, and a release waits instead of being skipped"""
+    old = rig.deploy_status()['pid']
+    system.extra = ['usage-error']
+    system.apply()
+    try:
+        os.kill(old, signal.SIGKILL)
+        restarted = rig.wait_for(lambda: (status['pid'] if (status := rig.deploy_status()) and status['pid'] != old else None),
+                                 'launchd to restart the proxy during the outage', timeout=60)
+        work = rig.CodexTask('outage-work', 'Reply with the word ready.').finish()
+        system.record_codex_task('work during the outage', work.thread)
+        build = rig.subprocess.check_output([str(rig.RUN / 'candidate-3'), 'print-build'], text=True).strip()
+        update = start_installer('candidate-3', 'outage-update')
+        try:
+            exit_code = update.wait(timeout=180)
+        except rig.subprocess.TimeoutExpired:
+            raise Failure('The installer did not stop when it could not read the accounts.')
+    finally:
+        system.extra = []
+        system.apply()
+    skipped = rig.read('data/skipped-builds').splitlines() if (rig.RUN / 'data/skipped-builds').exists() else []
+    if not exit_code or build in skipped:
+        raise Failure(f'The installer exited with {exit_code} and skipped builds are {skipped}; the release should be tried again.')
+    if rig.deploy_status()['pid'] != restarted:
+        raise Failure('The serving proxy changed although the candidate could not read the accounts.')
+    return ('With every usage read failing, launchd restarted a killed proxy and it served a real reply. A candidate that could not\n'
+            f'read the accounts stopped; build {build} was not skipped, so the installer tries it again.')
 
 
 
@@ -436,13 +489,9 @@ def failed_release_steps_aside(system):
     warm = rig.CodexTask('failure-warmup', 'Reply with the word ready.').finish()
     system.record_codex_task('failure warmup', warm.thread)
     old = rig.deploy_status()['pid']
-    environment = dict(os.environ, HOME=str(rig.RUN / 'home'), CODEX_SWITCH_LAUNCHD_LABEL=rig.LABEL,
-                       CODEX_SWITCH_LISTEN=rig.listen_address())
-    candidate = rig.RUN / 'candidate-2'
-    build = rig.subprocess.check_output([str(candidate), 'print-build'], text=True).strip()
-    install = rig.start_client([str(rig.REPO / 'deploy/install-proxy.sh'), str(candidate)], 'bad-update', env=environment)
-    new = rig.wait_for(lambda: (status['pid'] if (status := rig.deploy_status()) and status['pid'] != old else None),
-                       'the candidate to take new connections', timeout=180)
+    build = rig.subprocess.check_output([str(rig.RUN / 'candidate-3'), 'print-build'], text=True).strip()
+    install = start_installer('candidate-3', 'bad-update')
+    new = wait_for_candidate(old)
     system.extra = ['provider-error']
     system.apply()
     for number in range(3):
@@ -522,15 +571,11 @@ def queued_releases_install_newest(system):
     """Queued releases converge on the newest without overlapping switches"""
     warm = rig.CodexTask('queue-warmup', 'Reply with the word ready.').finish()
     system.record_codex_task('queue warmup', warm.thread)
-    environment = dict(os.environ, HOME=str(rig.RUN / 'home'), CODEX_SWITCH_LAUNCHD_LABEL=rig.LABEL,
-                       CODEX_SWITCH_LISTEN=rig.listen_address())
-    command = str(rig.REPO / 'deploy/install-proxy.sh')
     original = rig.deploy_status()['pid']
-    first = rig.start_client([command, str(rig.RUN / 'candidate-3')], 'queue-first', env=environment)
-    first_pid = rig.wait_for(lambda: (status['pid'] if (status := rig.deploy_status()) and status['pid'] != original else None),
-                             'the first queued build to start', timeout=180)
-    middle = rig.start_client([command, str(rig.RUN / 'candidate-4')], 'queue-middle', env=environment)
-    newest = rig.start_client([command, str(rig.RUN / 'candidate-5')], 'queue-newest', env=environment)
+    first = start_installer('candidate-4', 'queue-first')
+    wait_for_candidate(original)
+    middle = start_installer('candidate-5', 'queue-middle')
+    newest = start_installer('candidate-6', 'queue-newest')
     observed, process_counts = [], []
     monitoring = threading.Event()
     def observe():
@@ -547,7 +592,7 @@ def queued_releases_install_newest(system):
     system.record_codex_task('traffic during queued update', traffic.thread)
     if first.wait(timeout=1900):
         raise Failure(f'First queued update failed: {rig.read("logs/queue-first.err")[-400:]}')
-    expected = int(rig.subprocess.check_output([str(rig.RUN / 'candidate-5'), 'print-build'], text=True).strip())
+    expected = int(rig.subprocess.check_output([str(rig.RUN / 'candidate-6'), 'print-build'], text=True).strip())
     deadline = time.monotonic() + 1900
     while time.monotonic() < deadline and (middle.poll() is None or newest.poll() is None):
         time.sleep(1)
@@ -610,7 +655,8 @@ def format_duration(seconds):
 
 OUTCOMES = [update_waits_for_work, new_work_goes_to_the_most_allowance_left, claude_works_through_the_https_proxy, request_without_task_id_is_served,
             exhausted_task_moves_on_its_next_turn,
-            goal_continues_when_an_account_returns, update_during_work_finishes_on_the_old_process, failed_release_steps_aside,
+            goal_continues_when_an_account_returns, update_during_work_finishes_on_the_old_process,
+            retiring_proxy_keeps_only_working_connections, provider_outage_blocks_neither_restart_nor_release, failed_release_steps_aside,
             queued_releases_install_newest, every_response_recorded_once]
 
 if __name__ == '__main__':
