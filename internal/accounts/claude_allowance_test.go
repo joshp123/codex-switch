@@ -240,3 +240,32 @@ func TestClaudeRestrictionSavedWithoutItsLimitIsHeldAsAThrottle(t *testing.T) {
 		t.Fatalf("named Sonnet limit: %q until %s, want until its reset in 3h", reason, until.Sub(now))
 	}
 }
+
+// A fast-mode request that names no usage limit is the proxy's to pass on; one
+// that names a limit, in any of the forms the account rules read, is not.
+func TestClaudeRejectionNamesUsageLimitAsTheAccountRulesDo(t *testing.T) {
+	reset := strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10)
+	rejection := func(fields map[string]string) http.Header {
+		headers := make(http.Header)
+		for name, value := range fields {
+			headers.Set("anthropic-ratelimit-unified-"+name, value)
+		}
+		return headers
+	}
+	for _, check := range []struct {
+		name   string
+		fields map[string]string
+		limit  bool
+	}{
+		{"credits refusal for fast mode, as on 31 October", map[string]string{"overage-disabled-reason": "org_level_disabled", "reset": reset}, false},
+		{"throttle with an allowed window", map[string]string{"status": "rejected", "reset": reset, "5h-utilization": "0.15", "5h-status": "allowed", "5h-reset": reset}, false},
+		{"five-hour window rejected", map[string]string{"5h-utilization": "0.4", "5h-status": "rejected", "5h-reset": reset}, true},
+		{"five-hour window rate limited", map[string]string{"5h-utilization": "1.0", "5h-status": "rate_limited", "5h-reset": reset}, true},
+		{"weekly window fully used", map[string]string{"7d-utilization": "1.0", "7d-reset": reset}, true},
+		{"representative claim alone", map[string]string{"representative-claim": "seven_day_opus", "reset": reset}, true},
+	} {
+		if got := ClaudeRejectionNamesUsageLimit(rejection(check.fields)); got != check.limit {
+			t.Errorf("%s: names a usage limit = %v, want %v", check.name, got, check.limit)
+		}
+	}
+}

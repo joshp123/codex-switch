@@ -135,6 +135,29 @@ func restrictClaudeAccountAfterRejection(fact *AccountRoutingFact, model string,
 	log.Printf("%s: Claude limit for %s; available after %s", fact.DisplayName, model, latestReset.Local().Format("Mon 2 Jan 15:04"))
 }
 
+// ClaudeRejectionNamesUsageLimit is whether a 429 names a usage limit, by the
+// rule restrictClaudeAccountAfterRejection applies: a representative claim for
+// a window, or a window Anthropic reports at its limit.
+func ClaudeRejectionNamesUsageLimit(headers http.Header) bool {
+	claim := headers.Get("anthropic-ratelimit-unified-representative-claim")
+	if claim == "five_hour" || strings.HasPrefix(claim, "seven_day") {
+		return true
+	}
+	for header := range headers {
+		header = strings.ToLower(header)
+		window := strings.TrimSuffix(strings.TrimPrefix(header, "anthropic-ratelimit-unified-"), "-utilization")
+		if !strings.HasPrefix(header, "anthropic-ratelimit-unified-") || !strings.HasSuffix(header, "-utilization") || window == "overage" {
+			continue
+		}
+		prefix := "anthropic-ratelimit-unified-" + window
+		used, err := strconv.ParseFloat(headers.Get(prefix+"-utilization"), 64)
+		if err == nil && !claudeHeaderReset(headers.Get(prefix+"-reset")).IsZero() && (used >= 1 || claudeStatusLimited(headers.Get(prefix+"-status"))) {
+			return true
+		}
+	}
+	return false
+}
+
 func claudeModelDisplayName(model string) string {
 	family := ClaudeModelFamily(model)
 	if family == "" {

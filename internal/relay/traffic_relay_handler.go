@@ -360,7 +360,7 @@ func (handler *TrafficRelayHandler) createBytePreservingReverseProxy() *httputil
 		ModifyResponse: func(upstreamResponse *http.Response) error {
 			routedRequest := upstreamResponse.Request.Context().Value(relayRequestContextKey{}).(*routedRelayRequest)
 			if routedRequest.provider == accounts.ProviderClaude {
-				if routedRequest.claudeFastMode && upstreamResponse.StatusCode == http.StatusTooManyRequests && !claudeNamesUsageLimit(upstreamResponse.Header) {
+				if routedRequest.claudeFastMode && upstreamResponse.StatusCode == http.StatusTooManyRequests && !accounts.ClaudeRejectionNamesUsageLimit(upstreamResponse.Header) {
 					return handler.passClaudeFastModeRefusal(routedRequest, upstreamResponse)
 				}
 				if handler.accountObserver != nil {

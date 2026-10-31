@@ -86,22 +86,6 @@ func (handler *TrafficRelayHandler) passClaudeFastModeRefusal(request *routedRel
 	return nil
 }
 
-// claudeNamesUsageLimit is whether a 429 names a usage limit: a representative
-// claim, or a window Anthropic reports rejected.
-func claudeNamesUsageLimit(header http.Header) bool {
-	if header.Get("Anthropic-Ratelimit-Unified-Representative-Claim") != "" {
-		return true
-	}
-	for name, values := range header {
-		name = strings.ToLower(name)
-		if strings.HasPrefix(name, "anthropic-ratelimit-unified-") && strings.HasSuffix(name, "-status") &&
-			name != "anthropic-ratelimit-unified-status" && name != "anthropic-ratelimit-unified-overage-status" && slices.Contains(values, "rejected") {
-			return true
-		}
-	}
-	return false
-}
-
 // answerClaudeRejection decides what Claude Code sees of Anthropic's 429. No
 // rejected request is replayed: the client's next request chooses from the
 // whole pool. Claude Code stops at a 429 that names a usage limit, so while an
