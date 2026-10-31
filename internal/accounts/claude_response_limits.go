@@ -69,44 +69,7 @@ func (monitor *Monitor) ObserveClaudeResponse(name store.AccountName, model stri
 	fact.AllowanceSample = mergeClaudeAllowance(fact.AllowanceSample, incoming)
 	fact.ClaudeRestrictions = mergeClaudeRestrictions(nil, fact.ClaudeRestrictions)
 	if status == http.StatusTooManyRequests {
-		scopes := make(map[string]time.Time)
-		for _, window := range incoming.Windows {
-			if !window.LimitReached && window.UsedPercent < 100 {
-				continue
-			}
-			scope := claudeWindowRestrictionScope(window)
-			if window.ResetsAt.After(scopes[scope]) {
-				scopes[scope] = window.ResetsAt
-			}
-		}
-		claim := headers.Get("anthropic-ratelimit-unified-representative-claim")
-		fallbackScope := canonicalClaudeModelID(model)
-		if claim == "five_hour" || claim == "seven_day" {
-			fallbackScope = ""
-		}
-		deadline := claudeHeaderReset(headers.Get("anthropic-ratelimit-unified-reset"))
-		if retry := claudeRetryAfter(headers, now); retry.After(deadline) {
-			deadline = retry
-		}
-		if len(scopes) == 0 || fallbackScope == "" {
-			if !deadline.After(now) {
-				deadline = now.Add(time.Minute)
-			}
-			if deadline.After(scopes[fallbackScope]) {
-				scopes[fallbackScope] = deadline
-			}
-		}
-		latestReset := deadline
-		for scope, reset := range scopes {
-			if deadline.After(reset) {
-				reset = deadline
-			}
-			fact.ClaudeRestrictions[scope] = ClaudeRestriction{ResetsAt: reset, ObservedAt: now}
-			if reset.After(latestReset) {
-				latestReset = reset
-			}
-		}
-		log.Printf("%s: Claude limit for %s; available after %s", fact.DisplayName, model, latestReset.Local().Format("Mon 2 Jan 15:04"))
+		restrictClaudeAccountAfterRejection(&fact, model, headers, incoming, now)
 	} else if status >= 200 && status < 300 {
 		clearClaudeRestrictionsFromSample(&fact, incoming)
 	}
@@ -120,6 +83,55 @@ func (monitor *Monitor) ObserveClaudeResponse(name store.AccountName, model stri
 	if err := monitor.saveClaudeAllowanceCache(string(name), claudeAllowanceCache{Sample: fact.AllowanceSample, Restrictions: fact.ClaudeRestrictions}); err != nil {
 		log.Printf("%s: could not save Claude limits: %v", fact.DisplayName, err)
 	}
+}
+
+// restrictClaudeAccountAfterRejection keeps an account from model work after a
+// 429. A usage limit is one Anthropic names: a window at its limit, or a
+// representative claim. A 429 that names neither is a throttle: the account
+// waits for Retry-After, or a minute, and is then tried again. Its
+// unified-reset header is not when the account can work again. On 31 October
+// it was midnight UTC, neither account's five-hour nor weekly reset, and
+// treating it as a deadline kept two usable accounts from Opus for hours.
+func restrictClaudeAccountAfterRejection(fact *AccountRoutingFact, model string, headers http.Header, incoming AllowanceSample, now time.Time) {
+	scopes := make(map[string]time.Time)
+	for _, window := range incoming.Windows {
+		if !window.LimitReached && window.UsedPercent < 100 {
+			continue
+		}
+		scope := claudeWindowRestrictionScope(window)
+		if window.ResetsAt.After(scopes[scope]) {
+			scopes[scope] = window.ResetsAt
+		}
+	}
+	claim := headers.Get("anthropic-ratelimit-unified-representative-claim")
+	claimedScope, claimNamesLimit := "", claim == "five_hour" || claim == "seven_day"
+	if strings.HasPrefix(claim, "seven_day_") {
+		claimedScope, claimNamesLimit = ClaudeModelFamily(model), true
+	}
+	limitReset := claudeHeaderReset(headers.Get("anthropic-ratelimit-unified-reset"))
+	if claimNamesLimit && limitReset.After(scopes[claimedScope]) {
+		scopes[claimedScope] = limitReset
+	}
+	retryAt := claudeRetryAfter(headers, now)
+	if len(scopes) == 0 {
+		if !retryAt.After(now) {
+			retryAt = now.Add(time.Minute)
+		}
+		fact.ClaudeRestrictions[canonicalClaudeModelID(model)] = ClaudeRestriction{ResetsAt: retryAt, ObservedAt: now, Throttle: true}
+		log.Printf("%s: Anthropic throttled %s without naming a usage limit; trying the account again after %s", fact.DisplayName, model, retryAt.Local().Format("15:04:05"))
+		return
+	}
+	latestReset := retryAt
+	for scope, reset := range scopes {
+		if retryAt.After(reset) {
+			reset = retryAt
+		}
+		fact.ClaudeRestrictions[scope] = ClaudeRestriction{ResetsAt: reset, ObservedAt: now, Claim: claim}
+		if reset.After(latestReset) {
+			latestReset = reset
+		}
+	}
+	log.Printf("%s: Claude limit for %s; available after %s", fact.DisplayName, model, latestReset.Local().Format("Mon 2 Jan 15:04"))
 }
 
 func claudeModelDisplayName(model string) string {

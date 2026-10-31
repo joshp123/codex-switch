@@ -270,8 +270,63 @@ def claude_works_through_the_https_proxy(system):
         raise Failure(f'Claude Code received tokens {received}; the proxy recorded {rows}.')
     system.records.append(('Claude Code task', task, lambda: [received], None))
     return (f'Claude Code replied {reply!r} through HTTPS_PROXY and NODE_EXTRA_CA_CERTS, using Haiku at low effort against\n'
-            'api.anthropic.com over TLS. Its task was placed on the Claude account and its response was recorded once,\n'
+            'api.anthropic.com. Its task was placed on the Claude account and its response was recorded once,\n'
             f'with {received[0]} input tokens ({received[1]} cached) and {received[2]} output tokens.')
+
+
+def claude_throttle_holds_the_account_for_a_minute(system):
+    """When Anthropic throttles a Claude request without naming a usage limit, Claude Code still gets its reply, from the same account, within about a minute"""
+    if not rig.CLAUDE_ACCOUNT:
+        raise Failure(f'Claude Code was not tested: {rig.CLAUDE_SKIP_REASON}.')
+    session, throttled_before = str(uuid.uuid4()), len(rig.gateway_events('claude-throttled'))
+    system.extra = ['claude-throttle 1']
+    system.apply()
+    began = time.monotonic()
+    result = rig.run_claude(session, must_succeed=False)
+    took = time.monotonic() - began
+    system.extra = []
+    system.apply()
+    reply, task = result.get('result', '').strip(), 'claude:code:' + session
+    if len(rig.gateway_events('claude-throttled')) != throttled_before + 1:
+        raise Failure('The gateway did not throttle exactly one Claude request.')
+    if result.get('is_error') or not reply:
+        raise Failure(f'After one throttled request Claude Code did not get a reply in {format_duration(took)}: {reply!r}.')
+    if took > 120 or rig.pinned_account(task) != rig.CLAUDE_ACCOUNT:
+        raise Failure(f'Claude Code replied after {format_duration(took)}, on {rig.pinned_account(task)}.')
+    usage = result['usage']
+    received = (usage['input_tokens'] + usage.get('cache_read_input_tokens', 0) + usage.get('cache_creation_input_tokens', 0),
+                usage.get('cache_read_input_tokens', 0), usage['output_tokens'], 0)
+    system.records.append(('Claude Code task after a throttle', task, lambda: [received], None))
+    held = [line.split(': ', 1)[1] for line in rig.proxy_log().splitlines() if 'without naming a usage limit' in line][-1:]
+    return (f'Anthropic answered the first request with a 429 naming no limit and a reset seven hours away. The proxy said:\n'
+            f'{held[0] if held else "(nothing)"}\nClaude Code replied {reply!r} on the same account after {format_duration(took)}.')
+
+
+def claude_limit_reaches_the_client_at_once(system):
+    """With every Claude account at its usage limit, Claude Code stops at once and says when the limit resets, and so does the next task"""
+    if not rig.CLAUDE_ACCOUNT:
+        raise Failure(f'Claude Code was not tested: {rig.CLAUDE_SKIP_REASON}.')
+    system.extra = ['claude-limited']
+    system.apply()
+    runs = []
+    for _ in ('first task', 'next task'):
+        session, rejected_before = str(uuid.uuid4()), len(rig.gateway_events('claude-rejected-usage-limit'))
+        began = time.monotonic()
+        result = rig.run_claude(session, must_succeed=False)
+        runs.append((session, time.monotonic() - began, result.get('result', '').strip(), result.get('is_error'),
+                     len(rig.gateway_events('claude-rejected-usage-limit')) - rejected_before))
+    system.extra = []
+    system.apply()
+    for label, (session, took, said, is_error, _) in zip(('The first task', 'The next task'), runs):
+        if not is_error or took > 60 or 'limit' not in said.lower():
+            raise Failure(f'{label}: Claude Code took {format_duration(took)} and said {said!r}; it should stop at once and name the limit.')
+    session, took, said, _, sent = runs[1]
+    told = [line.split(' refused after ', 1)[1] for line in rig.proxy_log().splitlines() if 'claude:code:' + session in line and ' refused after ' in line]
+    if sent or not told:
+        raise Failure(f'The next task sent {sent} requests to Anthropic; the proxy knew the account was limited and should answer itself.')
+    return (f'Anthropic refused the first task for the five-hour limit; Claude Code stopped after {format_duration(runs[0][1])}: {runs[0][2]!r}\n'
+            f'The proxy answered the next task itself, sending nothing to Anthropic ({told[0]}).\n'
+            f'Claude Code stopped after {format_duration(took)}: {said!r}')
 
 
 def exhausted_task_moves_on_its_next_turn(system):
@@ -666,7 +721,8 @@ def format_duration(seconds):
     return f'{minutes}m {seconds:02d}s'
 
 
-OUTCOMES = [update_waits_for_work, new_work_goes_to_the_most_allowance_left, claude_works_through_the_https_proxy, request_without_task_id_is_served,
+OUTCOMES = [update_waits_for_work, new_work_goes_to_the_most_allowance_left, claude_works_through_the_https_proxy,
+            claude_throttle_holds_the_account_for_a_minute, claude_limit_reaches_the_client_at_once, request_without_task_id_is_served,
             exhausted_task_moves_on_its_next_turn,
             goal_continues_when_an_account_returns, update_during_work_finishes_on_the_old_process,
             retiring_proxy_keeps_only_working_connections, provider_outage_blocks_neither_restart_nor_release, failed_release_steps_aside,

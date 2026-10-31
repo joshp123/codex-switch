@@ -15,19 +15,8 @@ import (
 // model work. It returns "" when the account can serve modelSlug, otherwise the
 // reason in the words the status command and the proxy log show.
 func (router *TaskRouter) accountUnavailableReason(fact accounts.AccountRoutingFact, modelSlug string) (string, error) {
-	switch {
-	case fact.AccountState == accounts.AccountSignInRequired:
-		command := "codex-switch login "
-		if fact.Provider == accounts.ProviderClaude {
-			command += "--claude "
-		}
-		return "signed out; run: " + command + fmt.Sprintf("%q", fact.DisplayName), nil
-	case !accountCredentialsUsable(fact.Credentials) || fact.AccountState == accounts.AccountCredentialsUnavailable:
-		return withCause("cannot read its saved login", fact.AccountStateCause), nil
-	case fact.Provider != accounts.ProviderClaude && fact.AccountState == accounts.AccountLimited:
-		return "OpenAI reports its usage limit reached" + resetSuffix(latestReset(fact.AllowanceSample)), nil
-	case !fact.AccountState.Eligible() && !(fact.Provider == accounts.ProviderClaude && fact.AccountState == accounts.AccountLimited):
-		return "account state " + string(fact.AccountState), nil
+	if problem := accountAccessProblem(fact); problem != "" {
+		return problem, nil
 	}
 	now := router.currentTime().UTC()
 	if reason := accounts.ReserveUnavailableReason(fact, now); reason != "" {
@@ -71,6 +60,43 @@ func (router *TaskRouter) accountUnavailableReason(fact accounts.AccountRoutingF
 		return "does not offer " + modelSlug, nil
 	}
 	return "", nil
+}
+
+// accountAccessProblem covers what no allowance reset fixes, and the OpenAI
+// limit state. It returns "" when only allowance and reserve remain to check.
+func accountAccessProblem(fact accounts.AccountRoutingFact) string {
+	switch {
+	case fact.AccountState == accounts.AccountSignInRequired:
+		command := "codex-switch login "
+		if fact.Provider == accounts.ProviderClaude {
+			command += "--claude "
+		}
+		return "signed out; run: " + command + fmt.Sprintf("%q", fact.DisplayName)
+	case !accountCredentialsUsable(fact.Credentials) || fact.AccountState == accounts.AccountCredentialsUnavailable:
+		return withCause("cannot read its saved login", fact.AccountStateCause)
+	case fact.Provider != accounts.ProviderClaude && fact.AccountState == accounts.AccountLimited:
+		return "OpenAI reports its usage limit reached" + resetSuffix(latestReset(fact.AllowanceSample))
+	case !fact.AccountState.Eligible() && !(fact.Provider == accounts.ProviderClaude && fact.AccountState == accounts.AccountLimited):
+		return "account state " + string(fact.AccountState)
+	}
+	return ""
+}
+
+// claudePoolAvailableAgain is the earliest time a Claude account that can be
+// used at all is freed by an allowance reset, with the limit that ends then.
+func (router *TaskRouter) claudePoolAvailableAgain(facts []accounts.AccountRoutingFact, modelSlug string) (time.Time, string) {
+	var earliest time.Time
+	earliestClaim := ""
+	for _, fact := range facts {
+		if accountAccessProblem(fact) != "" {
+			continue
+		}
+		availableAt, claim, found := accounts.ClaudeAvailableAgain(fact, modelSlug, router.currentTime().UTC())
+		if found && (earliest.IsZero() || availableAt.Before(earliest)) {
+			earliest, earliestClaim = availableAt, claim
+		}
+	}
+	return earliest, earliestClaim
 }
 
 // weeklyAllowanceLeft is the free share of the weekly allowance, which ranks

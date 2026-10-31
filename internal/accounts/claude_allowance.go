@@ -3,6 +3,7 @@ package accounts
 import (
 	"fmt"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -176,6 +177,10 @@ func mergeClaudeAllowance(current, incoming AllowanceSample) AllowanceSample {
 type ClaudeRestriction struct {
 	ResetsAt   time.Time
 	ObservedAt time.Time
+	// Claim is Anthropic's representative claim on the 429, such as five_hour.
+	Claim string `json:",omitempty"`
+	// Throttle is a 429 that named no usage limit.
+	Throttle bool `json:",omitempty"`
 }
 
 func claudeWindowRestrictionScope(window ReportedWindow) string {
@@ -200,20 +205,80 @@ func mergeClaudeRestrictions(current, incoming map[string]ClaudeRestriction) map
 
 func ClaudeUnavailableReason(fact AccountRoutingFact, model string, now time.Time) (string, time.Time) {
 	var blockedUntil time.Time
+	throttled := false
 	for scope, restriction := range fact.ClaudeRestrictions {
 		if (scope == "" || scope == ClaudeModelFamily(model) || scope == canonicalClaudeModelID(model)) && restriction.ResetsAt.After(blockedUntil) {
-			blockedUntil = restriction.ResetsAt
+			blockedUntil, throttled = restriction.ResetsAt, restriction.Throttle
 		}
 	}
 	for _, window := range fact.AllowanceSample.Windows {
 		if claudeWindowMatchesModel(window, model) && (window.LimitReached || window.UsedPercent >= 100) && window.ResetsAt.After(blockedUntil) {
-			blockedUntil = window.ResetsAt
+			blockedUntil, throttled = window.ResetsAt, false
 		}
+	}
+	if blockedUntil.After(now) && throttled {
+		return "Anthropic throttled it", blockedUntil
 	}
 	if blockedUntil.After(now) {
 		return "Claude reports its usage limit reached", blockedUntil
 	}
 	return "", time.Time{}
+}
+
+// ClaudeAvailableAgain is when the account's reserve and Claude limits next
+// allow model work, and Anthropic's name for the limit that ends then. found
+// is false when no known reset frees the account.
+func ClaudeAvailableAgain(fact AccountRoutingFact, model string, now time.Time) (availableAt time.Time, limitClaim string, found bool) {
+	var resets []time.Time
+	for _, window := range fact.AllowanceSample.Windows {
+		resets = append(resets, window.ResetsAt)
+	}
+	for _, restriction := range fact.ClaudeRestrictions {
+		resets = append(resets, restriction.ResetsAt)
+	}
+	slices.SortFunc(resets, time.Time.Compare)
+	for _, reset := range resets {
+		if !reset.After(now) {
+			continue
+		}
+		if reason, _ := ClaudeUnavailableReason(fact, model, reset); reason == "" && ReserveUnavailableReason(fact, reset) == "" {
+			return reset, claudeLimitClaimEndingAt(fact, model, reset), true
+		}
+	}
+	return time.Time{}, "", false
+}
+
+// claudeLimitClaimEndingAt names a limit as Anthropic's representative claim,
+// which Claude Code requires before it treats a 429 as a usage limit. It is ""
+// for a throttle, which Claude Code retries.
+func claudeLimitClaimEndingAt(fact AccountRoutingFact, model string, reset time.Time) string {
+	claim := ""
+	for _, window := range fact.AllowanceSample.Windows {
+		if !window.ResetsAt.Equal(reset) || !claudeWindowMatchesModel(window, model) {
+			continue
+		}
+		switch {
+		case window.DurationSeconds != 7*86400:
+			if claim == "" {
+				claim = "five_hour"
+			}
+		case ClaudeModelFamily(window.ModelName) == "opus":
+			return "seven_day_opus"
+		case ClaudeModelFamily(window.ModelName) == "sonnet":
+			return "seven_day_sonnet"
+		default:
+			claim = "seven_day"
+		}
+	}
+	if claim != "" {
+		return claim
+	}
+	for _, restriction := range fact.ClaudeRestrictions {
+		if restriction.ResetsAt.Equal(reset) && restriction.Claim != "" {
+			return restriction.Claim
+		}
+	}
+	return ""
 }
 
 func ClaudeWeeklyAllowanceLeft(fact AccountRoutingFact, model string, now time.Time) (float64, bool) {

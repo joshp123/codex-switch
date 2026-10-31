@@ -16,6 +16,23 @@ import (
 // ErrNoAvailableAccount means new work must wait for account capacity.
 var ErrNoAvailableAccount = errors.New("no account can take this work")
 
+// ClaudePoolExhaustedError is ErrNoAvailableAccount for Claude model work. It
+// says when an allowance reset next frees an account; AvailableAgainAt is zero
+// when no reset will, for example when every account is signed out.
+type ClaudePoolExhaustedError struct {
+	AccountProblems  string
+	AvailableAgainAt time.Time
+	// LimitClaim is Anthropic's name for the limit that ends at AvailableAgainAt,
+	// such as five_hour or seven_day.
+	LimitClaim string
+}
+
+func (exhausted *ClaudePoolExhaustedError) Error() string {
+	return ErrNoAvailableAccount.Error() + ": " + exhausted.AccountProblems
+}
+
+func (exhausted *ClaudePoolExhaustedError) Unwrap() error { return ErrNoAvailableAccount }
+
 // RouteDecision carries credentials with the account identity so the relay cannot mix accounts.
 type RouteDecision struct {
 	AccountName store.AccountName
@@ -121,6 +138,10 @@ func (router *TaskRouter) RouteForProviderTask(taskID store.TaskID, workKind sto
 	}
 	if !found {
 		router.accountFacts.RequestAccountRoutingFactsRefresh()
+		if provider == accounts.ProviderClaude {
+			availableAgainAt, limitClaim := router.claudePoolAvailableAgain(facts, modelSlug)
+			return RouteDecision{}, &ClaudePoolExhaustedError{AccountProblems: router.describeUnavailableAccounts(facts, modelSlug), AvailableAgainAt: availableAgainAt, LimitClaim: limitClaim}
+		}
 		return RouteDecision{}, fmt.Errorf("%w: %s", ErrNoAvailableAccount, router.describeUnavailableAccounts(facts, modelSlug))
 	}
 

@@ -1,8 +1,9 @@
-// system-test-gateway stands between the proxy under test and real OpenAI.
-// It forwards real traffic, logs a fingerprint of every model request it
-// forwards, and simulates the account conditions a system test cannot wait
-// for: a weekly allowance level, an exhausted account, refused WebSockets and
-// a response held mid-stream. It is never part of a live proxy.
+// system-test-gateway stands between the proxy under test and real OpenAI
+// and Anthropic. It forwards real traffic, logs a fingerprint of every model
+// request it forwards, and simulates the account conditions a system test
+// cannot wait for: a weekly allowance level, an exhausted account, a Claude
+// throttle or usage limit, refused WebSockets and a response held mid-stream.
+// It is never part of a live proxy.
 package main
 
 import (
@@ -34,6 +35,9 @@ import (
 const (
 	responsesPath = "/backend-api/codex/responses"
 	usagePath     = "/backend-api/wham/usage"
+	// Claude Code's model requests and the proxy's Claude usage reads.
+	claudeMessagesPath = "/v1/messages"
+	claudeUsagePath    = "/api/oauth/usage"
 )
 
 func main() {
@@ -49,7 +53,8 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	gateway := &gateway{controlPath: *controlPath, aliases: aliases, upstream: &url.URL{Scheme: "https", Host: "chatgpt.com"}}
+	gateway := &gateway{controlPath: *controlPath, aliases: aliases, upstream: &url.URL{Scheme: "https", Host: "chatgpt.com"},
+		claudeUpstream: &url.URL{Scheme: "https", Host: "api.anthropic.com"}}
 	if _, err := gateway.readControls(); err != nil {
 		log.Fatal(err)
 	}
@@ -57,7 +62,11 @@ func main() {
 	gateway.transport.DisableCompression = true
 	gateway.reverseProxy = &httputil.ReverseProxy{
 		Rewrite: func(request *httputil.ProxyRequest) {
-			request.SetURL(gateway.upstream)
+			if isClaudePath(request.In.URL.Path) {
+				request.SetURL(gateway.claudeUpstream)
+			} else {
+				request.SetURL(gateway.upstream)
+			}
 			if request.In.URL.Path == usagePath {
 				request.Out.Header.Del("Accept-Encoding") // so a weekly level can be rewritten
 			}
@@ -79,12 +88,13 @@ func main() {
 }
 
 type gateway struct {
-	controlPath  string
-	aliases      map[string]string // ChatGPT account ID to account-N
-	upstream     *url.URL
-	transport    *http.Transport
-	reverseProxy *httputil.ReverseProxy
-	controlMu    sync.Mutex
+	controlPath    string
+	aliases        map[string]string // ChatGPT account ID to account-N
+	upstream       *url.URL
+	claudeUpstream *url.URL
+	transport      *http.Transport
+	reverseProxy   *httputil.ReverseProxy
+	controlMu      sync.Mutex
 }
 
 // controls is one reading of the simulation file:
@@ -97,6 +107,8 @@ type gateway struct {
 //	break-responses                 model requests receive a malformed HTTP response
 //	provider-error                  model requests receive a provider HTTP error
 //	usage-error                     usage reads receive a provider HTTP error
+//	claude-throttle COUNT           the next COUNT Claude model requests receive a 429 that names no usage limit
+//	claude-limited                  Claude's five-hour allowance has run out
 type controls struct {
 	weeklyUsed     map[string]float64
 	limited        map[string]bool
@@ -105,6 +117,8 @@ type controls struct {
 	breakResponses bool
 	providerError  bool
 	usageError     bool
+	claudeThrottle bool
+	claudeLimited  bool
 }
 
 func (gateway *gateway) readControls() (controls, error) {
@@ -128,6 +142,15 @@ func (gateway *gateway) readControls() (controls, error) {
 			parsed.providerError = true
 		case len(fields) == 1 && fields[0] == "usage-error":
 			parsed.usageError = true
+		case len(fields) == 1 && fields[0] == "claude-limited":
+			parsed.claudeLimited = true
+		case len(fields) == 2 && fields[0] == "claude-throttle":
+			// takeClaudeThrottle applies the count; here it is only validated.
+			count, err := strconv.Atoi(fields[1])
+			if err != nil || count < 0 {
+				return controls{}, fmt.Errorf("invalid control line %q", scanner.Text())
+			}
+			parsed.claudeThrottle = count > 0
 		case len(fields) == 2 && fields[0] == "hold-responses":
 			parsed.holdResponses[fields[1]] = true
 		case len(fields) == 2 && fields[0] == "limited" && gateway.knownAlias(fields[1]):
@@ -169,6 +192,22 @@ func (gateway *gateway) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	alias := gateway.alias(request)
 	webSocket := request.URL.Path == responsesPath && strings.EqualFold(request.Header.Get("Upgrade"), "websocket")
 	switch {
+	case controls.claudeLimited && request.URL.Path == claudeUsagePath:
+		gateway.logRequest("claude-usage-read-limited", request, http.StatusOK)
+		writer.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(writer, `{"five_hour":{"utilization":100,"resets_at":%q}}`, claudeLimitReset().Format(time.RFC3339))
+	case controls.claudeLimited && request.URL.Path == claudeMessagesPath:
+		gateway.logRequest("claude-rejected-usage-limit", request, http.StatusTooManyRequests)
+		reset := strconv.FormatInt(claudeLimitReset().Unix(), 10)
+		writeClaudeRejection(writer, map[string]string{"status": "rejected", "reset": reset, "representative-claim": "five_hour",
+			"5h-status": "rejected", "5h-utilization": "1.0", "5h-reset": reset})
+	case controls.claudeThrottle && request.URL.Path == claudeMessagesPath && gateway.takeClaudeThrottle():
+		// What Anthropic sent on 31 October 2026: a 429 naming no exhausted
+		// window and no limit, with a reset hours away that matched neither
+		// the account's five-hour nor its weekly window.
+		gateway.logRequest("claude-throttled", request, http.StatusTooManyRequests)
+		writeClaudeRejection(writer, map[string]string{"status": "rejected", "reset": strconv.FormatInt(time.Now().Add(7*time.Hour).Unix(), 10),
+			"5h-status": "allowed", "5h-utilization": "0.15", "5h-reset": strconv.FormatInt(time.Now().Add(3*time.Hour).Unix(), 10)})
 	case controls.usageError && request.URL.Path == usagePath:
 		gateway.logRequest("usage-error", request, http.StatusServiceUnavailable)
 		http.Error(writer, "provider unavailable (simulation)", http.StatusServiceUnavailable)
@@ -197,6 +236,9 @@ func (gateway *gateway) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	case webSocket:
 		gateway.relayWebSocket(writer, request)
 	default:
+		if request.URL.Path == claudeMessagesPath {
+			gateway.logRequest("claude-forwarded", request, 0)
+		}
 		if request.URL.Path == responsesPath {
 			body, err := io.ReadAll(request.Body)
 			if err != nil {
@@ -207,6 +249,43 @@ func (gateway *gateway) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		}
 		gateway.reverseProxy.ServeHTTP(writer, request)
 	}
+}
+
+func isClaudePath(path string) bool {
+	return strings.HasPrefix(path, "/v1/") || strings.HasPrefix(path, "/api/")
+}
+
+// claudeLimitReset is an hour from now, as usageLimitError's reset is.
+func claudeLimitReset() time.Time { return time.Now().Add(time.Hour).Truncate(time.Second) }
+
+func writeClaudeRejection(writer http.ResponseWriter, limits map[string]string) {
+	for name, value := range limits {
+		writer.Header().Set("Anthropic-Ratelimit-Unified-"+name, value)
+	}
+	writer.Header().Set("Content-Type", "application/json")
+	writer.WriteHeader(http.StatusTooManyRequests)
+	writer.Write([]byte(`{"type":"error","error":{"type":"rate_limit_error","message":"Rate limited (simulation)"}}`))
+}
+
+// takeClaudeThrottle uses up one claude-throttle request.
+func (gateway *gateway) takeClaudeThrottle() bool {
+	gateway.controlMu.Lock()
+	defer gateway.controlMu.Unlock()
+	data, err := os.ReadFile(gateway.controlPath)
+	if err != nil {
+		return false
+	}
+	lines := strings.Split(string(data), "\n")
+	for index, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[0] == "claude-throttle" {
+			if count, err := strconv.Atoi(fields[1]); err == nil && count > 0 {
+				lines[index] = "claude-throttle " + strconv.Itoa(count-1)
+				return os.WriteFile(gateway.controlPath, []byte(strings.Join(lines, "\n")), 0o600) == nil
+			}
+		}
+	}
+	return false
 }
 
 func usageLimitError() []byte {
@@ -504,7 +583,7 @@ func loadAccountAliases(dataDirectory string) (map[string]string, error) {
 			} `json:"tokens"`
 		}
 		if json.Unmarshal(data, &auth) == nil && auth.Provider == "claude" {
-			continue // Claude reaches Anthropic directly, not through this gateway
+			continue // Claude requests carry no account ID; the test copies one Claude account
 		}
 		if json.Unmarshal(data, &auth) != nil || auth.Tokens.AccountID == "" {
 			return nil, fmt.Errorf("%s has no account ID", path)

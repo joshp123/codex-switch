@@ -154,6 +154,7 @@ def start_proxy():
 def proxy_environment():
     # PATH lets the proxy find a Codex CLI installed without the desktop app.
     return {'CODEX_SWITCH_DATA_DIR': str(RUN / 'data'), 'CODEX_SWITCH_UPSTREAM_ORIGIN': read('gateway-origin'),
+            'CODEX_SWITCH_CLAUDE_UPSTREAM_ORIGIN': read('gateway-origin'),
             'CODEX_HOME': str(RUN / 'home'), 'PI_CODING_AGENT_DIR': str(RUN / 'pi'), 'PATH': os.environ['PATH']}
 
 
@@ -269,8 +270,8 @@ def run_pi(name, prompt, session):
     return finish_pi(name, start_pi(name, prompt, session))
 
 
-def run_claude(session):
-    """Claude Code through the two printed proxy settings, to real Anthropic over TLS."""
+def run_claude(session, must_succeed=True):
+    """Claude Code through the two printed proxy settings, to real Anthropic through the gateway."""
     environment = {name: value for name, value in client_environment().items()
                    if not name.upper().startswith(('CLAUDE_', 'ANTHROPIC_'))
                    and not name.upper().endswith('_PROXY')
@@ -285,7 +286,7 @@ def run_claude(session):
     process = start_client([CLAUDE, '-p', 'Reply with the word ready only.', '--model', 'haiku', '--effort', 'low',
                             '--output-format', 'json', '--session-id', session, '--tools', '',
                             '--setting-sources', '', '--strict-mcp-config'], 'claude', env=environment)
-    if process.wait(timeout=180):
+    if process.wait(timeout=180) and must_succeed:
         raise Failure(f'Claude Code exited with status {process.returncode}: {read("logs/claude.err")[-400:]} '
                       f'{read("logs/claude.out")[-400:]}')
     return json.loads(read('logs/claude.out'))

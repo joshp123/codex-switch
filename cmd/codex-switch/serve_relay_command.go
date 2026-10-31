@@ -94,9 +94,13 @@ func serveRelay(tcpListenAddress string) {
 
 	upstreamTransport := relay.NewUpstreamTransport()
 	accountMonitor := accountapi.NewMonitor(dataDir(), upstreamOrigin, codexstate.FindCodexExecutable(), &http.Client{Timeout: 30 * time.Second, Transport: upstreamTransport}, storeDatabase)
-	claudeUpstreamOrigin, err := url.Parse("https://api.anthropic.com")
+	claudeUpstreamOriginValue := strings.TrimSpace(os.Getenv("CODEX_SWITCH_CLAUDE_UPSTREAM_ORIGIN"))
+	if claudeUpstreamOriginValue == "" {
+		claudeUpstreamOriginValue = "https://api.anthropic.com"
+	}
+	claudeUpstreamOrigin, err := url.Parse(claudeUpstreamOriginValue)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal(fmt.Errorf("Claude upstream origin: %w", err))
 	}
 	accountMonitor.SetClaudeUpstreamOrigin(claudeUpstreamOrigin)
 	// A process that starts during a switch is its candidate. Any other start

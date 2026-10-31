@@ -1,4 +1,4 @@
-<!-- Written by AI on 2026.10.11 by model claude-opus-5.5; updated on 2026.10.29 by model GPT-6.1 Terra. -->
+<!-- Written by AI on 2026.10.11 by model claude-opus-5.5; updated on 2026.10.29 by model GPT-6.1 Terra and on 2026.10.31 by model claude-opus-5.5. -->
 
 # System test
 
@@ -19,26 +19,32 @@ shortened to 30 and 150 seconds; nothing else changes.
    allowance left, and stay there when another account takes the lead.
 3. Claude Code gets a reply through the HTTPS proxy, on the Claude account,
    recorded once with its tokens.
-4. A request without a task ID is served.
-5. When a task's account runs out, its next turn moves to another account. No
+4. When Anthropic throttles a Claude request without naming a usage limit,
+   Claude Code still gets its reply, from the same account, within about a
+   minute.
+5. With every Claude account at its usage limit, Claude Code stops at once and
+   says when the limit resets, and the next task gets the same answer from the
+   proxy without a request to Anthropic.
+6. A request without a task ID is served.
+7. When a task's account runs out, its next turn moves to another account. No
    model work is replayed, no tool effect repeats, and Codex shows no error.
-6. With every account out of allowance, a running goal continues by itself
+8. With every account out of allowance, a running goal continues by itself
    when one account comes back.
-7. An update adopts the published release's single job during work. Responses
+9. An update adopts the published release's single job during work. Responses
    in flight over WebSocket and HTTP finish on the old process, while new work
    starts on the new one and proves it.
-8. A retiring proxy finishes a reply it holds, closes an idle HTTP connection at
+10. A retiring proxy finishes a reply it holds, closes an idle HTTP connection at
    once and a silent tunnel after a minute. A transferring tunnel keeps going
    until the switch limit, when the old process has gone.
-9. During a provider outage, launchd restarts a killed proxy, and a failed
+11. During a provider outage, launchd restarts a killed proxy, and a failed
    request is enough to start a waiting update. A candidate that cannot read
    the accounts stops, and its build is not skipped.
-10. Provider errors and client cancellations do not count against a candidate.
+12. Provider errors and client cancellations do not count against a candidate.
     Malformed upstream responses do: the candidate steps aside and status
     shows the skipped build.
-11. Two releases queued during a switch converge on the newest, with at most
+13. Two releases queued during a switch converge on the newest, with at most
     two proxy processes and no downgrade.
-12. Each completed response is recorded once, with its account, task and tokens.
+14. Each completed response is recorded once, with its account, task and tokens.
 
 The command exits 0 only if every outcome held and nothing is left running.
 
@@ -57,18 +63,20 @@ The command exits 0 only if every outcome held and nothing is left running.
   uses about 30 model requests and 0.5 million input tokens, mostly cached.
 - The newest Claude Code inside Claude Desktop, or `claude` on `PATH`. It runs
   one short prompt on the latest Haiku at low effort, using `HTTPS_PROXY` and
-  `NODE_EXTRA_CA_CERTS` from `print-claude-config`. The proxy connects directly
-  to `api.anthropic.com` over TLS; Claude traffic never goes through the gateway.
+  `NODE_EXTRA_CA_CERTS` from `print-claude-config`. The proxy reaches
+  `api.anthropic.com` through the gateway, which connects over TLS.
 - The update path: `deploy/install-proxy.sh` against private launchd jobs.
 
 ## What is simulated
 
-`scripts/dev/system-test-gateway` stands between the proxy and OpenAI. It
+`scripts/dev/system-test-gateway` stands between the proxy and OpenAI and
+Anthropic. It
 forwards real traffic and logs a fingerprint of every model request it sends,
 so the test can see that none was sent twice. Its control file simulates what a
 test cannot wait for: a weekly allowance level, an account that runs out after
 a given number of requests, refused WebSockets, failed usage reads, and
-responses held mid-stream for one client. It can also send malformed HTTP
+responses held mid-stream for one client, and for Claude a 429 that names
+no usage limit, as Anthropic sent on 31 October 2026, or a five-hour limit. It can also send malformed HTTP
 responses to test a failed candidate. The proxy binaries built from this tree
 differ only in their build numbers.
 

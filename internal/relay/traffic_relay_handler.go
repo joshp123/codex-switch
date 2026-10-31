@@ -242,6 +242,12 @@ func (handler *TrafficRelayHandler) serveAuthenticatedTraffic(response http.Resp
 		recheck := time.NewTicker(5 * time.Second)
 		defer recheck.Stop()
 		for errors.Is(err, routing.ErrNoAvailableAccount) {
+			if provider == accounts.ProviderClaude {
+				if told := answerExhaustedClaudePool(response, err, time.Since(waitStarted)); told != "" {
+					log.Printf("%s refused after %s; told the client %s", describeModelRequest(taskID, client, ""), time.Since(waitStarted).Round(time.Second), told)
+					return
+				}
+			}
 			select {
 			case <-request.Context().Done():
 				log.Printf("%s stopped waiting for an account after %s: the client closed the request", describeModelRequest(taskID, client, ""), time.Since(waitStarted).Round(time.Second))
