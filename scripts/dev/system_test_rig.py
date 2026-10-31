@@ -37,6 +37,8 @@ CLAUDE = str(CLAUDE_VERSIONS[-1]) if CLAUDE_VERSIONS else shutil.which('claude')
 CLAUDE_ACCOUNTS = []
 # Proxy timers, shortened as the installer's are in system-test.
 ACCOUNT_READ_SECONDS, CONNECTION_DRAIN_SECONDS = 15, 10
+# Copied tokens cannot be refreshed, so each must outlast a run of about seven minutes.
+TOKEN_MARGIN_SECONDS = 20 * 60
 CLAUDE_SKIP_REASON = 'no Claude account is signed in' if CLAUDE else 'Claude Code is not installed'
 MODEL = 'gpt-6-luna'
 LABEL = 'dev.codex-switch.system-test-' + hashlib.sha256(str(REPO).encode()).hexdigest()[:10]
@@ -72,13 +74,13 @@ def prepare():
             if not CLAUDE or not all(auth.get(field) for field in
                     ('access_token', 'refresh_token', 'expires_at', 'account_id', 'organization_id', 'email')):
                 continue
-            if datetime.fromisoformat(auth['expires_at'].replace('Z', '+00:00')).timestamp() <= time.time() + 3600:
-                CLAUDE_SKIP_REASON = 'the signed-in Claude token expires within an hour'
+            if datetime.fromisoformat(auth['expires_at'].replace('Z', '+00:00')).timestamp() <= time.time() + TOKEN_MARGIN_SECONDS:
+                CLAUDE_SKIP_REASON = 'the signed-in Claude token expires within 20 minutes'
                 continue
             auth['refresh_token'] = 'system-test-no-refresh'
         else:
             claims = json.loads(base64.urlsafe_b64decode(auth['tokens']['access_token'].split('.')[1] + '==='))
-            if claims['exp'] < time.time() + 3600:
+            if claims['exp'] < time.time() + TOKEN_MARGIN_SECONDS:
                 raise Failure(f'{source.parent.name}\'s access token expires in {int((claims["exp"] - time.time()) / 60)} minutes; '
                               'the live proxy renews it when it expires. Run the system test after that.')
             auth['tokens']['refresh_token'] = 'system-test-no-refresh'
@@ -544,11 +546,21 @@ def account_keys_by_name():
     return dict(line.split('\t')[:2] for line in proxy_command('accounts').splitlines() if '\t' in line)
 
 
+def status_shown():
+    environment = dict(client_environment(), CODEX_SWITCH_DATA_DIR=str(RUN / 'data'))
+    return subprocess.run([str(cli_path()), 'status'], env=environment, capture_output=True, text=True).stdout
+
+
+def available_claude_accounts():
+    """Claude accounts `codex-switch status` shows as available to a person."""
+    key_by_name = account_keys_by_name()
+    return [key_by_name[match[1]] for line in status_shown().splitlines()
+            if (match := re.match(r'(Claude \d+) · .* · available$', line)) and match[1] in key_by_name]
+
+
 def weekly_used_percent():
     """Weekly allowance used per account, as `codex-switch status` shows it to a person."""
-    environment = dict(client_environment(), CODEX_SWITCH_DATA_DIR=str(RUN / 'data'))
-    shown = subprocess.run([str(cli_path()), 'status'], env=environment,
-                           capture_output=True, text=True).stdout
+    shown = status_shown()
     key_by_name = account_keys_by_name()
     used, account = {}, None
     for line in shown.splitlines():

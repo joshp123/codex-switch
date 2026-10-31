@@ -35,10 +35,10 @@ with how long it took. Timers are shortened; nothing else changes:
 7. Claude Code gets a reply through the HTTPS proxy, on a Claude account,
    recorded once with its tokens.
 8. When Anthropic throttles a Claude request without naming a usage limit,
-   Claude Code still gets its reply within seconds.
+   the account serves the task again once the throttle ends.
 9. When a Claude task's account reaches its usage limit, the task's next
    prompt is answered by another account and Claude Code shows no limit. This
-   needs two signed-in Claude accounts.
+   needs two Claude accounts with allowance left.
 10. With every Claude account at its usage limit, Claude Code stops at once and
     says when the limit resets, and the next task gets the same answer from
     the proxy without a request to Anthropic.
@@ -95,9 +95,9 @@ differ only in their build numbers.
 
 The test reads the account logins from the live data directory and copies only
 the access tokens. Refresh tokens stay behind, so the test cannot rotate a live
-login. Each account needs an access token valid for at least another hour.
+login. Each account needs an access token valid for at least another 20 minutes.
 The test copies every signed-in Claude account the same way. It prints `SKIP Claude Code` if
-none is signed in, none has an hour left on its token, or Claude Code is absent;
+none is signed in, none has 20 minutes left on its token, or Claude Code is absent;
 the Claude outcome then fails.
 
 It never touches the live proxy, its launchd job or data directory,

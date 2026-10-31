@@ -274,28 +274,40 @@ def claude_works_through_the_https_proxy(system):
 
 
 def claude_throttle_holds_the_account_briefly(system):
-    """When Anthropic throttles a Claude request without naming a usage limit, Claude Code still gets its reply within seconds"""
-    require_claude_accounts(1)
+    """When Anthropic throttles a Claude request without naming a usage limit, the account serves the task again once the throttle ends"""
+    throttled = require_available_claude_accounts(1)[0]
+    others = [account for account in rig.CLAUDE_ACCOUNTS if account != throttled]
     session, throttled_before = str(uuid.uuid4()), len(rig.gateway_events('claude-throttled'))
-    with simulating(system, 'claude-throttle 1'):
-        began = time.monotonic()
-        result = rig.run_claude(session, must_succeed=False)
-        took = time.monotonic() - began
+    # A full reserve holds every other account back, so only the throttled account can serve.
+    for account in others:
+        rig.proxy_command('reserve', account, '100', '100')
+    try:
+        with simulating(system, 'claude-throttle 1'):
+            began = time.monotonic()
+            result = rig.run_claude(session, must_succeed=False)
+            took = time.monotonic() - began
+    finally:
+        for account in others:
+            rig.proxy_command('reserve', account, 'off')
     reply, task = result.get('result', '').strip(), 'claude:code:' + session
     if len(rig.gateway_events('claude-throttled')) != throttled_before + 1:
         raise Failure('The gateway did not throttle exactly one Claude request.')
-    if result.get('is_error') or not reply or took > 60:
-        raise Failure(f'After one throttled request Claude Code took {format_duration(took)} and said {reply!r}.')
+    if result.get('is_error') or not reply or rig.pinned_account(task) != throttled:
+        raise Failure(f'After one throttled request on {throttled}, Claude Code said {reply!r} after {format_duration(took)}; '
+                      f'the task is pinned to {rig.pinned_account(task)}.')
+    if not 5 <= took <= 60:
+        raise Failure(f'Claude Code replied after {format_duration(took)}; the throttle asked for five seconds.')
     received = claude_tokens(result)
     system.records.append(('Claude Code task after a throttle', task, lambda: [received], None))
     held = [line.split(': ', 1)[1] for line in rig.proxy_log().splitlines() if 'without naming a usage limit' in line][-1:]
-    return ('Anthropic answered the first request with a 429 naming no limit, a five-second Retry-After and a reset\n'
-            f'seven hours away. The proxy said: {held[0] if held else "(nothing)"}\nClaude Code replied {reply!r} after {format_duration(took)}.')
+    return (f'With every other Claude account held back, Anthropic answered {throttled}\'s first request with a 429 naming no limit,\n'
+            f'a five-second Retry-After and a reset seven hours away. The proxy said: {held[0] if held else "(nothing)"}\n'
+            f'{throttled} replied {reply!r} after {format_duration(took)}.')
 
 
 def claude_limit_moves_the_task_to_a_free_account(system):
     """When a Claude task's account reaches its usage limit, the task's next prompt is answered by another account, and Claude Code shows no limit"""
-    require_claude_accounts(2)
+    require_available_claude_accounts(2)
     session = str(uuid.uuid4())
     first = rig.run_claude(session)
     task = 'claude:code:' + session
@@ -343,6 +355,20 @@ def claude_limit_reaches_the_client_at_once(system):
 def require_claude_accounts(count):
     if len(rig.CLAUDE_ACCOUNTS) < count:
         raise Failure(f'Claude Code was not tested: {rig.CLAUDE_SKIP_REASON if not rig.CLAUDE_ACCOUNTS else f"this needs {count} signed-in Claude accounts"}.')
+
+
+def require_available_claude_accounts(count):
+    """The Claude accounts with allowance left, if there are at least count."""
+    require_claude_accounts(count)
+    # The status snapshot is composed at most a minute apart, so a reserve just lifted can take that long to show.
+    def enough():
+        available = rig.available_claude_accounts()
+        return available if len(available) >= count else None
+    available = rig.wait_for(enough, f'{count} Claude accounts to show as available', timeout=70, fail=False, interval=5) \
+        or rig.available_claude_accounts()
+    if len(available) < count:
+        raise Failure(f'This needs {count} Claude accounts with allowance left; `codex-switch status` shows {len(available)} available.')
+    return available
 
 
 def claude_tokens(result):
