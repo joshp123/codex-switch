@@ -1,8 +1,8 @@
-"""The isolated system the system test runs: a private copy of the proxy under
-launchd, the gateway to real OpenAI, the official clients, and readers for the
-evidence each of them leaves."""
+"""One isolated system the system test runs: a private copy of the proxy under
+launchd, the fake providers in place of OpenAI and Anthropic, the official
+clients, and readers for the evidence each of them leaves. The system test
+runs several at once, each in its own run directory."""
 import base64
-from datetime import datetime
 import hashlib
 import http.client
 import json
@@ -24,8 +24,15 @@ import time
 import urllib.request
 
 REPO = Path(__file__).resolve().parents[2]
-RUN = REPO / '.project-private/system-test'
+ROOT = REPO / '.project-private/system-test'
+# The system test gives each isolated system its own run directory.
+RUN = Path(os.environ.get('CODEX_SWITCH_SYSTEM_TEST_RUN', ROOT / 'run'))
+BUILDS = ROOT / 'builds'
+# The smoke test runs one system against the real services, with copies of the live logins.
+REAL_SERVICES = os.environ.get('CODEX_SWITCH_REAL_SERVICES') == '1'
 LIVE_DATA = Path.home() / 'Library/Application Support/codex-switch'
+# The newest published release, kept between runs by its tag.
+RELEASES = REPO / '.project-private/system-test-releases'
 # The Codex client the proxy itself reads: the one inside the desktop app, else `codex` on PATH.
 DESKTOP_CODEX = Path('/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex')
 CODEX = str(DESKTOP_CODEX) if DESKTOP_CODEX.exists() else shutil.which('codex')
@@ -34,17 +41,17 @@ CLAUDE_DESKTOP = Path.home() / 'Library/Application Support/Claude/claude-code'
 CLAUDE_VERSIONS = sorted(CLAUDE_DESKTOP.glob('*/**/claude.app/Contents/MacOS/claude'),
                          key=lambda path: tuple(map(int, path.relative_to(CLAUDE_DESKTOP).parts[0].split('.'))))
 CLAUDE = str(CLAUDE_VERSIONS[-1]) if CLAUDE_VERSIONS else shutil.which('claude')
-CLAUDE_ACCOUNTS = []
-# Proxy timers, shortened as the installer's are in system-test.
-ACCOUNT_READ_SECONDS, CONNECTION_DRAIN_SECONDS = 15, 10
-# Copied tokens cannot be refreshed, so each must outlast a run of about seven minutes.
-TOKEN_MARGIN_SECONDS = 20 * 60
-CLAUDE_SKIP_REASON = 'no Claude account is signed in' if CLAUDE else 'Claude Code is not installed'
+CODEX_ACCOUNTS = ['account-1', 'account-2', 'account-3']
+CLAUDE_ACCOUNTS = ['account-4', 'account-5', 'account-6']
+# Proxy timers, shortened as the installer's are in system-test. The fake
+# providers answer at once, so they can be this short.
+ACCOUNT_READ_SECONDS, CONNECTION_DRAIN_SECONDS = 1, 1
 MODEL = 'gpt-6-luna'
-LABEL = 'dev.codex-switch.system-test-' + hashlib.sha256(str(REPO).encode()).hexdigest()[:10]
+LABEL = 'dev.codex-switch.system-test-' + hashlib.sha256(str(RUN).encode()).hexdigest()[:10]
 # Pi has no ChatGPT login of its own here: it needs a JWT-shaped key with a
 # chatgpt_account_id claim. The proxy replaces the credentials it carries.
 PI_PLACEHOLDER_KEY = 'eyJhbGciOiJub25lIn0.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiY29kZXgtc3dpdGNoIn19.codex-switch'
+BUILD_NAMES = ('cli', 'candidate', 'candidate-2', 'candidate-3', 'candidate-4', 'candidate-5', 'candidate-6')
 
 started_processes = []
 started_tunnels = []
@@ -57,74 +64,118 @@ class Failure(Exception):
 # Setup
 
 
-def prepare():
-    """Creates a fresh run directory with copies of the account logins."""
-    global CLAUDE_SKIP_REASON
-    os.umask(0o077)  # logins, logs and the proxy's data stay private to this user
-    if not CODEX:
-        raise Failure('Codex is not installed: neither the desktop app nor `codex` on PATH.')
-    if RUN.exists():
-        subprocess.run(['trash', str(RUN)], check=True)
-    for part in ('home', 'work', 'data', 'logs', 'pi', 'claude'):
-        (RUN / part).mkdir(parents=True)
-    accounts = []
-    for source in sorted(LIVE_DATA.glob('account-*/auth.json')):
-        auth = json.loads(source.read_text())
-        if auth.get('provider') == 'claude':
-            if not CLAUDE or not all(auth.get(field) for field in
-                    ('access_token', 'refresh_token', 'expires_at', 'account_id', 'organization_id', 'email')):
-                continue
-            if datetime.fromisoformat(auth['expires_at'].replace('Z', '+00:00')).timestamp() <= time.time() + TOKEN_MARGIN_SECONDS:
-                CLAUDE_SKIP_REASON = 'the signed-in Claude token expires within 20 minutes'
-                continue
-            auth['refresh_token'] = 'system-test-no-refresh'
-        else:
-            claims = json.loads(base64.urlsafe_b64decode(auth['tokens']['access_token'].split('.')[1] + '==='))
-            if claims['exp'] < time.time() + TOKEN_MARGIN_SECONDS:
-                raise Failure(f'{source.parent.name}\'s access token expires in {int((claims["exp"] - time.time()) / 60)} minutes; '
-                              'the live proxy renews it when it expires. Run the system test after that.')
-            auth['tokens']['refresh_token'] = 'system-test-no-refresh'
-        # Only access tokens are copied: a refresh here would rotate the live
-        # proxy's refresh token and sign the live proxy out.
-        target = RUN / 'data' / source.parent.name / 'auth.json'
-        target.parent.mkdir()
-        target.write_text(json.dumps(auth))
-        if auth.get('provider') == 'claude':
-            CLAUDE_ACCOUNTS.append(source.parent.name)
-        else:
-            accounts.append(source.parent.name)
-    if len(accounts) < 2:
-        raise Failure('The system test needs at least two signed-in accounts.')
-    (RUN / 'home/auth.json').write_text((RUN / 'data' / accounts[0] / 'auth.json').read_text())
-    (RUN / 'work/input.txt').write_text('3\n5\n8\n')
-    subprocess.run(['git', 'init', '-q', str(RUN / 'work')], check=True)
-    return accounts
-
-
 def build():
-    """Build the same source with distinct release numbers and the traffic gateway.
-    The first job runs the newest published release, so the first update is one Macs really make."""
+    """Builds the same source with distinct release numbers, and the fake providers, once for every isolated system;
+    and fetches the newest published release, so one system's first update is one Macs really make."""
+    BUILDS.mkdir(parents=True)
+    newest = subprocess.Popen(['gh', 'release', 'view', '--repo', 'joshp123/codex-switch', '--json', 'tagName', '--jq', '.tagName'],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     base = int(subprocess.check_output(['git', 'rev-list', '--count', 'HEAD'], cwd=REPO, text=True))
-    builds = [(str(RUN / name), base + number) for number, name in enumerate(('cli', 'candidate', 'candidate-2', 'candidate-3', 'candidate-4', 'candidate-5', 'candidate-6'))]
     # One devenv shell runs every build at once; separate devenv shells race on its state.
-    script = ' '.join(f'CODEX_SWITCH_BUILD={number} scripts/dev/build-proxy {shlex.quote(path)} & ' for path, number in builds)
-    script += f'go build -o {shlex.quote(str(RUN / "gateway"))} ./scripts/dev/system-test-gateway & '
+    script = ' '.join(f'CODEX_SWITCH_BUILD={base + number} scripts/dev/build-proxy {shlex.quote(str(BUILDS / name))} & '
+                      for number, name in enumerate(BUILD_NAMES))
+    script += f'go build -o {shlex.quote(str(BUILDS / "fake-providers"))} ./scripts/dev/fake-providers & '
     script += 'failed=0; for job in $(jobs -p); do wait "$job" || failed=1; done; exit $failed'
     built = subprocess.run(['devenv', 'shell', '--', 'bash', '-c', script], cwd=REPO, capture_output=True, text=True)
     if built.returncode:
         raise Failure(f'Build failed:\n{built.stderr[-1500:]}')
-    release = RUN / 'published-release'
-    subprocess.run(['gh', 'release', 'download', '--repo', 'joshp123/codex-switch', '--pattern', 'CodexSwitchMenu.zip', '--dir', str(release)], check=True)
-    subprocess.run(['ditto', '-x', '-k', str(release / 'CodexSwitchMenu.zip'), str(release)], check=True)
-    shutil.copy2(release / 'CodexSwitchMenu.app/Contents/Helpers/codex-switch', RUN / 'codex-switch')
+    tag, problem = newest.communicate()
+    if newest.returncode:
+        raise Failure(f'Could not find the newest published release: {problem[-400:]}')
+    release = RELEASES / tag.strip()
+    if not (release / 'CodexSwitchMenu.app').exists():
+        subprocess.run(['gh', 'release', 'download', tag.strip(), '--repo', 'joshp123/codex-switch', '--pattern', 'CodexSwitchMenu.zip',
+                        '--dir', str(release)], check=True, capture_output=True)
+        subprocess.run(['ditto', '-x', '-k', str(release / 'CodexSwitchMenu.zip'), str(release)], check=True)
+    (BUILDS / 'published-release').symlink_to(release)
 
 
-def start_gateway():
-    log = (RUN / 'logs/gateway.log').open('w')
-    started_processes.append(subprocess.Popen([str(RUN / 'gateway'), '--data-dir', str(RUN / 'data'), '--control', str(RUN / 'control')],
+def prepare(first_proxy):
+    """Creates this system's run directory with fake accounts. first_proxy is 'published-release' or 'cli', the build
+    its launchd job starts with."""
+    os.umask(0o077)  # logins, logs and the proxy's data stay private to this user
+    if not CODEX:
+        raise Failure('Codex is not installed: neither the desktop app nor `codex` on PATH.')
+    for part in ('home', 'work', 'data', 'logs', 'logs/requests', 'pi', 'claude'):
+        (RUN / part).mkdir(parents=True)
+    for name in (*BUILD_NAMES, 'fake-providers'):
+        os.link(BUILDS / name, RUN / name)
+    first = BUILDS / 'published-release/CodexSwitchMenu.app/Contents/Helpers/codex-switch' if first_proxy == 'published-release' else BUILDS / 'cli'
+    shutil.copy2(first, RUN / 'codex-switch')
+    for number, account in enumerate(CODEX_ACCOUNTS, 1):
+        (RUN / 'data' / account).mkdir()
+        (RUN / 'data' / account / 'auth.json').write_text(json.dumps(fake_codex_login(number)))
+    for number, account in enumerate(CLAUDE_ACCOUNTS, 1):
+        (RUN / 'data' / account).mkdir()
+        (RUN / 'data' / account / 'auth.json').write_text(json.dumps(fake_claude_login(number)))
+    (RUN / 'home/auth.json').write_text((RUN / 'data' / CODEX_ACCOUNTS[0] / 'auth.json').read_text())
+    (RUN / 'work/input.txt').write_text('3\n5\n8\n')
+    subprocess.run(['git', 'init', '-q', str(RUN / 'work')], check=True)
+    return list(CODEX_ACCOUNTS)
+
+
+def prepare_real_services():
+    """Creates the smoke test's run directory with copies of the live logins' access tokens. Refresh tokens stay
+    behind, so the test cannot rotate a live login; each copied token must outlast the run."""
+    os.umask(0o077)
+    for part in ('home', 'work', 'data', 'logs', 'pi', 'claude'):
+        (RUN / part).mkdir(parents=True)
+    os.link(BUILDS / 'cli', RUN / 'cli')
+    shutil.copy2(BUILDS / 'cli', RUN / 'codex-switch')
+    codex, claude = [], []
+    for source in sorted(LIVE_DATA.glob('account-*/auth.json')):
+        auth = json.loads(source.read_text())
+        if auth.get('provider') == 'claude':
+            if time.time() + 600 >= time.mktime(time.strptime(auth['expires_at'][:19], '%Y-%m-%dT%H:%M:%S')) - time.timezone:
+                continue
+            auth['refresh_token'] = 'smoke-test-no-refresh'
+            claude.append(source.parent.name)
+        else:
+            claims = json.loads(base64.urlsafe_b64decode(auth['tokens']['access_token'].split('.')[1] + '==='))
+            if claims['exp'] < time.time() + 600:
+                continue
+            auth['tokens']['refresh_token'] = 'smoke-test-no-refresh'
+            codex.append(source.parent.name)
+        (RUN / 'data' / source.parent.name).mkdir()
+        (RUN / 'data' / source.parent.name / 'auth.json').write_text(json.dumps(auth))
+    if not codex or not claude:
+        raise Failure(f'The smoke test needs a signed-in Codex and Claude account with ten minutes left on its token; found {codex} and {claude}.')
+    CODEX_ACCOUNTS[:], CLAUDE_ACCOUNTS[:] = codex, claude
+    (RUN / 'home/auth.json').write_text((RUN / 'data' / codex[0] / 'auth.json').read_text())
+
+
+def fake_jwt(claims):
+    encode = lambda value: base64.urlsafe_b64encode(json.dumps(value).encode()).decode().rstrip('=')
+    return f'{encode({"alg": "none"})}.{encode(claims)}.fake'
+
+
+def fake_codex_login(number):
+    """A ChatGPT login only the fake providers accept, valid for a year."""
+    auth = {'chatgpt_account_id': f'system-test-account-{number}', 'chatgpt_user_id': f'system-test-user-{number}', 'chatgpt_plan_type': 'pro'}
+    claims = {'exp': int(time.time()) + 365 * 86400, 'email': f'codex-{number}@system-test.invalid', 'https://api.openai.com/auth': auth}
+    return {'auth_mode': 'chatgpt', 'OPENAI_API_KEY': None, 'last_refresh': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+            'tokens': {'access_token': fake_jwt(claims), 'id_token': fake_jwt(claims), 'refresh_token': 'system-test-no-refresh',
+                       'account_id': auth['chatgpt_account_id']}}
+
+
+def fake_claude_login(number):
+    """A Claude login only the fake providers accept, valid for a year."""
+    return {'provider': 'claude', 'access_token': f'system-test-claude-token-{number}', 'refresh_token': 'system-test-no-refresh',
+            'expires_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(time.time() + 365 * 86400)),
+            'account_id': f'system-test-claude-account-{number}', 'organization_id': f'system-test-claude-organization-{number}',
+            'email': f'claude-{number}@system-test.invalid', 'plan': 'Max 20x'}
+
+
+def start_fake_providers():
+    """Starts the fake providers, which stand in for OpenAI and Anthropic."""
+    log = (RUN / 'logs/fake-providers.log').open('w')
+    started_processes.append(subprocess.Popen([str(RUN / 'fake-providers'), '--data-dir', str(RUN / 'data'), '--control', str(RUN / 'control'),
+                                               '--certificate-authority', str(RUN / 'fake-providers-ca.pem'), '--requests', str(RUN / 'logs/requests')],
                                               stdout=log, stderr=log, start_new_session=True))
-    origin = wait_for(lambda: re.search(r'http://127\.0\.0\.1:\d+', read('logs/gateway.log')), 'the gateway to listen', timeout=30)
-    (RUN / 'gateway-origin').write_text(origin[0])
+    origins = wait_for(lambda: re.search(r'(http://127\.0\.0\.1:\d+) (https://127\.0\.0\.1:\d+)', read('logs/fake-providers.log')),
+                       'the fake providers to listen', timeout=30, interval=0.05)
+    (RUN / 'fake-providers-origin').write_text(origins[1])
+    (RUN / 'fake-providers-secure-origin').write_text(origins[2])
 
 
 def start_proxy():
@@ -138,6 +189,8 @@ def start_proxy():
         'ProgramArguments': [str(RUN / 'codex-switch'), 'serve', '--listen', listen_address()],
         'EnvironmentVariables': proxy_environment(),
         'KeepAlive': True,
+        # launchd waits ten seconds before restarting a job that exited; the outage outcome need not.
+        'ThrottleInterval': 1,
         'RunAtLoad': True,
         'ExitTimeOut': 0,
         'StandardOutPath': str(RUN / 'logs/launchd.log'),
@@ -146,10 +199,15 @@ def start_proxy():
     for label in (LABEL, LABEL + '.a', LABEL + '.b'):
         subprocess.run(['launchctl', 'bootout', f'gui/{os.getuid()}/{label}'], capture_output=True)
     subprocess.run(['launchctl', 'bootstrap', f'gui/{os.getuid()}', str(plist)], check=True)
-    wait_for(deploy_status, 'the proxy to serve (see data/proxy.log)', timeout=120)
+    wait_for(deploy_status, 'the proxy to serve (see data/proxy.log)', timeout=60, interval=0.05)
+    # The first menu snapshot runs Codex's app-server in this Codex home, which creates Codex's state database. A
+    # client started before that would race it.
+    wait_for(menu_snapshot_served, 'the first menu snapshot', interval=0.05)
     base = f'http://{listen_address()}/client/{read("data/client-capability").strip()}/backend-api/codex'
+    # Everything else Codex asks ChatGPT for, such as its apps connector, goes to the fake providers too.
+    chatgpt = '' if REAL_SERVICES else f'chatgpt_base_url = "{read("fake-providers-secure-origin")}/backend-api/"\n'
     (RUN / 'home/config.toml').write_text(
-        f'model_provider = "switch-test"\nmodel = "{MODEL}"\nmodel_reasoning_effort = "low"\n'
+        f'model_provider = "switch-test"\nmodel = "{MODEL}"\nmodel_reasoning_effort = "low"\n' + chatgpt +
         'cli_auth_credentials_store = "file"\n[model_providers.switch-test]\nname = "OpenAI"\n'
         f'base_url = "{base}"\nwire_api = "responses"\nrequires_openai_auth = true\n'
         'supports_websockets = true\n[analytics]\nenabled = false\n')
@@ -159,38 +217,44 @@ def start_proxy():
 
 def proxy_environment():
     # PATH lets the proxy find a Codex CLI installed without the desktop app.
-    return {'CODEX_SWITCH_DATA_DIR': str(RUN / 'data'), 'CODEX_SWITCH_UPSTREAM_ORIGIN': read('gateway-origin'),
-            'CODEX_SWITCH_CLAUDE_UPSTREAM_ORIGIN': read('gateway-origin'),
-            'CODEX_SWITCH_ACCOUNT_READ_SECONDS': str(ACCOUNT_READ_SECONDS), 'CODEX_SWITCH_CONNECTION_DRAIN_SECONDS': str(CONNECTION_DRAIN_SECONDS),
-            'CODEX_HOME': str(RUN / 'home'), 'PI_CODING_AGENT_DIR': str(RUN / 'pi'), 'PATH': os.environ['PATH']}
+    environment = {'CODEX_SWITCH_DATA_DIR': str(RUN / 'data'), 'CODEX_HOME': str(RUN / 'home'), 'PI_CODING_AGENT_DIR': str(RUN / 'pi'),
+                   'PATH': os.environ['PATH']}
+    if not REAL_SERVICES:
+        environment.update({'CODEX_SWITCH_UPSTREAM_ORIGIN': read('fake-providers-origin'), 'CODEX_SWITCH_CLAUDE_UPSTREAM_ORIGIN': read('fake-providers-origin'),
+                            'CODEX_SWITCH_ACCOUNT_READ_SECONDS': str(ACCOUNT_READ_SECONDS),
+                            'CODEX_SWITCH_CONNECTION_DRAIN_SECONDS': str(CONNECTION_DRAIN_SECONDS)})
+    return environment
 
 
 def client_environment():
     environment = {name: value for name, value in os.environ.items() if not name.startswith(('CODEX_', 'OPENAI_', 'PI_'))}
     environment.update(CODEX_HOME=str(RUN / 'home'), PI_CODING_AGENT_DIR=str(RUN / 'pi'))
+    if not REAL_SERVICES:
+        # Codex trusts only the fake providers' certificate authority, so none of its requests reach a real service.
+        environment['SSL_CERT_FILE'] = str(RUN / 'fake-providers-ca.pem')
     return environment
 
 
 def clean_up():
-    """Stops every client, proxy generation and the gateway; returns anything still running."""
+    """Stops every client, proxy generation and the fake providers; returns anything still running."""
     for name in (signal.SIGINT, signal.SIGTERM):
         signal.signal(name, signal.SIG_IGN)  # a second interrupt must not stop the cleanup
     for tunnel in started_tunnels:
         tunnel.close()
-    gateway = str(RUN / 'gateway')
+    fake_providers = str(RUN / 'fake-providers')
     if (RUN / 'control').exists():
         control()  # release held responses so draining processes can finish
     for process in started_processes:
-        if process.args[0] != gateway:
+        if process.args[0] != fake_providers:
             stop_process_group(process)
     for label in (LABEL, LABEL + '.a', LABEL + '.b'):
         subprocess.run(['launchctl', 'bootout', f'gui/{os.getuid()}/{label}'], capture_output=True)
-    for pid in run_processes(exclude=gateway):
+    for pid in run_processes(exclude=fake_providers):
         try:
             os.kill(pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
-    wait_for(lambda: not run_processes(exclude=gateway), 'proxy processes to stop', timeout=60, fail=False)
+    wait_for(lambda: not run_processes(exclude=fake_providers), 'proxy processes to stop', timeout=60, fail=False)
     for process in started_processes:
         stop_process_group(process)
     leftovers = [f'process {pid}' for pid in run_processes()]
@@ -277,9 +341,10 @@ def run_pi(name, prompt, session):
     return finish_pi(name, start_pi(name, prompt, session))
 
 
-def run_claude(session, must_succeed=True, resume=False):
-    """Claude Code through the two printed proxy settings, to real Anthropic through the gateway.
-    resume continues the session, as a person's next prompt in it does."""
+def run_claude(session, must_succeed=True, resume=False, fast_mode=False):
+    """Claude Code through the two printed proxy settings, to the fake providers (to Anthropic in the smoke test).
+    resume continues the session, as a person's next prompt in it does. fast_mode asks for Opus in fast mode, as /fast does;
+    the fake providers refuse it as Anthropic does without usage credits."""
     environment = {name: value for name, value in client_environment().items()
                    if not name.upper().startswith(('CLAUDE_', 'ANTHROPIC_'))
                    and not name.upper().endswith('_PROXY')
@@ -291,8 +356,14 @@ def run_claude(session, must_succeed=True, resume=False):
     environment.update(json.loads(settings.stdout)['env'])
     auth = json.loads((RUN / 'data' / CLAUDE_ACCOUNTS[0] / 'auth.json').read_text())
     environment['CLAUDE_CODE_OAUTH_TOKEN'] = auth['access_token']
+    environment['CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC'] = '1'
     prompt, session_option = ('Reply with the word again only.', '--resume') if resume else ('Reply with the word ready only.', '--session-id')
-    process = start_client([CLAUDE, '-p', prompt, '--model', 'haiku', '--effort', 'low',
+    model = ['--model', 'opus', '--settings', json.dumps({'fastMode': True})] if fast_mode else ['--model', 'haiku']
+    if fast_mode:
+        # Claude Code asks Anthropic first and leaves fast mode off for an account without usage credits; T3's
+        # Claude sessions on the Mac mini asked for it anyway, at the start of each turn.
+        environment['CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK'] = '1'
+    process = start_client([CLAUDE, '-p', prompt, *model, '--effort', 'low',
                             '--output-format', 'json', session_option, session, '--tools', '',
                             '--setting-sources', '', '--strict-mcp-config'], 'claude', env=environment)
     if process.wait(timeout=180) and must_succeed:
@@ -334,7 +405,7 @@ class Goal:
         self.send({'method': 'initialized', 'params': {}})
         self.thread = self.request('thread/start', {'cwd': str(RUN / 'work'), 'model': MODEL, 'sandbox': 'workspace-write',
                                                     'approvalPolicy': 'never'})['thread']['id']
-        objective = objective.format(effect=self.effect_file.name, result=self.result_file.name)
+        objective = objective.format(effect=self.effect_file.name, result=self.result_file.name, release=f'{name}-release')
         self.request('thread/goal/set', {'threadId': self.thread, 'objective': objective, 'tokenBudget': 200000})
         # The first turn is the person pressing send; every later turn belongs to the goal.
         self.request('turn/start', {'threadId': self.thread, 'input': [{'type': 'text', 'text': 'Work on the active goal.'}]})
@@ -432,7 +503,7 @@ class TunnelPair:
                 connection.sendall(b'work')
                 if connection.recv(4) != b'work':
                     raise OSError('tunnel closed during transfer')
-                self.stopped.wait(5)
+                self.stopped.wait(0.2)  # well inside the idle grace, so the tunnel counts as transferring
         except OSError as error:
             self.error = error
 
@@ -489,19 +560,30 @@ def pinned_account(task):
     return row[0] if row else None
 
 
-def gateway_events(event, **only):
+def fake_provider_events(event, **only):
     """Gateway log lines for one event, as dictionaries, optionally only those with the given field values."""
     found = []
-    for line in read('logs/gateway.log').splitlines():
+    for line in read('logs/fake-providers.log').splitlines():
         fields = {name: value.strip('"') for name, value in re.findall(r'(\w+)=("[^"]*"|\S+)', line)}
         if fields.get('event') == event and all(fields.get(name) == value for name, value in only.items()):
             found.append(fields)
     return found
 
 
+def fake_provider_event_times(event, **only):
+    """When the fake providers logged each such event, in seconds since midnight."""
+    times = []
+    for line in read('logs/fake-providers.log').splitlines():
+        fields = {name: value.strip('"') for name, value in re.findall(r'(\w+)=("[^"]*"|\S+)', line)}
+        if fields.get('event') == event and all(fields.get(name) == value for name, value in only.items()):
+            hours, minutes, seconds = line.split(' ', 1)[0].split(':')
+            times.append(int(hours) * 3600 + int(minutes) * 60 + float(seconds))
+    return times
+
+
 def forwarded_requests(**only):
-    """(account, request fingerprint) for every model request the gateway sent to OpenAI, in order."""
-    return [(event['account'], event['request']) for event in gateway_events('forwarded', **only)]
+    """(account, request fingerprint) for every OpenAI model request the fake providers received, in order."""
+    return [(event['account'], event['request']) for event in fake_provider_events('forwarded', **only)]
 
 
 def codex_client_usage(thread):
@@ -546,34 +628,21 @@ def account_keys_by_name():
     return dict(line.split('\t')[:2] for line in proxy_command('accounts').splitlines() if '\t' in line)
 
 
-def status_shown():
-    environment = dict(client_environment(), CODEX_SWITCH_DATA_DIR=str(RUN / 'data'))
-    return subprocess.run([str(cli_path()), 'status'], env=environment, capture_output=True, text=True).stdout
-
-
-def available_claude_accounts():
-    """Claude accounts `codex-switch status` shows as available to a person."""
-    key_by_name = account_keys_by_name()
-    return [key_by_name[match[1]] for line in status_shown().splitlines()
-            if (match := re.match(r'(Claude \d+) · .* · available$', line)) and match[1] in key_by_name]
-
-
-def weekly_used_percent():
-    """Weekly allowance used per account, as `codex-switch status` shows it to a person."""
-    shown = status_shown()
-    key_by_name = account_keys_by_name()
-    used, account = {}, None
-    for line in shown.splitlines():
-        if match := re.match(r'((Codex|Claude) \d+) ·', line):
-            # The status snapshot can still list an account removed in the last minute.
-            account = key_by_name.get(match[1]) if match[2] == 'Codex' else None
-        elif account and (match := re.match(r'\s+weekly\s+([\d.]+)% used', line)):
-            used[account] = float(match[1])
-    return used
+def usage_reads(account, used):
+    """How many usage reads the fake providers answered for an account with this weekly level."""
+    return len([event for event in fake_provider_events('usage-read', account=account) if float(event['used']) == used])
 
 
 def proxy_log():
     return read('data/proxy.log')
+
+
+def menu_snapshot_served():
+    try:
+        with urllib.request.urlopen(read('data/menu-snapshot-url').strip(), timeout=5) as response:
+            return response.status == 200
+    except (OSError, ValueError):
+        return False
 
 
 def deploy_status():
@@ -585,9 +654,9 @@ def deploy_status():
         return None
 
 
-def gateway_connections(pid):
-    """The local addresses of a proxy process's open connections to the gateway, as the gateway logs them in `remote`."""
-    port = read('gateway-origin').rsplit(':', 1)[1]
+def fake_provider_connections(pid):
+    """The local addresses of a proxy process's open connections to the fake providers, as they log them in `remote`."""
+    port = read('fake-providers-origin').rsplit(':', 1)[1]
     listing = subprocess.run(['lsof', '-nP', '-Fn', '-a', '-p', str(pid), f'-iTCP:{port}', '-sTCP:ESTABLISHED'], capture_output=True, text=True)
     return {line[1:].split('->')[0] for line in listing.stdout.splitlines() if line.startswith('n')}
 
@@ -616,12 +685,12 @@ def launchd_target():
 
 
 def control(*lines):
-    """Replaces the gateway's simulation file in one step; no lines means real OpenAI behaviour."""
+    """Replaces the fake providers' simulation file in one step; no lines means every account is available."""
     (RUN / 'control.next').write_text(''.join(line + '\n' for line in lines))
     os.replace(RUN / 'control.next', RUN / 'control')
 
 
-def wait_for(probe, what, timeout=180, fail=True, interval=0.5):
+def wait_for(probe, what, timeout=60, fail=True, interval=0.1):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         value = probe()

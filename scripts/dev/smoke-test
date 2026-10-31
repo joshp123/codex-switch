@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+"""Codex Switch smoke test: does the real path still work with the real services?
+
+Run it before a release. It starts one proxy built from this tree under a
+private launchd job, with copies of the live logins' access tokens, and sends
+one prompt each from Codex, Pi and Claude Code to OpenAI and Anthropic on their
+cheapest models. scripts/dev/system-test checks behaviour; this checks that
+the services still accept the proxy's requests. It leaves nothing running.
+"""
+import os
+import sys
+import time
+import uuid
+
+os.environ['CODEX_SWITCH_REAL_SERVICES'] = '1'
+sys.dont_write_bytecode = True
+import system_test_rig as rig  # noqa: E402
+from system_test_rig import Failure  # noqa: E402
+
+rig.RUN = rig.REPO / '.project-private/smoke-test'
+rig.LABEL = 'dev.codex-switch.smoke-test'
+rig.BUILDS = rig.RUN / 'builds'
+
+
+def main():
+    began, checks, leftovers = time.monotonic(), [], []
+    try:
+        if rig.RUN.exists():
+            os.rename(rig.RUN, rig.RUN.with_name(f'smoke-test.previous.{time.time_ns()}'))
+        rig.build()
+        rig.prepare_real_services()
+        rig.start_proxy()
+        codex = rig.CodexTask('smoke-codex', 'Reply with the word ready only.').finish()
+        checks.append(('Codex', codex.reply, rig.database_rows(codex.thread)))
+        if rig.PI:
+            session = str(uuid.uuid4())
+            checks.append(('Pi', rig.run_pi('smoke-pi', 'Reply with the word ready only.', session), rig.database_rows(rig.pi_task_id(session))))
+        session = str(uuid.uuid4())
+        result = rig.run_claude(session, must_succeed=False)
+        checks.append(('Claude Code', result.get('result', ''), rig.database_rows('claude:code:' + session)))
+    except Failure as failure:
+        print(f'FAIL  {failure}')
+    finally:
+        leftovers = rig.clean_up()
+    held = 0
+    for client, reply, rows in checks:
+        works = 'ready' in reply.lower() and len(rows) >= 1
+        held += works
+        print(('PASS  ' if works else 'FAIL  ') + f'{client} replied {reply.strip()!r} through the proxy, which recorded {len(rows)} responses.')
+    print('Nothing is left running.' if not leftovers else 'STILL RUNNING: ' + '; '.join(leftovers))
+    print(f'{held} of {len(checks)} clients worked, in {time.monotonic() - began:.0f} seconds.')
+    raise SystemExit(0 if checks and held == len(checks) and not leftovers else 1)
+
+
+if __name__ == '__main__':
+    main()

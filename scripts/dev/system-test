@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
-"""Codex Switch system test: the whole system, on the real path, in one run.
+"""Codex Switch system test: the whole system, on the real path, in about 20 seconds.
 
-Starts the newest published release under a private launchd job on a spare port,
-with its own data directory and copies of the account logins, then updates it to
-builds of this working tree.
-Drives the official Codex client and, if installed, Pi on Luna at low effort
-against real OpenAI, and Claude Code on Haiku through the HTTPS proxy to Anthropic.
-A gateway between the proxy and OpenAI simulates exhausted
-accounts; the model work itself is real. Prints what the system did for each outcome and
-leaves nothing running. Evidence stays in .project-private/system-test.
+Each group of outcomes gets its own isolated system: a private launchd job on a
+spare port running a build of this working tree (or, for the first update, the
+newest published release), its own data directory with fake accounts, and fake
+providers in place of OpenAI and Anthropic. The groups run at once. The
+official Codex, Pi and Claude Code clients drive each system; a scripted model
+answers them, so no tokens are spent and no real service is waited on. Prints
+what the system did for each outcome and leaves nothing running. Evidence stays
+in .project-private/system-test.
+
+scripts/dev/smoke-test checks the real services with real accounts.
 """
 import contextlib
+import json
 import os
 import signal
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -23,35 +27,35 @@ sys.dont_write_bytecode = True
 import system_test_rig as rig  # noqa: E402
 from system_test_rig import Failure  # noqa: E402
 
-GOAL = ('Append exactly one START line to {effect} using a tool. Then use a separate tool call to read input.txt, '
-        'compute the sum of its numbers, and write only that sum to {result}. Verify both files and mark the goal '
-        'complete. Never append START again.')
-SLEEPING_GOAL = ('In one tool call, append exactly one START line to {effect} and then run `sleep 30`. Afterwards use '
-                 'a separate tool call to read input.txt, compute the sum of its numbers, and write only that sum to '
-                 '{result}. Verify both files and mark the goal complete. Never append START again.')
-# The real installer and proxy with shorter timers. Macs prove a build for five
-# minutes, finish a switch within 30, read each account every minute and give an
-# idle Claude connection a minute to close when a proxy retires.
-PROVING_SECONDS, SWITCH_LIMIT_SECONDS = 10, 45
+# The fake providers' model follows these scripts, one line per model request.
+SUM = "awk '{{s += $1}} END {{print s}}' input.txt > {result}"
+GOAL = ('Follow this script.\nRUN: printf \'START\\n\' >> {effect}\nRUN: ' + SUM + '\nGOAL COMPLETE\nREPLY: done')
+# The tool call runs until the test creates {release}, so it spans the update.
+SLEEPING_GOAL = ('Follow this script.\nRUN: printf \'START\\n\' >> {effect} && while [ ! -e {release} ]; do sleep 0.05; done\nRUN: ' + SUM
+                 + '\nGOAL COMPLETE\nREPLY: done')
+# The real installer with shorter timers. Macs prove a build for five minutes
+# and finish a switch within 30.
+PROVING_SECONDS, SWITCH_LIMIT_SECONDS = 1, 6
 
 
 class System:
-    """What the test has told the gateway, and every task whose responses must be recorded."""
+    """What the test has told the fake providers, and every task whose responses must be recorded."""
 
     def __init__(self, accounts):
         self.accounts, self.base = accounts, None
         # Distinct weekly levels, so exactly one account has the most allowance left.
         self.weekly = {account: max(5, 90 - 10 * number) for number, account in enumerate(accounts, 1)}
         self.limited, self.extra, self.records, self.taskless_usage = set(), [], [], []
+        self.records.append(('requests without a task ID', '', lambda: self.taskless_usage,
+                             lambda: rig.forwarded_requests(thread='', session='', client='')))
 
     def apply(self):
         rig.control(*[f'weekly-used {account} {used}' for account, used in self.weekly.items()],
                     *[f'limited {account}' for account in sorted(self.limited)], *self.extra)
 
     def best_account(self, excluding=()):
-        """The rule under test: the most weekly allowance left, at the levels the gateway reports.
-        An account whose plan has no weekly window, as `codex-switch status` shows, ranks last."""
-        candidates = [account for account in rig.weekly_used_percent() if account not in self.limited | set(excluding)]
+        """The rule under test: the most weekly allowance left, at the levels the fake providers report."""
+        candidates = [account for account in self.accounts if account not in self.limited | set(excluding)]
         if not candidates:
             raise Failure('No account with a weekly allowance is available.')
         return min(candidates, key=self.weekly.get)
@@ -65,34 +69,82 @@ class System:
 
 
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] == '--group':
+        raise SystemExit(run_group(sys.argv[2]))
+    # --only GROUP,GROUP runs those groups, for working on one.
+    only = set(sys.argv[2].split(',')) if len(sys.argv) == 3 and sys.argv[1] == '--only' else None
     began = time.monotonic()
-    results, leftovers, outcomes = [], [], OUTCOMES
     signal.signal(signal.SIGTERM, stop)
+    if rig.ROOT.exists():
+        previous = rig.ROOT.with_name(f'system-test.previous.{time.time_ns()}')
+        os.rename(rig.ROOT, previous)
+        subprocess.Popen(['trash', str(previous)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    rig.ROOT.mkdir(parents=True)
     try:
-        accounts = rig.prepare()
-        print(f'Codex Switch system test: {len(accounts)} accounts, {rig.MODEL} at low effort.')
-        print(f'Codex: {rig.CODEX}. ' + (f'Pi: {rig.PI}.' if rig.PI else 'Pi is not on PATH, so Pi is not tested.'), flush=True)
-        print(f'Claude Code: {rig.CLAUDE}, Haiku at low effort, {len(rig.CLAUDE_ACCOUNTS)} accounts.' if rig.CLAUDE_ACCOUNTS
-              else f'SKIP Claude Code: {rig.CLAUDE_SKIP_REASON}.', flush=True)
         rig.build()
-        system = System(accounts)
-        system.apply()  # before the proxy's first allowance read
-        rig.start_gateway()
-        system.base = rig.start_proxy()
-        print(f'Proxy build {rig.deploy_status()["revision"][:12]} is serving under launchd on {rig.listen_address()}.\n', flush=True)
-        for outcome in outcomes:
-            results.append(run_outcome(outcome, system))
     except Failure as failure:
         print(f'The system did not start: {failure}')
+        raise SystemExit(1)
+    print(f'Built in {format_duration(time.monotonic() - began)}. Codex: {rig.CODEX}. Claude Code: {rig.CLAUDE}. '
+          + (f'Pi: {rig.PI}.' if rig.PI else 'Pi is not on PATH, so Pi is not tested.'), flush=True)
+    groups = {name: subprocess.Popen([sys.executable, __file__, '--group', name], env=dict(os.environ, CODEX_SWITCH_SYSTEM_TEST_RUN=str(rig.ROOT / name)),
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+              for name, _, _ in GROUPS if only is None or name in only}
+    try:
+        for process in groups.values():
+            process.wait()
     except KeyboardInterrupt:
+        for process in groups.values():
+            os.killpg(process.pid, signal.SIGTERM)
+        for process in groups.values():
+            process.wait()
         print('\nStopped before the end.')
-    finally:
-        leftovers = rig.clean_up()
+    results, leftovers = [], []
+    for name in groups:
+        path = rig.ROOT / name / 'results.jsonl'
+        reported = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+        if not reported:
+            reported = [{'outcome': 'The system did not start', 'held': False, 'seconds': 0,
+                         'observed': f'See {(rig.ROOT / name / "logs/system-test.out").relative_to(rig.REPO)}.'}]
+        for result in reported:
+            if 'leftovers' in result:
+                leftovers += result['leftovers']
+                continue
+            results.append(result['held'])
+            print(('PASS  ' if result['held'] else 'FAIL  ') + f'[{name}] {result["outcome"]} ({format_duration(result["seconds"])})')
+            for line in result['observed'].splitlines():
+                print('      ' + line)
     print('Nothing is left running.' if not leftovers else 'STILL RUNNING: ' + '; '.join(leftovers))
     passed = sum(results)
-    print(f'{passed} of {len(outcomes)} outcomes held, in {format_duration(time.monotonic() - began)}. '
-          f'Evidence: {rig.RUN.relative_to(rig.REPO)}')
-    raise SystemExit(0 if passed == len(outcomes) and not leftovers else 1)
+    print(f'{passed} of {len(results)} outcomes held, in {format_duration(time.monotonic() - began)}. Evidence: {rig.ROOT.relative_to(rig.REPO)}')
+    raise SystemExit(0 if results and passed == len(results) and not leftovers else 1)
+
+
+def run_group(name):
+    """Runs one group of outcomes on its own isolated system and writes what each did to results.jsonl."""
+    signal.signal(signal.SIGTERM, stop)
+    first_proxy, outcomes = next((first, outcomes) for group, first, outcomes in GROUPS if group == name)
+    rig.RUN.mkdir(parents=True)
+    log = (rig.RUN / 'system-test.out').open('w')
+    sys.stdout = sys.stderr = log
+    results = (rig.RUN / 'results.jsonl').open('w')
+    leftovers = []
+    try:
+        system = System(rig.prepare(first_proxy))
+        system.apply()  # before the proxy's first allowance read
+        rig.start_fake_providers()
+        system.base = rig.start_proxy()
+        for outcome in [*outcomes, every_response_recorded_once]:
+            results.write(json.dumps(run_outcome(outcome, system)) + '\n')
+            results.flush()
+    except Failure as failure:
+        results.write(json.dumps({'outcome': 'The system did not start', 'held': False, 'seconds': 0, 'observed': str(failure)}) + '\n')
+    except KeyboardInterrupt:
+        pass
+    finally:
+        leftovers = rig.clean_up()
+    results.write(json.dumps({'leftovers': leftovers}) + '\n')
+    return 0
 
 
 def stop(signal_number, frame):
@@ -110,11 +162,7 @@ def run_outcome(outcome, system):
     if not held:
         system.extra = []  # a response left held would hang every later outcome
         system.apply()
-    print(('PASS  ' if held else 'FAIL  ') + outcome.__doc__.strip() + f' ({format_duration(time.monotonic() - began)})')
-    for line in observed.splitlines():
-        print('      ' + line)
-    print(flush=True)
-    return held
+    return {'outcome': outcome.__doc__.strip(), 'held': held, 'observed': observed, 'seconds': time.monotonic() - began}
 
 
 def start_installer(candidate, name):
@@ -126,14 +174,14 @@ def start_installer(candidate, name):
 
 def wait_for_candidate(old):
     return rig.wait_for(lambda: (status['pid'] if (status := rig.deploy_status()) and status['pid'] != old else None),
-                        'the candidate to take new connections', timeout=180)
+                        'the candidate to take new connections', timeout=60)
 
 
 def update_waits_for_work(system):
     """An update waits until model work arrives"""
     old = rig.deploy_status()['pid']
     update = start_installer('candidate', 'no-work-update')
-    time.sleep(5)
+    time.sleep(2)
     if update.poll() is not None or not rig.deploy_status() or rig.deploy_status()['pid'] != old:
         raise Failure('The installer exited or switched before any model reply completed.')
     rig.stop_process_group(update)
@@ -144,11 +192,9 @@ def update_waits_for_work(system):
 
 def new_work_goes_to_the_most_allowance_left(system):
     """New work avoids soft reserves; pinned work stays until its account reaches its hard reserve"""
-    rig.wait_for(lambda: len(rig.weekly_used_percent()) >= 2, 'two accounts to report a weekly allowance', timeout=150, interval=5)
     leader = system.best_account()
     leader_left = 100 - system.weekly[leader]
-    task = rig.CodexTask('routing-task', 'Use a shell command to read input.txt and write the sum of its numbers to routing.txt. '
-                                         'Reply with the sum only.').finish()
+    task = rig.CodexTask('routing-task', 'Follow this script.\nRUN: ' + SUM.format(result='routing.txt') + '\nREPLY: 16').finish()
     tasks = {'Codex task': task.thread}
     if rig.PI:
         session = str(uuid.uuid4())
@@ -162,8 +208,9 @@ def new_work_goes_to_the_most_allowance_left(system):
     runner_up = system.best_account(excluding={leader})
     system.weekly[leader], system.weekly[runner_up] = 95, 20
     system.apply()
-    rig.wait_for(lambda: rig.weekly_used_percent().get(leader) == 95, 'the proxy to read the new allowance levels', timeout=150, interval=5)
-    rig.CodexTask('routing-task-again', 'Use a shell command to read routing.txt. Reply with its content only.', thread=task.thread).finish()
+    # Two reads at the new levels: the proxy has applied at least the first.
+    rig.wait_for(lambda: rig.usage_reads(leader, 95) >= 2 and rig.usage_reads(runner_up, 20) >= 2, 'the proxy to read the new allowance levels')
+    rig.CodexTask('routing-task-again', 'Follow this script.\nRUN: cat routing.txt\nREPLY: 16', thread=task.thread).finish()
     if rig.PI:
         rig.run_pi('routing-pi-second', 'Reply with the word two.', session)
         system.record_pi_session('routing Pi session', session)
@@ -241,7 +288,6 @@ def request_without_task_id_is_served(system):
     if rows[-1][0] != best:
         raise Failure(f'The request was served by {rows[-1][0]}, but {best} had the most weekly allowance left.')
     record_taskless_usage(system, completed)
-    system.records.append(('requests without a task ID', '', lambda: system.taskless_usage, lambda: rig.forwarded_requests(thread='', session='', client='')))
     return f'A streamed request with no task ID got a complete answer from {best}, which had the most weekly allowance left. No task was pinned.'
 
 
@@ -253,7 +299,7 @@ def record_taskless_usage(system, completed):
 
 def claude_works_through_the_https_proxy(system):
     """Claude Code gets a reply through the HTTPS proxy, on a Claude account, recorded once with its tokens"""
-    require_claude_accounts(1)
+    require_available_claude_accounts(1)
     session = str(uuid.uuid4())
     result = rig.run_claude(session)
     reply, task = result.get('result', '').strip(), 'claude:code:' + session
@@ -277,7 +323,7 @@ def claude_throttle_holds_the_account_briefly(system):
     """When Anthropic throttles a Claude request without naming a usage limit, the account serves the task again once the throttle ends"""
     throttled = require_available_claude_accounts(1)[0]
     others = [account for account in rig.CLAUDE_ACCOUNTS if account != throttled]
-    session, throttled_before = str(uuid.uuid4()), len(rig.gateway_events('claude-throttled'))
+    session, throttled_before = str(uuid.uuid4()), len(rig.fake_provider_events('claude-throttled'))
     # A full reserve holds every other account back, so only the throttled account can serve.
     for account in others:
         rig.proxy_command('reserve', account, '100', '100')
@@ -290,19 +336,52 @@ def claude_throttle_holds_the_account_briefly(system):
         for account in others:
             rig.proxy_command('reserve', account, 'off')
     reply, task = result.get('result', '').strip(), 'claude:code:' + session
-    if len(rig.gateway_events('claude-throttled')) != throttled_before + 1:
-        raise Failure('The gateway did not throttle exactly one Claude request.')
+    if len(rig.fake_provider_events('claude-throttled')) != throttled_before + 1:
+        raise Failure('The fake providers did not throttle exactly one Claude request.')
     if result.get('is_error') or not reply or rig.pinned_account(task) != throttled:
         raise Failure(f'After one throttled request on {throttled}, Claude Code said {reply!r} after {format_duration(took)}; '
                       f'the task is pinned to {rig.pinned_account(task)}.')
-    if not 5 <= took <= 60:
-        raise Failure(f'Claude Code replied after {format_duration(took)}; the throttle asked for five seconds.')
+    throttled_at = rig.fake_provider_event_times('claude-throttled', account=throttled)[-1]
+    served_at = [at for at in rig.fake_provider_event_times('claude-forwarded', account=throttled) if at > throttled_at]
+    # The throttle's Retry-After is one second; the fake's clock and log are the evidence. The account is held for
+    # that second and no longer.
+    if not served_at or not 0.95 <= served_at[0] - throttled_at <= 4:
+        raise Failure(f'{throttled} was asked again {served_at[0] - throttled_at:.2f} seconds after its throttle; its Retry-After was one second.'
+                      if served_at else f'{throttled} was never asked again after its throttle.')
     received = claude_tokens(result)
     system.records.append(('Claude Code task after a throttle', task, lambda: [received], None))
     held = [line.split(': ', 1)[1] for line in rig.proxy_log().splitlines() if 'without naming a usage limit' in line][-1:]
     return (f'With every other Claude account held back, Anthropic answered {throttled}\'s first request with a 429 naming no limit,\n'
-            f'a five-second Retry-After and a reset seven hours away. The proxy said: {held[0] if held else "(nothing)"}\n'
-            f'{throttled} replied {reply!r} after {format_duration(took)}.')
+            f'a one-second Retry-After and a reset seven hours away. The proxy said: {held[0] if held else "(nothing)"}\n'
+            f'{throttled} was asked again {served_at[0] - throttled_at:.1f} seconds later and replied {reply!r}.')
+
+
+def claude_fast_mode_refusal_stays_on_the_account(system):
+    """When Anthropic refuses fast mode for want of usage credits, Claude Code carries on at standard speed on the same account; a usage limit on a fast-mode request still moves the task"""
+    require_available_claude_accounts(2)
+    session, refused_before = str(uuid.uuid4()), len(rig.fake_provider_events('claude-fast-mode-refused'))
+    first = rig.run_claude(session, must_succeed=False, fast_mode=True)
+    task = 'claude:code:' + session
+    started_on = rig.pinned_account(task)
+    refused = len(rig.fake_provider_events('claude-fast-mode-refused')) - refused_before
+    moves = [line for line in rig.proxy_log().splitlines() if task in line and ': moved from ' in line]
+    received = [claude_tokens(first)] if not first.get('is_error') else []
+    system.records.append(('Claude Code task in fast mode', task, lambda: received, None))
+    if not refused:
+        raise Failure('Claude Code did not ask for fast mode, so the refusal was not tested.')
+    if first.get('is_error') or moves:
+        raise Failure(f'After {refused} fast-mode refusals Claude Code said {first.get("result")!r}; the task moved {len(moves)} times.')
+    limited_before = len(rig.fake_provider_events('claude-rejected-usage-limit'))
+    with simulating(system, f'claude-limited {started_on}'):
+        second = rig.run_claude(session, must_succeed=False, resume=True, fast_mode=True)
+    if not second.get('is_error'):
+        received.append(claude_tokens(second))
+    moved_to = rig.pinned_account(task)
+    if second.get('is_error') or moved_to == started_on or len(rig.fake_provider_events('claude-rejected-usage-limit')) == limited_before:
+        raise Failure(f'With {started_on} at its five-hour limit, a fast-mode prompt left the task on {moved_to}; Claude Code said {second.get("result")!r}.')
+    return (f'Claude Code asked for Opus in fast mode; Anthropic\'s refusal for want of usage credits reached it {refused} time(s) unchanged.\n'
+            f'It carried on at standard speed on {started_on}, the account it started on, and replied {first["result"].strip()!r}.\n'
+            f'When {started_on} then reached its five-hour limit, the next fast-mode prompt moved to {moved_to}, which replied {second["result"].strip()!r}.')
 
 
 def claude_limit_moves_the_task_to_a_free_account(system):
@@ -312,7 +391,7 @@ def claude_limit_moves_the_task_to_a_free_account(system):
     first = rig.run_claude(session)
     task = 'claude:code:' + session
     limited = rig.pinned_account(task)
-    rejected_before = len(rig.gateway_events('claude-rejected-usage-limit'))
+    rejected_before = len(rig.fake_provider_events('claude-rejected-usage-limit'))
     with simulating(system, f'claude-limited {limited}'):
         began = time.monotonic()
         second = rig.run_claude(session, must_succeed=False, resume=True)
@@ -322,24 +401,24 @@ def claude_limit_moves_the_task_to_a_free_account(system):
     system.records.append(('Claude Code task that moved account', task, lambda: received, None))
     if second.get('is_error') or not reply:
         raise Failure(f'With {limited} at its limit, Claude Code said {reply!r} after {format_duration(took)}.')
-    if moved_to == limited or len(rig.gateway_events('claude-rejected-usage-limit')) != rejected_before + 1:
+    if moved_to == limited or len(rig.fake_provider_events('claude-rejected-usage-limit')) != rejected_before + 1:
         raise Failure(f'The task is pinned to {moved_to}; Anthropic refused '
-                      f'{len(rig.gateway_events("claude-rejected-usage-limit")) - rejected_before} of its requests.')
+                      f'{len(rig.fake_provider_events("claude-rejected-usage-limit")) - rejected_before} of its requests.')
     return (f'A Claude task started on {limited}, which then reached its five-hour limit. Anthropic refused the next prompt\n'
             f'once; the proxy gave Claude Code a retry instead of the limit, and {moved_to} replied {reply!r} after {format_duration(took)}.')
 
 
 def claude_limit_reaches_the_client_at_once(system):
     """With every Claude account at its usage limit, Claude Code stops at once and says when the limit resets, and so does the next task"""
-    require_claude_accounts(1)
+    require_available_claude_accounts(1)
     runs = []
     with simulating(system, *[f'claude-limited {account}' for account in rig.CLAUDE_ACCOUNTS]):
         for _ in ('first task', 'next task'):
-            session, rejected_before = str(uuid.uuid4()), len(rig.gateway_events('claude-rejected-usage-limit'))
+            session, rejected_before = str(uuid.uuid4()), len(rig.fake_provider_events('claude-rejected-usage-limit'))
             began = time.monotonic()
             result = rig.run_claude(session, must_succeed=False)
             runs.append((session, time.monotonic() - began, result.get('result', '').strip(), result.get('is_error'),
-                         len(rig.gateway_events('claude-rejected-usage-limit')) - rejected_before))
+                         len(rig.fake_provider_events('claude-rejected-usage-limit')) - rejected_before))
     for label, (session, took, said, is_error, _) in zip(('The first task', 'The next task'), runs):
         if not is_error or took > 30 or 'limit' not in said.lower():
             raise Failure(f'{label}: Claude Code took {format_duration(took)} and said {said!r}; it should stop at once and name the limit.')
@@ -352,23 +431,11 @@ def claude_limit_reaches_the_client_at_once(system):
             f'Claude Code stopped after {format_duration(took)}: {said!r}')
 
 
-def require_claude_accounts(count):
-    if len(rig.CLAUDE_ACCOUNTS) < count:
-        raise Failure(f'Claude Code was not tested: {rig.CLAUDE_SKIP_REASON if not rig.CLAUDE_ACCOUNTS else f"this needs {count} signed-in Claude accounts"}.')
-
-
 def require_available_claude_accounts(count):
-    """The Claude accounts with allowance left, if there are at least count."""
-    require_claude_accounts(count)
-    # The status snapshot is composed at most a minute apart, so a reserve just lifted can take that long to show.
-    def enough():
-        available = rig.available_claude_accounts()
-        return available if len(available) >= count else None
-    available = rig.wait_for(enough, f'{count} Claude accounts to show as available', timeout=70, fail=False, interval=5) \
-        or rig.available_claude_accounts()
-    if len(available) < count:
-        raise Failure(f'This needs {count} Claude accounts with allowance left; `codex-switch status` shows {len(available)} available.')
-    return available
+    """The fake Claude accounts, every one with allowance left."""
+    if not rig.CLAUDE:
+        raise Failure('Claude Code is not installed.')
+    return list(rig.CLAUDE_ACCOUNTS[:max(count, len(rig.CLAUDE_ACCOUNTS))])
 
 
 def claude_tokens(result):
@@ -404,7 +471,7 @@ def exhausted_task_moves_on_its_next_turn(system):
 
     forwarded = rig.forwarded_requests(thread=goal.thread)
     accounts = [account for account, _ in forwarded]
-    refused = rig.gateway_events('websocket-rejected-usage-limit', thread=goal.thread) + rig.gateway_events('rejected-usage-limit', thread=goal.thread)
+    refused = rig.fake_provider_events('websocket-rejected-usage-limit', thread=goal.thread) + rig.fake_provider_events('rejected-usage-limit', thread=goal.thread)
     if not accounts or accounts[0] != start or not refused or sorted(set(accounts) - {start}) != [expected]:
         raise Failure(f'Expected the goal to start on {start} and move to {expected}. Its model requests went to {accounts}; '
                       f'{len(refused)} were refused for the usage limit.')
@@ -419,18 +486,18 @@ def exhausted_task_moves_on_its_next_turn(system):
 def goal_continues_when_an_account_returns(system):
     """With every account exhausted, a running goal continues by itself when one comes back"""
     start = system.best_account()
-    returning = next(account for account in rig.weekly_used_percent() if account != start)
+    returning = next(account for account in system.accounts if account != start)
     system.limited = set(system.accounts) - {start}
     system.extra = [f'exhaust-after {start} 1']
     system.apply()
     goal = rig.Goal('outage-goal', GOAL)
-    rig.wait_for(lambda: f'limited {start}' in rig.read('control'), f'{start} to run out of allowance', timeout=180)
-    time.sleep(5)
+    rig.wait_for(lambda: f'limited {start}' in rig.read('control'), f'{start} to run out of allowance')
+    time.sleep(1)
     system.limited = set(system.accounts) - {returning}
     system.extra = []
     system.apply()
     returned_at = time.monotonic()
-    errors = goal.finish(timeout=400)
+    errors = goal.finish(timeout=60)
     finished_after = time.monotonic() - returned_at
     system.limited = set()
     system.apply()
@@ -442,7 +509,7 @@ def goal_continues_when_an_account_returns(system):
         raise Failure(f'Expected the goal to start on {start} and finish on {returning}; its model requests went to {accounts}.')
     require_no_replay('The goal', forwarded)
     shown = f'While it waited, Codex showed {describe_errors(errors)}.' if errors else 'Codex showed no error.'
-    return (f'A goal started on {start}; after one model request every account was out of allowance. Five seconds later\n'
+    return (f'A goal started on {start}; after one model request every account was out of allowance. A second later\n'
             f'{returning} came back. The goal continued on {returning} without being restarted and finished {finished_after:.0f} seconds\n'
             f'after that. No model request reached OpenAI twice and its tool effect ran once.\n{shown}')
 
@@ -450,22 +517,22 @@ def goal_continues_when_an_account_returns(system):
 def update_during_work_finishes_on_the_old_process(system):
     """A blue-green update during work completes by itself, and admitted work finishes on the old process"""
     goal = rig.Goal('update-goal', SLEEPING_GOAL)
-    rig.wait_for(goal.effect_file.exists, 'the goal to start its 30-second tool call', timeout=180)
+    rig.wait_for(goal.effect_file.exists, 'the goal to start the tool call that spans the update')
     # Two Codex responses are held mid-stream on the old process: one over WebSocket, one over HTTP.
     system.extra = ['hold-responses codex_exec']
     system.apply()
     websocket_task = rig.CodexTask('update-websocket-task', 'Reply with the word socket.')
-    rig.wait_for(lambda: rig.gateway_events('response-held', client='codex_exec'), 'a WebSocket response to start', timeout=180)
+    rig.wait_for(lambda: rig.fake_provider_events('response-held', client='codex_exec'), 'a WebSocket response to start', timeout=60)
     system.extra = ['http-only', 'hold-responses codex_exec']
     system.apply()
     http_task = rig.CodexTask('update-http-task', 'Reply with the word stream.')
-    rig.wait_for(lambda: len(rig.gateway_events('response-held', client='codex_exec')) == 2, 'an HTTP response to start', timeout=180)
+    rig.wait_for(lambda: len(rig.fake_provider_events('response-held', client='codex_exec')) == 2, 'an HTTP response to start', timeout=60)
     system.extra = ['hold-responses codex_exec']
     system.apply()
     old = rig.deploy_status()['pid']
-    held = rig.gateway_events('response-held', client='codex_exec')
+    held = rig.fake_provider_events('response-held', client='codex_exec')
     held_on_old = {event['remote'] for event in held}
-    if sorted(event['method'] for event in held) != ['GET', 'POST'] or not held_on_old <= rig.gateway_connections(old):
+    if sorted(event['method'] for event in held) != ['GET', 'POST'] or not held_on_old <= rig.fake_provider_connections(old):
         raise Failure(f'Expected one WebSocket and one HTTP response held on the serving process {old}; held {held}.')
 
     # Preserve a recognisable account identity but remove its isolated access
@@ -486,15 +553,16 @@ def update_during_work_finishes_on_the_old_process(system):
     new = wait_for_candidate(old)
     if goal.result_file.exists():
         raise Failure('The goal finished its tool call before the update began, so it did not run across the update.')
+    (rig.RUN / 'work/update-goal-release').touch()
     # New work during the drain: held too, so the process holding it can be seen.
     new_task = rig.CodexTask('update-new-task', 'Reply with the word new.')
-    rig.wait_for(lambda: len(rig.gateway_events('response-held', client='codex_exec')) >= 3, 'new work to start', timeout=180)
-    held_on_new = {event['remote'] for event in rig.gateway_events('response-held', client='codex_exec')} - held_on_old
-    new_work_on_new_process = new != old and held_on_new and held_on_new <= rig.gateway_connections(new)
-    old_was_draining = held_on_old <= rig.gateway_connections(old)
+    rig.wait_for(lambda: len(rig.fake_provider_events('response-held', client='codex_exec')) >= 3, 'new work to start', timeout=60)
+    held_on_new = {event['remote'] for event in rig.fake_provider_events('response-held', client='codex_exec')} - held_on_old
+    new_work_on_new_process = new != old and held_on_new and held_on_new <= rig.fake_provider_connections(new)
+    old_was_draining = held_on_old <= rig.fake_provider_connections(old)
     try:
         # Both versions run for the proof; the old one keeps the replies it holds.
-        time.sleep(max(0, PROVING_SECONDS - 10 - (time.monotonic() - update_started)))
+        time.sleep(max(0, PROVING_SECONDS - (time.monotonic() - update_started)))
         if any(task.process.poll() is not None for task in (websocket_task, http_task)) or not rig.process_alive(old):
             raise Failure('An old model reply ended, or the old process went, before the proof finished.')
     finally:
@@ -517,7 +585,7 @@ def update_during_work_finishes_on_the_old_process(system):
 
     if not new_work_on_new_process or not old_was_draining:
         raise Failure(f'New work did not start on new process {new} while old process {old} still held its two responses.')
-    canceled = rig.gateway_events('response-canceled')
+    canceled = rig.fake_provider_events('response-canceled')
     replies = (websocket_task.reply.lower(), http_task.reply.lower(), new_task.reply.lower())
     if canceled or 'socket' not in replies[0] or 'stream' not in replies[1] or 'new' not in replies[2]:
         raise Failure(f'{len(canceled)} held responses were cancelled; Codex replied {replies}; see process {old} in data/proxy.log.')
@@ -545,12 +613,12 @@ def retiring_proxy_keeps_only_working_connections(system):
     warm = rig.CodexTask('retire-warmup', 'Reply with the word ready.').finish()
     system.record_codex_task('retire warmup', warm.thread)
     old = rig.deploy_status()['pid']
-    held_before = len(rig.gateway_events('response-held', client='codex_exec'))
-    canceled_before = len(rig.gateway_events('response-canceled'))
+    held_before = len(rig.fake_provider_events('response-held', client='codex_exec'))
+    canceled_before = len(rig.fake_provider_events('response-canceled'))
     system.extra = ['hold-responses codex_exec']
     system.apply()
     held = rig.CodexTask('retire-held', 'Reply with the word held.')
-    rig.wait_for(lambda: len(rig.gateway_events('response-held', client='codex_exec')) > held_before, 'a reply to be held', timeout=180)
+    rig.wait_for(lambda: len(rig.fake_provider_events('response-held', client='codex_exec')) > held_before, 'a reply to be held', timeout=60)
     tunnels = rig.TunnelPair()
     update = start_installer('candidate-2', 'retire-update')
     try:
@@ -560,7 +628,7 @@ def retiring_proxy_keeps_only_working_connections(system):
         if status != 200 or len(completed) != 1:
             raise Failure(f'The candidate answered {status} with {len(completed)} completed responses.')
         record_taskless_usage(system, completed)
-        rig.wait_for(lambda: f'process {old} stopping' in rig.proxy_log(), 'the old proxy to begin retiring', timeout=400)
+        rig.wait_for(lambda: f'process {old} stopping' in rig.proxy_log(), 'the old proxy to begin retiring', timeout=60)
         retirement_began = time.monotonic()
         if held.process.poll() is not None:
             raise Failure('The held reply ended before retirement began.')
@@ -570,12 +638,12 @@ def retiring_proxy_keeps_only_working_connections(system):
     try:
         held.finish()
         system.record_codex_task('reply held across retirement', held.thread)
-        if 'held' not in held.reply.lower() or held.errors or len(rig.gateway_events('response-canceled')) != canceled_before:
+        if 'held' not in held.reply.lower() or held.errors or len(rig.fake_provider_events('response-canceled')) != canceled_before:
             raise Failure(f'The held reply was cut: Codex replied {held.reply!r} and showed {describe_errors(held.errors)}.')
         rig.wait_for(tunnels.idle_http_closed, 'the idle HTTP connection to close', timeout=30)
         rig.wait_for(tunnels.idle_closed, 'the silent tunnel to close', timeout=90)
         silent_for = time.monotonic() - retirement_began
-        if silent_for < rig.CONNECTION_DRAIN_SECONDS - 5:
+        if silent_for < rig.CONNECTION_DRAIN_SECONDS * 0.8:
             raise Failure(f'The silent tunnel closed {silent_for:.0f} seconds into retirement, before its {rig.CONNECTION_DRAIN_SECONDS}-second grace.')
         while rig.process_alive(old):
             if tunnels.error:
@@ -586,7 +654,7 @@ def retiring_proxy_keeps_only_working_connections(system):
         completed_after = time.time() - switch_started
     finally:
         tunnels.close()
-    if completed_after < SWITCH_LIMIT_SECONDS - 10:
+    if completed_after < SWITCH_LIMIT_SECONDS - 2:
         raise Failure(f'The old proxy retired {completed_after:.0f} seconds after the switch began, with a tunnel still transferring.')
     if update.wait(timeout=120):
         raise Failure(f'The update command failed: {rig.read("logs/retire-update.err")[-400:]}')
@@ -607,7 +675,7 @@ def provider_outage_blocks_neither_restart_nor_release(system):
         restarted = rig.wait_for(lambda: (status['pid'] if (status := rig.deploy_status()) and status['pid'] != old else None),
                                  'launchd to restart the proxy during the outage', timeout=60)
         update = start_installer('candidate-3', 'outage-update')
-        time.sleep(5)
+        time.sleep(2)
         if update.poll() is not None or rig.deploy_status()['pid'] != restarted:
             raise Failure('The installer did not wait for work during the outage.')
         try:
@@ -618,7 +686,7 @@ def provider_outage_blocks_neither_restart_nor_release(system):
         else:
             raise Failure('The simulated provider error did not reach the client.')
         try:
-            exit_code = update.wait(timeout=180)
+            exit_code = update.wait(timeout=60)
         except rig.subprocess.TimeoutExpired:
             raise Failure('A failed request did not start the waiting update.')
     finally:
@@ -651,19 +719,19 @@ def failed_release_steps_aside(system):
                 raise Failure(f'The simulated provider error returned HTTP {error.code}, expected 503.')
         else:
             raise Failure('The simulated provider error did not reach the client.')
-    if len(rig.gateway_events('provider-error')) < 3 or rig.deploy_status()['failures'] != 0:
+    if len(rig.fake_provider_events('provider-error')) < 3 or rig.deploy_status()['failures'] != 0:
         raise Failure('Provider errors were counted against the candidate.')
 
-    held_before = len(rig.gateway_events('response-held', client='codex_exec'))
+    held_before = len(rig.fake_provider_events('response-held', client='codex_exec'))
     system.extra = ['hold-responses codex_exec']
     system.apply()
     canceled = rig.CodexTask('cancel-during-proof', 'Reply with the word canceled.')
-    rig.wait_for(lambda: len(rig.gateway_events('response-held', client='codex_exec')) > held_before,
-                 'a candidate response to begin before canceling', timeout=180)
+    rig.wait_for(lambda: len(rig.fake_provider_events('response-held', client='codex_exec')) > held_before,
+                 'a candidate response to begin before canceling', timeout=60)
     rig.stop_process_group(canceled.process)
     system.extra = []
     system.apply()
-    rig.wait_for(lambda: rig.gateway_events('response-canceled', client='codex_exec'),
+    rig.wait_for(lambda: rig.fake_provider_events('response-canceled', client='codex_exec'),
                  'the canceled response to close', timeout=30)
     if rig.deploy_status()['pid'] != new or rig.deploy_status()['failures'] != 0:
         raise Failure('A client cancellation counted against the candidate.')
@@ -679,7 +747,7 @@ def failed_release_steps_aside(system):
         system.extra = []
         system.apply()
     elapsed = time.monotonic() - began
-    if install.wait(timeout=180):
+    if install.wait(timeout=60):
         raise Failure(f'Failed release did not exit successfully: {rig.read("logs/bad-update.err")[-400:]}')
     for task in tasks:
         task.finish()
@@ -689,8 +757,8 @@ def failed_release_steps_aside(system):
     status = rig.proxy_command('status')
     if build not in skipped or build not in status:
         raise Failure(f'Skipped build {build} is not recorded and shown in status: {status[-500:]}')
-    if len(rig.gateway_events('malformed-response')) < 2:
-        raise Failure('The gateway did not deliver two malformed responses to the candidate.')
+    if len(rig.fake_provider_events('malformed-response')) < 2:
+        raise Failure('The fake providers did not deliver two malformed responses to the candidate.')
     return f'Build {build} stopped taking traffic after malformed responses in {elapsed:.1f} seconds; process {old} resumed, status named the skipped build, and all three Codex tasks finished.'
 
 
@@ -715,7 +783,7 @@ def queued_releases_install_newest(system):
     observer.start()
     traffic = rig.CodexTask('queue-traffic', 'Reply with the word flowing.').finish()
     system.record_codex_task('traffic during queued update', traffic.thread)
-    if first.wait(timeout=600):
+    if first.wait(timeout=60):
         raise Failure(f'First queued update failed: {rig.read("logs/queue-first.err")[-400:]}')
     expected = int(rig.subprocess.check_output([str(rig.RUN / 'candidate-6'), 'print-build'], text=True).strip())
     def newest_serving():
@@ -729,7 +797,7 @@ def queued_releases_install_newest(system):
         if status_code == 200 and completed:
             record_taskless_usage(system, completed)
         return False
-    rig.wait_for(newest_serving, 'the newest build to take new connections', timeout=300, interval=2)
+    rig.wait_for(newest_serving, 'the newest build to take new connections', timeout=60, interval=0.5)
     newest_traffic = rig.CodexTask('queue-newest-traffic', 'Reply with the word newest.').finish()
     system.record_codex_task('traffic on the newest queued build', newest_traffic.thread)
     deadline = time.monotonic() + 600
@@ -792,14 +860,23 @@ def format_duration(seconds):
     return f'{minutes}m {seconds:02d}s'
 
 
-# The first update adopts the published release. Every later outcome runs on builds of this tree, with its shorter
-# timers and Claude traffic through the gateway.
-OUTCOMES = [update_waits_for_work, update_during_work_finishes_on_the_old_process, new_work_goes_to_the_most_allowance_left,
-            request_without_task_id_is_served, exhausted_task_moves_on_its_next_turn, goal_continues_when_an_account_returns,
-            claude_works_through_the_https_proxy, claude_throttle_holds_the_account_briefly,
-            claude_limit_moves_the_task_to_a_free_account, claude_limit_reaches_the_client_at_once,
-            retiring_proxy_keeps_only_working_connections, provider_outage_blocks_neither_restart_nor_release, failed_release_steps_aside,
-            queued_releases_install_newest, every_response_recorded_once]
+# Each group shares one isolated system and runs at once with every other group. Only the first update starts from
+# the published release; every other system starts on a build of this tree.
+GROUPS = [
+    ('update', 'published-release', [update_waits_for_work, update_during_work_finishes_on_the_old_process]),
+    ('routing', 'cli', [new_work_goes_to_the_most_allowance_left, request_without_task_id_is_served]),
+    ('exhaustion', 'cli', [exhausted_task_moves_on_its_next_turn]),
+    ('outage-goal', 'cli', [goal_continues_when_an_account_returns]),
+    ('claude', 'cli', [claude_works_through_the_https_proxy]),
+    ('claude-throttle', 'cli', [claude_throttle_holds_the_account_briefly]),
+    ('claude-fast-mode', 'cli', [claude_fast_mode_refusal_stays_on_the_account]),
+    ('claude-failover', 'cli', [claude_limit_moves_the_task_to_a_free_account]),
+    ('claude-limited', 'cli', [claude_limit_reaches_the_client_at_once]),
+    ('retire', 'cli', [retiring_proxy_keeps_only_working_connections]),
+    ('outage', 'cli', [provider_outage_blocks_neither_restart_nor_release]),
+    ('failed-release', 'cli', [failed_release_steps_aside]),
+    ('queue', 'cli', [queued_releases_install_newest]),
+]
 
 if __name__ == '__main__':
     main()

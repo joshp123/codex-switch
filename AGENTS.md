@@ -47,7 +47,7 @@ it, or remove the feature.
 | How do clients reach it? | Codex: `openai_base_url` in `~/.codex/config.toml` (`codex-switch print-codex-config`). Pi: `~/.pi/agent/models.json`, provider `openai-codex`. |
 | How does Codex itself behave? | The Codex source (`openai/codex`), and the installed client: `/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex`. |
 | Where does the menu get its numbers? | The serving proxy composes a snapshot once a minute and writes its private URL to `menu-snapshot-url` in the data directory; the menu and `codex-switch status` fetch it from there. |
-| Does the whole system work before a deploy? | `scripts/dev/system-test`; see `docs/system-test.md`. |
+| Does the whole system work before a deploy? | `scripts/dev/system-test` (about 20 seconds, no tokens); before a release, also `scripts/dev/smoke-test` against the real services. See `docs/system-test.md`. |
 | How is it installed, updated and removed? | `deploy/install.sh` builds the app and proxy; the app runs `deploy/install-proxy.sh <binary>` on launch. The installer serializes updates, selects the newest build, proves it in the second launchd slot and drains the old slot. `deploy/deploy.sh back` restores the previous binary. `deploy/uninstall.sh` removes both slots. `deploy/installation.sh` names the installation paths. Running these against the live install needs the owner's approval. |
 
 ## The code
@@ -71,9 +71,17 @@ it, or remove the feature.
 
 Declarative, repeatable, full tests in code. Test only the real path, not
 invented mocks. Test as close to the real thing as possible: the real proxy
-process, the real Codex and Pi clients, real accounts on a cheap model, a real
-blue-green update, and the real menu app on screen. A test that only checks the
-code against itself proves nothing.
+process, the real Codex, Pi and Claude Code clients, a real blue-green update,
+and the real menu app on screen. A test that only checks the code against
+itself proves nothing.
+
+Behaviour is tested without real tokens and without waiting on time. The owner,
+1 November 2026: "we shouldn't be spending real tokens on UNIT testing this
+tool", "just design the tests properly aroudn timing. this is a solved problem
+with clock fakery", and the full system test should take "under 20s". So the
+system test runs the real processes and clients against fake providers with a
+scripted model and short timers, and waits for events, never for a timer. Only
+the smoke test, before a release, uses real accounts on a cheap model.
 
 ## Live system
 
