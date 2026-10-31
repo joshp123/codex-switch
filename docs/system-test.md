@@ -8,7 +8,7 @@ Run this before a live deploy:
 scripts/dev/system-test
 ```
 
-It takes about seven minutes. It starts from the newest published release,
+It takes about six minutes. It starts from the newest published release,
 updates it to builds of this working tree with the real installer, runs the
 account pool in isolation, and prints what the system did for each outcome,
 with how long it took. Timers are shortened; nothing else changes:
