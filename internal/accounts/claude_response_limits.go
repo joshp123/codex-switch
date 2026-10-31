@@ -93,14 +93,15 @@ func (monitor *Monitor) ObserveClaudeResponse(name store.AccountName, model stri
 // it was midnight UTC, neither account's five-hour nor weekly reset, and
 // treating it as a deadline kept two usable accounts from Opus for hours.
 func restrictClaudeAccountAfterRejection(fact *AccountRoutingFact, model string, headers http.Header, incoming AllowanceSample, now time.Time) {
-	scopes := make(map[string]time.Time)
+	// Every restriction names its limit, so a saved one is never read as a throttle.
+	scopes, claims := make(map[string]time.Time), make(map[string]string)
 	for _, window := range incoming.Windows {
 		if !window.LimitReached && window.UsedPercent < 100 {
 			continue
 		}
 		scope := claudeWindowRestrictionScope(window)
 		if window.ResetsAt.After(scopes[scope]) {
-			scopes[scope] = window.ResetsAt
+			scopes[scope], claims[scope] = window.ResetsAt, claudeWindowClaim(window)
 		}
 	}
 	claim := headers.Get("anthropic-ratelimit-unified-representative-claim")
@@ -110,12 +111,12 @@ func restrictClaudeAccountAfterRejection(fact *AccountRoutingFact, model string,
 	}
 	limitReset := claudeHeaderReset(headers.Get("anthropic-ratelimit-unified-reset"))
 	if claimNamesLimit && limitReset.After(scopes[claimedScope]) {
-		scopes[claimedScope] = limitReset
+		scopes[claimedScope], claims[claimedScope] = limitReset, claim
 	}
 	retryAt := claudeRetryAfter(headers, now)
 	if len(scopes) == 0 {
 		if !retryAt.After(now) {
-			retryAt = now.Add(time.Minute)
+			retryAt = now.Add(claudeThrottleHold)
 		}
 		fact.ClaudeRestrictions[canonicalClaudeModelID(model)] = ClaudeRestriction{ResetsAt: retryAt, ObservedAt: now, Throttle: true}
 		log.Printf("%s: Anthropic throttled %s without naming a usage limit; trying the account again after %s", fact.DisplayName, model, retryAt.Local().Format("15:04:05"))
@@ -126,7 +127,7 @@ func restrictClaudeAccountAfterRejection(fact *AccountRoutingFact, model string,
 		if retryAt.After(reset) {
 			reset = retryAt
 		}
-		fact.ClaudeRestrictions[scope] = ClaudeRestriction{ResetsAt: reset, ObservedAt: now, Claim: claim}
+		fact.ClaudeRestrictions[scope] = ClaudeRestriction{ResetsAt: reset, ObservedAt: now, Claim: claims[scope]}
 		if reset.After(latestReset) {
 			latestReset = reset
 		}

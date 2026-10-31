@@ -192,6 +192,28 @@ func (router *TaskRouter) ReportExhaustedTurn(taskID store.TaskID, servedAccount
 	return outcome
 }
 
+// ClaudePoolCapacity says whether a Claude account can take modelSlug now. If
+// none can, it says when an allowance reset next frees one, and Anthropic's
+// name for the limit that ends then.
+func (router *TaskRouter) ClaudePoolCapacity(modelSlug string) (accountFree bool, availableAgainAt time.Time, limitClaim string, err error) {
+	facts, err := router.accountFacts.ReadAccountRoutingFacts()
+	if err != nil {
+		return false, time.Time{}, "", fmt.Errorf("read account routing facts: %w", err)
+	}
+	facts = factsForProvider(facts, accounts.ProviderClaude)
+	for _, fact := range facts {
+		reason, err := router.accountUnavailableReason(fact, modelSlug)
+		if err != nil {
+			return false, time.Time{}, "", err
+		}
+		if reason == "" {
+			return true, time.Time{}, "", nil
+		}
+	}
+	availableAgainAt, limitClaim = router.claudePoolAvailableAgain(facts, modelSlug)
+	return false, availableAgainAt, limitClaim, nil
+}
+
 // ReportUnauthorizedTurn refreshes rejected credentials for the client's next request without replaying the failed turn.
 func (router *TaskRouter) ReportUnauthorizedTurn(servedAccountName store.AccountName, rejectedCredentials accounts.Credentials) {
 	if err := router.accountFacts.RefreshAccountCredentialsAfterUnauthorized(servedAccountName, rejectedCredentials); err != nil {

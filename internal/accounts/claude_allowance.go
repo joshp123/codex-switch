@@ -183,6 +183,33 @@ type ClaudeRestriction struct {
 	Throttle bool `json:",omitempty"`
 }
 
+// claudeThrottleHold is how long a throttle without a Retry-After keeps an
+// account from the model.
+const claudeThrottleHold = time.Minute
+
+// endsAt is when the restriction stops blocking. One saved before 1 November
+// 2026 names neither a limit nor a throttle: it may come from a throttle read
+// as a usage limit, so it is held as a throttle.
+func (restriction ClaudeRestriction) endsAt() time.Time {
+	if restriction.Claim == "" && !restriction.Throttle && restriction.ResetsAt.After(restriction.ObservedAt.Add(claudeThrottleHold)) {
+		return restriction.ObservedAt.Add(claudeThrottleHold)
+	}
+	return restriction.ResetsAt
+}
+
+// claudeWindowClaim is Anthropic's representative claim for a usage window.
+func claudeWindowClaim(window ReportedWindow) string {
+	switch {
+	case window.DurationSeconds != 7*86400:
+		return "five_hour"
+	case ClaudeModelFamily(window.ModelName) == "opus":
+		return "seven_day_opus"
+	case ClaudeModelFamily(window.ModelName) == "sonnet":
+		return "seven_day_sonnet"
+	}
+	return "seven_day"
+}
+
 func claudeWindowRestrictionScope(window ReportedWindow) string {
 	if window.ModelID != "" {
 		return canonicalClaudeModelID(window.ModelID)
@@ -207,8 +234,8 @@ func ClaudeUnavailableReason(fact AccountRoutingFact, model string, now time.Tim
 	var blockedUntil time.Time
 	throttled := false
 	for scope, restriction := range fact.ClaudeRestrictions {
-		if (scope == "" || scope == ClaudeModelFamily(model) || scope == canonicalClaudeModelID(model)) && restriction.ResetsAt.After(blockedUntil) {
-			blockedUntil, throttled = restriction.ResetsAt, restriction.Throttle
+		if (scope == "" || scope == ClaudeModelFamily(model) || scope == canonicalClaudeModelID(model)) && restriction.endsAt().After(blockedUntil) {
+			blockedUntil, throttled = restriction.endsAt(), restriction.Claim == ""
 		}
 	}
 	for _, window := range fact.AllowanceSample.Windows {
@@ -234,7 +261,7 @@ func ClaudeAvailableAgain(fact AccountRoutingFact, model string, now time.Time) 
 		resets = append(resets, window.ResetsAt)
 	}
 	for _, restriction := range fact.ClaudeRestrictions {
-		resets = append(resets, restriction.ResetsAt)
+		resets = append(resets, restriction.endsAt())
 	}
 	slices.SortFunc(resets, time.Time.Compare)
 	for _, reset := range resets {
@@ -257,24 +284,22 @@ func claudeLimitClaimEndingAt(fact AccountRoutingFact, model string, reset time.
 		if !window.ResetsAt.Equal(reset) || !claudeWindowMatchesModel(window, model) {
 			continue
 		}
-		switch {
-		case window.DurationSeconds != 7*86400:
-			if claim == "" {
-				claim = "five_hour"
-			}
-		case ClaudeModelFamily(window.ModelName) == "opus":
-			return "seven_day_opus"
-		case ClaudeModelFamily(window.ModelName) == "sonnet":
-			return "seven_day_sonnet"
+		switch windowClaim := claudeWindowClaim(window); windowClaim {
+		case "seven_day_opus", "seven_day_sonnet":
+			return windowClaim
+		case "seven_day":
+			claim = windowClaim
 		default:
-			claim = "seven_day"
+			if claim == "" {
+				claim = windowClaim
+			}
 		}
 	}
 	if claim != "" {
 		return claim
 	}
 	for _, restriction := range fact.ClaudeRestrictions {
-		if restriction.ResetsAt.Equal(reset) && restriction.Claim != "" {
+		if restriction.endsAt().Equal(reset) && restriction.Claim != "" {
 			return restriction.Claim
 		}
 	}

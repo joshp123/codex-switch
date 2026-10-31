@@ -16,6 +16,7 @@ type TaskRouter interface {
 	ReportUnsupportedModel(id store.TaskID, served store.AccountName, modelSlug string) bool
 	ReportExhaustedTurn(id store.TaskID, served store.AccountName, resetsAt time.Time) string
 	ReportUnauthorizedTurn(served store.AccountName, rejected accounts.Credentials)
+	ClaudePoolCapacity(modelSlug string) (accountFree bool, availableAgainAt time.Time, limitClaim string, err error)
 }
 
 // CompletionLedger is the only response fact the relay persists.

@@ -210,3 +210,33 @@ func TestClaudeThrottleHoldsTheAccountOnlyUntilRetryAfter(t *testing.T) {
 		t.Fatalf("five-hour limit held Sonnet for %s, want until its reset in 3h", got)
 	}
 }
+
+// The Mac mini kept an Opus restriction saved by the earlier rule, from a
+// throttle read as a usage limit. A restriction saved before restrictions
+// named their limit is held only as long as a throttle, while one that names
+// its limit keeps the account out until the reset.
+func TestClaudeRestrictionSavedWithoutItsLimitIsHeldAsAThrottle(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	data := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(data, "account-1"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	saved := `{"Restrictions":{"claude-opus-5-5":{"ResetsAt":"` + now.Add(7*time.Hour).Format(time.RFC3339) + `","ObservedAt":"` + now.Add(-2*time.Minute).Format(time.RFC3339) + `"},` +
+		`"sonnet":{"ResetsAt":"` + now.Add(3*time.Hour).Format(time.RFC3339) + `","ObservedAt":"` + now.Add(-2*time.Minute).Format(time.RFC3339) + `","Claim":"seven_day_sonnet"}}}`
+	if err := os.WriteFile(filepath.Join(data, "account-1", "claude-allowance.json"), []byte(saved), 0600); err != nil {
+		t.Fatal(err)
+	}
+	origin, _ := url.Parse("https://api.anthropic.com")
+	monitor := NewMonitor(data, origin, "", http.DefaultClient, monitorTestDatabase(t))
+	cache, _, err := monitor.reserveClaudeUsageRead("account-1", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fact := AccountRoutingFact{ClaudeRestrictions: cache.Restrictions}
+	if reason, until := ClaudeUnavailableReason(fact, "claude-opus-5-5", now); reason != "" {
+		t.Fatalf("restriction saved without its limit still holds Opus: %s until %s", reason, until.Sub(now))
+	}
+	if reason, until := ClaudeUnavailableReason(fact, "claude-sonnet-5-5", now); reason == "" || !until.Equal(now.Add(3*time.Hour)) {
+		t.Fatalf("named Sonnet limit: %q until %s, want until its reset in 3h", reason, until.Sub(now))
+	}
+}

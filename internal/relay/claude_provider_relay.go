@@ -52,10 +52,9 @@ func (handler *TrafficRelayHandler) observeClaudeRejection(request *routedRelayR
 	switch response.StatusCode {
 	case http.StatusTooManyRequests:
 		head := peekResponseBody(response)
-		log.Printf("%s: Anthropic limited %s (%s)%s; the client's next request uses available capacity", describeModelRequest(request.taskID, request.client, request.routeDecision.DisplayName), request.modelSlug, describeClaudeLimitHeaders(response.Header), describeRejection(response.Header, head))
-		// The next request chooses from the whole pool. No rejected request is replayed.
-		response.Header.Set("Retry-After", "1")
-		response.Header.Set("X-Should-Retry", "true")
+		limited := describeModelRequest(request.taskID, request.client, request.routeDecision.DisplayName) + ": Anthropic limited " + request.modelSlug +
+			" (" + describeClaudeLimitHeaders(response.Header) + ")" + describeRejection(response.Header, head)
+		answerClaudeRejection(response, handler.taskRouter, request.modelSlug, limited)
 	case http.StatusUnauthorized:
 		handler.taskRouter.ReportUnauthorizedTurn(request.routeDecision.AccountName, request.routeDecision.Credentials)
 		response.StatusCode = http.StatusServiceUnavailable
@@ -67,6 +66,42 @@ func (handler *TrafficRelayHandler) observeClaudeRejection(request *routedRelayR
 		log.Printf("%s: Anthropic answered %s with HTTP %d%s", describeModelRequest(request.taskID, request.client, request.routeDecision.DisplayName), request.modelSlug, response.StatusCode, describeRejection(response.Header, head))
 	}
 	return nil
+}
+
+// answerClaudeRejection decides what Claude Code sees of Anthropic's 429. No
+// rejected request is replayed: the client's next request chooses from the
+// whole pool. Claude Code stops at a 429 that names a usage limit, so while
+// another account can take the work the client gets a 503 it retries at once.
+// When none can, it gets the pool's limit and its earliest reset, which T3
+// resumes at.
+func answerClaudeRejection(response *http.Response, router TaskRouter, modelSlug, limited string) {
+	accountFree, availableAgainAt, limitClaim, err := router.ClaudePoolCapacity(modelSlug)
+	if err != nil {
+		log.Printf("%s; could not read the pool: %v", limited, err)
+	}
+	switch {
+	case accountFree:
+		for name := range response.Header {
+			if strings.HasPrefix(strings.ToLower(name), "anthropic-ratelimit-") {
+				response.Header.Del(name)
+			}
+		}
+		response.StatusCode, response.Status = http.StatusServiceUnavailable, "503 Service Unavailable"
+		response.Header.Set("Retry-After", "1")
+		response.Header.Set("X-Should-Retry", "true")
+		log.Printf("%s; the client's retry goes to another account", limited)
+	case !availableAgainAt.IsZero() && limitClaim != "":
+		availableAgain := availableAgainAt.Local().Format("Mon 2 Jan 15:04")
+		response.Header.Set("Anthropic-Ratelimit-Unified-Status", "rejected")
+		response.Header.Set("Anthropic-Ratelimit-Unified-Reset", strconv.FormatInt(availableAgainAt.Unix(), 10))
+		response.Header.Set("Anthropic-Ratelimit-Unified-Representative-Claim", limitClaim)
+		log.Printf("%s; no account can take it, so the client was told its %s limit until %s", limited, limitClaim, availableAgain)
+	default:
+		// A throttle: the retry waits for the account, or for another.
+		response.Header.Set("Retry-After", "1")
+		response.Header.Set("X-Should-Retry", "true")
+		log.Printf("%s; the client's next request waits for capacity", limited)
+	}
 }
 
 // peekResponseBody reads only the start of the body for the reason; the client
