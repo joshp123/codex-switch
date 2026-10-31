@@ -257,6 +257,13 @@ def clean_up():
     wait_for(lambda: not run_processes(exclude=fake_providers), 'proxy processes to stop', timeout=60, fail=False)
     for process in started_processes:
         stop_process_group(process)
+    # Anything else from this run's directory, such as the fake providers of a group that ended without cleaning up.
+    for pid in run_processes():
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    wait_for(lambda: not run_processes(), 'the run to stop', timeout=10, fail=False)
     leftovers = [f'process {pid}' for pid in run_processes()]
     for label in (LABEL, LABEL + '.a', LABEL + '.b'):
         if subprocess.run(['launchctl', 'print', f'gui/{os.getuid()}/{label}'], capture_output=True).returncode == 0:

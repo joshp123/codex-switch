@@ -23,7 +23,8 @@ rig.BUILDS = rig.RUN / 'builds'
 
 
 def main():
-    began, checks, leftovers = time.monotonic(), [], []
+    began, checks, leftovers, failure = time.monotonic(), [], [], None
+    expected = ['Codex', *(['Pi'] if rig.PI else []), 'Claude Code']
     try:
         if rig.RUN.exists():
             os.rename(rig.RUN, rig.RUN.with_name(f'smoke-test.previous.{time.time_ns()}'))
@@ -38,7 +39,8 @@ def main():
         session = str(uuid.uuid4())
         result = rig.run_claude(session, must_succeed=False)
         checks.append(('Claude Code', result.get('result', ''), rig.database_rows('claude:code:' + session)))
-    except Failure as failure:
+    except Failure as error:
+        failure = error
         print(f'FAIL  {failure}')
     finally:
         leftovers = rig.clean_up()
@@ -48,8 +50,10 @@ def main():
         held += works
         print(('PASS  ' if works else 'FAIL  ') + f'{client} replied {reply.strip()!r} through the proxy, which recorded {len(rows)} responses.')
     print('Nothing is left running.' if not leftovers else 'STILL RUNNING: ' + '; '.join(leftovers))
-    print(f'{held} of {len(checks)} clients worked, in {time.monotonic() - began:.0f} seconds.')
-    raise SystemExit(0 if checks and held == len(checks) and not leftovers else 1)
+    for client in expected[len(checks):]:
+        print(f'FAIL  {client} was not tested.')
+    print(f'{held} of {len(expected)} clients worked, in {time.monotonic() - began:.0f} seconds.')
+    raise SystemExit(0 if failure is None and held == len(expected) and not leftovers else 1)
 
 
 if __name__ == '__main__':

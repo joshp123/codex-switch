@@ -71,6 +71,10 @@ class System:
 def main():
     if len(sys.argv) == 3 and sys.argv[1] == '--group':
         raise SystemExit(run_group(sys.argv[2]))
+    if len(sys.argv) == 3 and sys.argv[1] == '--clean-up':
+        # Stops what a group that ended without cleaning up left running; prints it, one item a line.
+        print('\n'.join(rig.clean_up()))
+        raise SystemExit(0)
     # --only GROUP,GROUP runs those groups, for working on one.
     only = set(sys.argv[2].split(',')) if len(sys.argv) == 3 and sys.argv[1] == '--only' else None
     began = time.monotonic()
@@ -100,12 +104,21 @@ def main():
             process.wait()
         print('\nStopped before the end.')
     results, leftovers = [], []
-    for name in groups:
+    for name, process in groups.items():
         path = rig.ROOT / name / 'results.jsonl'
         reported = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
-        if not reported:
-            reported = [{'outcome': 'The system did not start', 'held': False, 'seconds': 0,
-                         'observed': f'See {(rig.ROOT / name / "logs/system-test.out").relative_to(rig.REPO)}.'}]
+        expected = len(next(outcomes for group, _, outcomes in GROUPS if group == name)) + 1
+        outcomes_reported = [result for result in reported if 'leftovers' not in result]
+        if not any('leftovers' in result for result in reported):
+            cleanup = subprocess.run([sys.executable, __file__, '--clean-up', name], capture_output=True, text=True,
+                                     env=dict(os.environ, CODEX_SWITCH_SYSTEM_TEST_RUN=str(rig.ROOT / name)))
+            leftovers += [line for line in cleanup.stdout.splitlines() if line]
+        # A group that stopped early, or never cleaned up, has not shown its outcomes held.
+        if process.returncode or len(outcomes_reported) != expected or not any('leftovers' in result for result in reported):
+            reported.append({'outcome': f'The {name} group finished', 'held': False, 'seconds': 0,
+                             'observed': f'It exited with {process.returncode} after reporting {len(outcomes_reported)} of {expected} outcomes'
+                                         f'{"" if any("leftovers" in result for result in reported) else " and no cleanup"}. '
+                                         f'See {(rig.ROOT / name / "system-test.out").relative_to(rig.REPO)}.'})
         for result in reported:
             if 'leftovers' in result:
                 leftovers += result['leftovers']
