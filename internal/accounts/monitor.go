@@ -56,6 +56,9 @@ type Monitor struct {
 	httpClient      *http.Client
 	storeDatabase   *store.StoreDatabase
 
+	// readInterval is accountReadInterval; the system test shortens it.
+	readInterval time.Duration
+
 	mutex         sync.Mutex
 	accounts      map[store.AccountName]*monitoredAccount
 	readRequested chan struct{}
@@ -83,10 +86,16 @@ func NewMonitor(dataDirectory string, upstreamOrigin *url.URL, codexExecutable s
 		codexExecutable: codexExecutable,
 		httpClient:      httpClient,
 		storeDatabase:   storeDatabase,
+		readInterval:    accountReadInterval,
 		accounts:        map[store.AccountName]*monitoredAccount{},
 		readRequested:   make(chan struct{}, 1),
 		firstReadDone:   make(chan struct{}),
 	}
+}
+
+// SetAccountReadInterval changes how often each account is read, before Run starts.
+func (monitor *Monitor) SetAccountReadInterval(interval time.Duration) {
+	monitor.readInterval = interval
 }
 
 // WaitForFirstRead returns once every account has been read once,
@@ -125,9 +134,9 @@ func (monitor *Monitor) startDueReads(ctx context.Context, reads *sync.WaitGroup
 	pool, err := ReadPool(monitor.dataDirectory)
 	if err != nil {
 		log.Printf("could not read the account pool: %v", err)
-		return now.Add(accountReadInterval)
+		return now.Add(monitor.readInterval)
 	}
-	interval := accountReadInterval
+	interval := monitor.readInterval
 	if readRequested {
 		interval = requestedAccountReadInterval
 	}
@@ -136,9 +145,9 @@ func (monitor *Monitor) startDueReads(ctx context.Context, reads *sync.WaitGroup
 	for _, account := range pool {
 		monitored := monitor.monitoredAccountLocked(store.AccountName(account.Name), account.Provider)
 		if monitored.reading || now.Sub(monitored.lastReadStarted) < interval {
-			dueAt := monitored.lastReadStarted.Add(accountReadInterval)
+			dueAt := monitored.lastReadStarted.Add(monitor.readInterval)
 			if monitored.reading && !dueAt.After(now) {
-				dueAt = now.Add(accountReadInterval)
+				dueAt = now.Add(monitor.readInterval)
 			}
 			if nextRead.IsZero() || dueAt.Before(nextRead) {
 				nextRead = dueAt
@@ -147,7 +156,7 @@ func (monitor *Monitor) startDueReads(ctx context.Context, reads *sync.WaitGroup
 		}
 		monitored.reading = true
 		monitored.lastReadStarted = now
-		dueAt := now.Add(accountReadInterval)
+		dueAt := now.Add(monitor.readInterval)
 		if nextRead.IsZero() || dueAt.Before(nextRead) {
 			nextRead = dueAt
 		}
@@ -163,7 +172,7 @@ func (monitor *Monitor) startDueReads(ctx context.Context, reads *sync.WaitGroup
 		}(monitored.fact)
 	}
 	if nextRead.IsZero() {
-		nextRead = now.Add(accountReadInterval)
+		nextRead = now.Add(monitor.readInterval)
 	}
 	return nextRead
 }

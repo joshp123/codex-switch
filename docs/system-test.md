@@ -8,43 +8,52 @@ Run this before a live deploy:
 scripts/dev/system-test
 ```
 
-It takes about 15 minutes. It starts from the newest published release,
+It takes about seven minutes. It starts from the newest published release,
 updates it to builds of this working tree with the real installer, runs the
-account pool in isolation, and prints what the system did for each outcome.
-The installer's five-minute proving period and 30-minute switch limit are
-shortened to 30 and 150 seconds; nothing else changes.
+account pool in isolation, and prints what the system did for each outcome,
+with how long it took. Timers are shortened; nothing else changes:
+
+| Timer | Live | Test |
+| --- | --- | --- |
+| Installer proving period | 5 minutes | 10 seconds |
+| Installer switch limit | 30 minutes | 45 seconds |
+| Account reads (`CODEX_SWITCH_ACCOUNT_READ_SECONDS`) | 1 minute | 15 seconds |
+| Idle Claude connection grace on retiring (`CODEX_SWITCH_CONNECTION_DRAIN_SECONDS`) | 1 minute | 10 seconds |
 
 1. An update waits for model work before it switches.
-2. New Codex tasks and Pi sessions go to the account with the most weekly
-   allowance left, and stay there when another account takes the lead.
-3. Claude Code gets a reply through the HTTPS proxy, on the Claude account,
-   recorded once with its tokens.
-4. When Anthropic throttles a Claude request without naming a usage limit,
-   Claude Code still gets its reply, from the same account, within about a
-   minute.
-5. With every Claude account at its usage limit, Claude Code stops at once and
-   says when the limit resets, and the next task gets the same answer from the
-   proxy without a request to Anthropic.
-6. A request without a task ID is served.
-7. When a task's account runs out, its next turn moves to another account. No
-   model work is replayed, no tool effect repeats, and Codex shows no error.
-8. With every account out of allowance, a running goal continues by itself
-   when one account comes back.
-9. An update adopts the published release's single job during work. Responses
+2. An update adopts the published release's single job during work. Responses
    in flight over WebSocket and HTTP finish on the old process, while new work
-   starts on the new one and proves it.
-10. A retiring proxy finishes a reply it holds, closes an idle HTTP connection at
-   once and a silent tunnel after a minute. A transferring tunnel keeps going
-   until the switch limit, when the old process has gone.
-11. During a provider outage, launchd restarts a killed proxy, and a failed
-   request is enough to start a waiting update. A candidate that cannot read
-   the accounts stops, and its build is not skipped.
-12. Provider errors and client cancellations do not count against a candidate.
+   starts on the new one and proves it. Every later outcome runs on builds of
+   this tree.
+3. New Codex tasks and Pi sessions go to the account with the most weekly
+   allowance left, and stay there when another account takes the lead.
+4. A request without a task ID is served.
+5. When a task's account runs out, its next turn moves to another account. No
+   model work is replayed, no tool effect repeats, and Codex shows no error.
+6. With every account out of allowance, a running goal continues by itself
+   when one account comes back.
+7. Claude Code gets a reply through the HTTPS proxy, on a Claude account,
+   recorded once with its tokens.
+8. When Anthropic throttles a Claude request without naming a usage limit,
+   Claude Code still gets its reply within seconds.
+9. When a Claude task's account reaches its usage limit, the task's next
+   prompt is answered by another account and Claude Code shows no limit. This
+   needs two signed-in Claude accounts.
+10. With every Claude account at its usage limit, Claude Code stops at once and
+    says when the limit resets, and the next task gets the same answer from
+    the proxy without a request to Anthropic.
+11. A retiring proxy finishes a reply it holds, closes an idle HTTP connection
+    at once and a silent tunnel after its grace. A transferring tunnel keeps
+    going until the switch limit, when the old process has gone.
+12. During a provider outage, launchd restarts a killed proxy, and a failed
+    request is enough to start a waiting update. A candidate that cannot read
+    the accounts stops, and its build is not skipped.
+13. Provider errors and client cancellations do not count against a candidate.
     Malformed upstream responses do: the candidate steps aside and status
     shows the skipped build.
-13. Two releases queued during a switch converge on the newest, with at most
+14. Two releases queued during a switch converge on the newest, with at most
     two proxy processes and no downgrade.
-14. Each completed response is recorded once, with its account, task and tokens.
+15. Each completed response is recorded once, with its account, task and tokens.
 
 The command exits 0 only if every outcome held and nothing is left running.
 
@@ -61,8 +70,9 @@ The command exits 0 only if every outcome held and nothing is left running.
   start and runs everything else.
 - OpenAI, with your signed-in accounts, on `gpt-6-luna` at low effort. One run
   uses about 30 model requests and 0.5 million input tokens, mostly cached.
-- The newest Claude Code inside Claude Desktop, or `claude` on `PATH`. It runs
-  one short prompt on the latest Haiku at low effort, using `HTTPS_PROXY` and
+- The newest Claude Code inside Claude Desktop, or `claude` on `PATH`, with
+  every signed-in Claude account. It runs short prompts on the latest Haiku at
+  low effort, using `HTTPS_PROXY` and
   `NODE_EXTRA_CA_CERTS` from `print-claude-config`. The proxy reaches
   `api.anthropic.com` through the gateway, which connects over TLS.
 - The update path: `deploy/install-proxy.sh` against private launchd jobs.
@@ -76,7 +86,8 @@ so the test can see that none was sent twice. Its control file simulates what a
 test cannot wait for: a weekly allowance level, an account that runs out after
 a given number of requests, refused WebSockets, failed usage reads, and
 responses held mid-stream for one client, and for Claude a 429 that names
-no usage limit, as Anthropic sent on 31 October 2026, or a five-hour limit. It can also send malformed HTTP
+no usage limit, as Anthropic sent on 31 October 2026 (with a five-second
+Retry-After), or a five-hour limit on one Claude account. It can also send malformed HTTP
 responses to test a failed candidate. The proxy binaries built from this tree
 differ only in their build numbers.
 
@@ -85,7 +96,7 @@ differ only in their build numbers.
 The test reads the account logins from the live data directory and copies only
 the access tokens. Refresh tokens stay behind, so the test cannot rotate a live
 login. Each account needs an access token valid for at least another hour.
-The test copies one signed-in Claude account. It prints `SKIP Claude Code` if
+The test copies every signed-in Claude account the same way. It prints `SKIP Claude Code` if
 none is signed in, none has an hour left on its token, or Claude Code is absent;
 the Claude outcome then fails.
 

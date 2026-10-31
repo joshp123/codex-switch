@@ -38,6 +38,8 @@ type ClaudeForwardProxy struct {
 	mutex          sync.Mutex
 	connections    map[*claudeProxyConnection]struct{}
 	drainDeadline  time.Time
+	// drainGrace is claudeConnectionDrainGrace; the system test shortens it.
+	drainGrace time.Duration
 }
 
 type claudeProxyConnection struct {
@@ -73,6 +75,7 @@ func CreateClaudeForwardProxy(dataDirectory, capability string, trafficRelay *Tr
 		proxyAuth:      "Basic " + base64.StdEncoding.EncodeToString([]byte("codex-switch:"+capability)),
 		capabilityPath: "/client/" + capability + "/anthropic",
 		connections:    make(map[*claudeProxyConnection]struct{}),
+		drainGrace:     claudeConnectionDrainGrace,
 		passthrough: &httputil.ReverseProxy{
 			Rewrite: func(request *httputil.ProxyRequest) {
 				request.SetURL(trafficRelay.claudeUpstreamOrigin)
@@ -239,10 +242,15 @@ func (proxy *ClaudeForwardProxy) serveAnthropicRequest(writer http.ResponseWrite
 	proxy.passthrough.ServeHTTP(writer, request)
 }
 
+// SetConnectionDrainGrace changes the grace DrainConnections gives.
+func (proxy *ClaudeForwardProxy) SetConnectionDrainGrace(grace time.Duration) {
+	proxy.drainGrace = grace
+}
+
 // DrainConnections gives connections doing no work one grace period. HTTP
 // shutdown closes idle connections now and model connections after their reply.
 func (proxy *ClaudeForwardProxy) DrainConnections() {
-	proxy.drainConnectionsWithin(claudeConnectionDrainGrace)
+	proxy.drainConnectionsWithin(proxy.drainGrace)
 }
 
 func (proxy *ClaudeForwardProxy) drainConnectionsWithin(grace time.Duration) {

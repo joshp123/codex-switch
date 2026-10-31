@@ -103,6 +103,9 @@ func serveRelay(tcpListenAddress string) {
 		log.Fatal(fmt.Errorf("Claude upstream origin: %w", err))
 	}
 	accountMonitor.SetClaudeUpstreamOrigin(claudeUpstreamOrigin)
+	if interval, set := secondsFromEnvironment("CODEX_SWITCH_ACCOUNT_READ_SECONDS"); set {
+		accountMonitor.SetAccountReadInterval(interval)
+	}
 	// A process that starts during a switch is its candidate. Any other start
 	// must succeed during a provider outage, so launchd can restart the proxy.
 	if _, err := os.Stat(filepath.Join(dataDir(), switchStartedFilename)); err == nil {
@@ -152,6 +155,9 @@ func serveRelay(tcpListenAddress string) {
 	forwardProxy, err := relay.CreateClaudeForwardProxy(dataDir(), capability, relayHandler, snapshots.serveOrRelay(capability, profileOrRelay(capability, deployStatusOrRelay(capability, relayHandler, activity))))
 	if err != nil {
 		log.Fatal(err)
+	}
+	if grace, set := secondsFromEnvironment("CODEX_SWITCH_CONNECTION_DRAIN_SECONDS"); set {
+		forwardProxy.SetConnectionDrainGrace(grace)
 	}
 
 	// A generation listens only once it can route: during an update, new
@@ -289,4 +295,18 @@ func printBinaryRevision(args []string) {
 // proxyLogPath is the serving proxy's one log file.
 func proxyLogPath(dataDirectory string) string {
 	return filepath.Join(dataDirectory, "proxy.log")
+}
+
+// secondsFromEnvironment reads a duration the system test shortens. Any other
+// value than a positive whole number of seconds stops the proxy.
+func secondsFromEnvironment(name string) (time.Duration, bool) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return 0, false
+	}
+	seconds, err := strconv.Atoi(value)
+	if err != nil || seconds <= 0 {
+		log.Fatalf("%s must be a whole number of seconds, not %q", name, value)
+	}
+	return time.Duration(seconds) * time.Second, true
 }

@@ -89,7 +89,7 @@ func main() {
 
 type gateway struct {
 	controlPath    string
-	aliases        map[string]string // ChatGPT account ID to account-N
+	aliases        map[string]string // ChatGPT account ID, or claudeAlias of a Claude access token, to account-N
 	upstream       *url.URL
 	claudeUpstream *url.URL
 	transport      *http.Transport
@@ -108,7 +108,7 @@ type gateway struct {
 //	provider-error                  model requests receive a provider HTTP error
 //	usage-error                     usage reads receive a provider HTTP error
 //	claude-throttle COUNT           the next COUNT Claude model requests receive a 429 that names no usage limit
-//	claude-limited                  Claude's five-hour allowance has run out
+//	claude-limited account-N        the Claude account's five-hour allowance has run out
 type controls struct {
 	weeklyUsed     map[string]float64
 	limited        map[string]bool
@@ -118,7 +118,7 @@ type controls struct {
 	providerError  bool
 	usageError     bool
 	claudeThrottle bool
-	claudeLimited  bool
+	claudeLimited  map[string]bool
 }
 
 func (gateway *gateway) readControls() (controls, error) {
@@ -128,7 +128,7 @@ func (gateway *gateway) readControls() (controls, error) {
 	if err != nil {
 		return controls{}, errors.New("cannot read simulation control file")
 	}
-	parsed := controls{weeklyUsed: map[string]float64{}, limited: map[string]bool{}, holdResponses: map[string]bool{}}
+	parsed := controls{weeklyUsed: map[string]float64{}, limited: map[string]bool{}, holdResponses: map[string]bool{}, claudeLimited: map[string]bool{}}
 	scanner := bufio.NewScanner(strings.NewReader(string(data)))
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
@@ -142,8 +142,8 @@ func (gateway *gateway) readControls() (controls, error) {
 			parsed.providerError = true
 		case len(fields) == 1 && fields[0] == "usage-error":
 			parsed.usageError = true
-		case len(fields) == 1 && fields[0] == "claude-limited":
-			parsed.claudeLimited = true
+		case len(fields) == 2 && fields[0] == "claude-limited" && gateway.knownAlias(fields[1]):
+			parsed.claudeLimited[fields[1]] = true
 		case len(fields) == 2 && fields[0] == "claude-throttle":
 			// takeClaudeThrottle applies the count; here it is only validated.
 			count, err := strconv.Atoi(fields[1])
@@ -192,11 +192,11 @@ func (gateway *gateway) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	alias := gateway.alias(request)
 	webSocket := request.URL.Path == responsesPath && strings.EqualFold(request.Header.Get("Upgrade"), "websocket")
 	switch {
-	case controls.claudeLimited && request.URL.Path == claudeUsagePath:
+	case controls.claudeLimited[alias] && request.URL.Path == claudeUsagePath:
 		gateway.logRequest("claude-usage-read-limited", request, http.StatusOK)
 		writer.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(writer, `{"five_hour":{"utilization":100,"resets_at":%q}}`, claudeLimitReset().Format(time.RFC3339))
-	case controls.claudeLimited && request.URL.Path == claudeMessagesPath:
+	case controls.claudeLimited[alias] && request.URL.Path == claudeMessagesPath:
 		gateway.logRequest("claude-rejected-usage-limit", request, http.StatusTooManyRequests)
 		reset := strconv.FormatInt(claudeLimitReset().Unix(), 10)
 		writeClaudeRejection(writer, map[string]string{"status": "rejected", "reset": reset, "representative-claim": "five_hour",
@@ -206,6 +206,7 @@ func (gateway *gateway) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		// window and no limit, with a reset hours away that matched neither
 		// the account's five-hour nor its weekly window.
 		gateway.logRequest("claude-throttled", request, http.StatusTooManyRequests)
+		writer.Header().Set("Retry-After", "5") // keeps the test short
 		writeClaudeRejection(writer, map[string]string{"status": "rejected", "reset": strconv.FormatInt(time.Now().Add(7*time.Hour).Unix(), 10),
 			"5h-status": "allowed", "5h-utilization": "0.15", "5h-reset": strconv.FormatInt(time.Now().Add(3*time.Hour).Unix(), 10)})
 	case controls.usageError && request.URL.Path == usagePath:
@@ -251,6 +252,14 @@ func (gateway *gateway) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	}
 }
 
+func claudeAlias(accessToken string) string {
+	if accessToken == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(accessToken))
+	return "claude:" + hex.EncodeToString(sum[:8])
+}
+
 func isClaudePath(path string) bool {
 	return strings.HasPrefix(path, "/v1/") || strings.HasPrefix(path, "/api/")
 }
@@ -294,6 +303,9 @@ func usageLimitError() []byte {
 
 func (gateway *gateway) alias(request *http.Request) string {
 	if alias := gateway.aliases[request.Header.Get("ChatGPT-Account-ID")]; alias != "" {
+		return alias
+	}
+	if alias := gateway.aliases[claudeAlias(strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer "))]; alias != "" {
 		return alias
 	}
 	return "unknown"
@@ -577,13 +589,16 @@ func loadAccountAliases(dataDirectory string) (map[string]string, error) {
 			return nil, err
 		}
 		var auth struct {
-			Provider string `json:"provider"`
-			Tokens   struct {
+			Provider    string `json:"provider"`
+			AccessToken string `json:"access_token"`
+			Tokens      struct {
 				AccountID string `json:"account_id"`
 			} `json:"tokens"`
 		}
 		if json.Unmarshal(data, &auth) == nil && auth.Provider == "claude" {
-			continue // Claude requests carry no account ID; the test copies one Claude account
+			// Claude requests carry no account ID; the copied access token never changes.
+			aliases[claudeAlias(auth.AccessToken)] = filepath.Base(filepath.Dir(path))
+			continue
 		}
 		if json.Unmarshal(data, &auth) != nil || auth.Tokens.AccountID == "" {
 			return nil, fmt.Errorf("%s has no account ID", path)

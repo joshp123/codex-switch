@@ -12,6 +12,7 @@ import plistlib
 import queue
 import re
 import select
+import shlex
 import shutil
 import signal
 import socket
@@ -33,7 +34,9 @@ CLAUDE_DESKTOP = Path.home() / 'Library/Application Support/Claude/claude-code'
 CLAUDE_VERSIONS = sorted(CLAUDE_DESKTOP.glob('*/**/claude.app/Contents/MacOS/claude'),
                          key=lambda path: tuple(map(int, path.relative_to(CLAUDE_DESKTOP).parts[0].split('.'))))
 CLAUDE = str(CLAUDE_VERSIONS[-1]) if CLAUDE_VERSIONS else shutil.which('claude')
-CLAUDE_ACCOUNT = None
+CLAUDE_ACCOUNTS = []
+# Proxy timers, shortened as the installer's are in system-test.
+ACCOUNT_READ_SECONDS, CONNECTION_DRAIN_SECONDS = 15, 10
 CLAUDE_SKIP_REASON = 'no Claude account is signed in' if CLAUDE else 'Claude Code is not installed'
 MODEL = 'gpt-6-luna'
 LABEL = 'dev.codex-switch.system-test-' + hashlib.sha256(str(REPO).encode()).hexdigest()[:10]
@@ -54,7 +57,7 @@ class Failure(Exception):
 
 def prepare():
     """Creates a fresh run directory with copies of the account logins."""
-    global CLAUDE_ACCOUNT, CLAUDE_SKIP_REASON
+    global CLAUDE_SKIP_REASON
     os.umask(0o077)  # logins, logs and the proxy's data stay private to this user
     if not CODEX:
         raise Failure('Codex is not installed: neither the desktop app nor `codex` on PATH.')
@@ -66,7 +69,7 @@ def prepare():
     for source in sorted(LIVE_DATA.glob('account-*/auth.json')):
         auth = json.loads(source.read_text())
         if auth.get('provider') == 'claude':
-            if not CLAUDE or CLAUDE_ACCOUNT or not all(auth.get(field) for field in
+            if not CLAUDE or not all(auth.get(field) for field in
                     ('access_token', 'refresh_token', 'expires_at', 'account_id', 'organization_id', 'email')):
                 continue
             if datetime.fromisoformat(auth['expires_at'].replace('Z', '+00:00')).timestamp() <= time.time() + 3600:
@@ -85,7 +88,7 @@ def prepare():
         target.parent.mkdir()
         target.write_text(json.dumps(auth))
         if auth.get('provider') == 'claude':
-            CLAUDE_ACCOUNT = source.parent.name
+            CLAUDE_ACCOUNTS.append(source.parent.name)
         else:
             accounts.append(source.parent.name)
     if len(accounts) < 2:
@@ -101,12 +104,13 @@ def build():
     The first job runs the newest published release, so the first update is one Macs really make."""
     base = int(subprocess.check_output(['git', 'rev-list', '--count', 'HEAD'], cwd=REPO, text=True))
     builds = [(str(RUN / name), base + number) for number, name in enumerate(('cli', 'candidate', 'candidate-2', 'candidate-3', 'candidate-4', 'candidate-5', 'candidate-6'))]
-    commands = [(['scripts/dev/build-proxy', path], dict(os.environ, CODEX_SWITCH_BUILD=str(number))) for path, number in builds]
-    commands.append((['go', 'build', '-o', str(RUN / 'gateway'), './scripts/dev/system-test-gateway'], os.environ))
-    for command, environment in commands:
-        built = subprocess.run(['devenv', 'shell', '--', *command], cwd=REPO, env=environment, capture_output=True, text=True)
-        if built.returncode:
-            raise Failure(f'Build failed: {" ".join(command)}\n{built.stderr[-1500:]}')
+    # One devenv shell runs every build at once; separate devenv shells race on its state.
+    script = ' '.join(f'CODEX_SWITCH_BUILD={number} scripts/dev/build-proxy {shlex.quote(path)} & ' for path, number in builds)
+    script += f'go build -o {shlex.quote(str(RUN / "gateway"))} ./scripts/dev/system-test-gateway & '
+    script += 'failed=0; for job in $(jobs -p); do wait "$job" || failed=1; done; exit $failed'
+    built = subprocess.run(['devenv', 'shell', '--', 'bash', '-c', script], cwd=REPO, capture_output=True, text=True)
+    if built.returncode:
+        raise Failure(f'Build failed:\n{built.stderr[-1500:]}')
     release = RUN / 'published-release'
     subprocess.run(['gh', 'release', 'download', '--repo', 'joshp123/codex-switch', '--pattern', 'CodexSwitchMenu.zip', '--dir', str(release)], check=True)
     subprocess.run(['ditto', '-x', '-k', str(release / 'CodexSwitchMenu.zip'), str(release)], check=True)
@@ -155,6 +159,7 @@ def proxy_environment():
     # PATH lets the proxy find a Codex CLI installed without the desktop app.
     return {'CODEX_SWITCH_DATA_DIR': str(RUN / 'data'), 'CODEX_SWITCH_UPSTREAM_ORIGIN': read('gateway-origin'),
             'CODEX_SWITCH_CLAUDE_UPSTREAM_ORIGIN': read('gateway-origin'),
+            'CODEX_SWITCH_ACCOUNT_READ_SECONDS': str(ACCOUNT_READ_SECONDS), 'CODEX_SWITCH_CONNECTION_DRAIN_SECONDS': str(CONNECTION_DRAIN_SECONDS),
             'CODEX_HOME': str(RUN / 'home'), 'PI_CODING_AGENT_DIR': str(RUN / 'pi'), 'PATH': os.environ['PATH']}
 
 
@@ -270,8 +275,9 @@ def run_pi(name, prompt, session):
     return finish_pi(name, start_pi(name, prompt, session))
 
 
-def run_claude(session, must_succeed=True):
-    """Claude Code through the two printed proxy settings, to real Anthropic through the gateway."""
+def run_claude(session, must_succeed=True, resume=False):
+    """Claude Code through the two printed proxy settings, to real Anthropic through the gateway.
+    resume continues the session, as a person's next prompt in it does."""
     environment = {name: value for name, value in client_environment().items()
                    if not name.upper().startswith(('CLAUDE_', 'ANTHROPIC_'))
                    and not name.upper().endswith('_PROXY')
@@ -281,10 +287,11 @@ def run_claude(session, must_succeed=True):
     settings = subprocess.run([str(RUN / 'cli'), 'print-claude-config', '--listen', listen_address()],
                               env=environment, capture_output=True, text=True, check=True)
     environment.update(json.loads(settings.stdout)['env'])
-    auth = json.loads((RUN / 'data' / CLAUDE_ACCOUNT / 'auth.json').read_text())
+    auth = json.loads((RUN / 'data' / CLAUDE_ACCOUNTS[0] / 'auth.json').read_text())
     environment['CLAUDE_CODE_OAUTH_TOKEN'] = auth['access_token']
-    process = start_client([CLAUDE, '-p', 'Reply with the word ready only.', '--model', 'haiku', '--effort', 'low',
-                            '--output-format', 'json', '--session-id', session, '--tools', '',
+    prompt, session_option = ('Reply with the word again only.', '--resume') if resume else ('Reply with the word ready only.', '--session-id')
+    process = start_client([CLAUDE, '-p', prompt, '--model', 'haiku', '--effort', 'low',
+                            '--output-format', 'json', session_option, session, '--tools', '',
                             '--setting-sources', '', '--strict-mcp-config'], 'claude', env=environment)
     if process.wait(timeout=180) and must_succeed:
         raise Failure(f'Claude Code exited with status {process.returncode}: {read("logs/claude.err")[-400:]} '
@@ -546,7 +553,8 @@ def weekly_used_percent():
     used, account = {}, None
     for line in shown.splitlines():
         if match := re.match(r'((Codex|Claude) \d+) ·', line):
-            account = key_by_name[match[1]] if match[2] == 'Codex' else None
+            # The status snapshot can still list an account removed in the last minute.
+            account = key_by_name.get(match[1]) if match[2] == 'Codex' else None
         elif account and (match := re.match(r'\s+weekly\s+([\d.]+)% used', line)):
             used[account] = float(match[1])
     return used
