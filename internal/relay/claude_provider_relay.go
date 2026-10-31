@@ -70,17 +70,18 @@ func (handler *TrafficRelayHandler) observeClaudeRejection(request *routedRelayR
 
 // answerClaudeRejection decides what Claude Code sees of Anthropic's 429. No
 // rejected request is replayed: the client's next request chooses from the
-// whole pool. Claude Code stops at a 429 that names a usage limit, so while
-// another account can take the work the client gets a 503 it retries at once.
-// When none can, it gets the pool's limit and its earliest reset, which T3
-// resumes at.
+// whole pool. Claude Code stops at a 429 that names a usage limit, so while an
+// account can take the work now, or after a throttle, the client gets a 503 it
+// retries at once. When only a usage limit's reset frees an account, it gets
+// that limit and the pool's earliest reset, which T3 resumes at.
 func answerClaudeRejection(response *http.Response, router TaskRouter, modelSlug, limited string) {
 	accountFree, availableAgainAt, limitClaim, err := router.ClaudePoolCapacity(modelSlug)
 	if err != nil {
 		log.Printf("%s; could not read the pool: %v", limited, err)
+		return
 	}
 	switch {
-	case accountFree:
+	case accountFree || !availableAgainAt.IsZero() && limitClaim == "":
 		for name := range response.Header {
 			if strings.HasPrefix(strings.ToLower(name), "anthropic-ratelimit-") {
 				response.Header.Del(name)
@@ -89,18 +90,20 @@ func answerClaudeRejection(response *http.Response, router TaskRouter, modelSlug
 		response.StatusCode, response.Status = http.StatusServiceUnavailable, "503 Service Unavailable"
 		response.Header.Set("Retry-After", "1")
 		response.Header.Set("X-Should-Retry", "true")
-		log.Printf("%s; the client's retry goes to another account", limited)
-	case !availableAgainAt.IsZero() && limitClaim != "":
+		if accountFree {
+			log.Printf("%s; the client's retry goes to another account", limited)
+		} else {
+			log.Printf("%s; the client's retry waits for a throttle to end at %s", limited, availableAgainAt.Local().Format("15:04:05"))
+		}
+	case !availableAgainAt.IsZero():
 		availableAgain := availableAgainAt.Local().Format("Mon 2 Jan 15:04")
 		response.Header.Set("Anthropic-Ratelimit-Unified-Status", "rejected")
 		response.Header.Set("Anthropic-Ratelimit-Unified-Reset", strconv.FormatInt(availableAgainAt.Unix(), 10))
 		response.Header.Set("Anthropic-Ratelimit-Unified-Representative-Claim", limitClaim)
 		log.Printf("%s; no account can take it, so the client was told its %s limit until %s", limited, limitClaim, availableAgain)
 	default:
-		// A throttle: the retry waits for the account, or for another.
-		response.Header.Set("Retry-After", "1")
-		response.Header.Set("X-Should-Retry", "true")
-		log.Printf("%s; the client's next request waits for capacity", limited)
+		// No reset frees an account, for example every account is signed out.
+		log.Printf("%s; no reset frees an account", limited)
 	}
 }
 
