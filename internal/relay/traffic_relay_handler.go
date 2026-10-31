@@ -35,16 +35,33 @@ type relayRequestContextKey struct{}
 type requestTrailerSourceContextKey struct{}
 
 type routedRelayRequest struct {
-	provider                accounts.Provider
-	cachePrefixes           []string
-	taskID                  store.TaskID
-	client                  string
-	workKind                store.WorkKind
-	modelSlug               string
+	provider      accounts.Provider
+	cachePrefixes []string
+	taskID        store.TaskID
+	client        string
+	workKind      store.WorkKind
+	modelSlug     string
+	// claudeFastMode is a Claude request for fast mode, which Anthropic bills
+	// to usage credits only.
+	claudeFastMode          bool
 	responseStreamRequested bool
 	routeDecision           routing.RouteDecision
 	requestTrailerSource    http.Header
 	responseObserver        *terminalResponseObserver
+}
+
+// accountRecheckDelay is how long waiting work waits before it asks for an
+// account again: five seconds, or less when a Claude account is known to come
+// free sooner.
+func accountRecheckDelay(exhaustion error) time.Duration {
+	delay := 5 * time.Second
+	var exhausted *routing.ClaudePoolExhaustedError
+	if errors.As(exhaustion, &exhausted) {
+		if untilAvailable := time.Until(exhausted.AvailableAgainAt); untilAvailable > 0 && untilAvailable < delay {
+			delay = untilAvailable
+		}
+	}
+	return delay
 }
 
 // RelayHandlerOptions keeps listener and signal ownership outside the transport package.
@@ -239,8 +256,6 @@ func (handler *TrafficRelayHandler) serveAuthenticatedTraffic(response http.Resp
 	if workKind == store.ModelTurnWorkKind && errors.Is(err, routing.ErrNoAvailableAccount) {
 		waitStarted := time.Now()
 		log.Printf("%s waits before sending %s to its provider: %v", describeModelRequest(taskID, client, ""), modelSlug, err)
-		recheck := time.NewTicker(5 * time.Second)
-		defer recheck.Stop()
 		for errors.Is(err, routing.ErrNoAvailableAccount) {
 			if provider == accounts.ProviderClaude {
 				if told := answerExhaustedClaudePool(response, err, time.Since(waitStarted)); told != "" {
@@ -257,7 +272,7 @@ func (handler *TrafficRelayHandler) serveAuthenticatedTraffic(response http.Resp
 				response.Header().Set("Retry-After", "1")
 				http.Error(response, "proxy updating; retry request", http.StatusServiceUnavailable)
 				return
-			case <-recheck.C:
+			case <-time.After(accountRecheckDelay(err)):
 				routeDecision, err = handler.taskRouter.RouteForProviderTask(taskID, workKind, modelSlug, provider, parentTaskID)
 			}
 		}
@@ -280,6 +295,7 @@ func (handler *TrafficRelayHandler) serveAuthenticatedTraffic(response http.Resp
 	requestTrailerSource, _ := request.Context().Value(requestTrailerSourceContextKey{}).(http.Header)
 	routedRequest := &routedRelayRequest{
 		taskID: taskID, client: client, workKind: workKind, modelSlug: modelSlug, responseStreamRequested: responseStreamRequested, routeDecision: routeDecision,
+		claudeFastMode:       provider == accounts.ProviderClaude && serviceTier == "fast",
 		requestTrailerSource: requestTrailerSource, provider: provider, cachePrefixes: cachePrefixes,
 	}
 	forwardedRequest := request.Clone(context.WithValue(request.Context(), relayRequestContextKey{}, routedRequest))
@@ -344,6 +360,9 @@ func (handler *TrafficRelayHandler) createBytePreservingReverseProxy() *httputil
 		ModifyResponse: func(upstreamResponse *http.Response) error {
 			routedRequest := upstreamResponse.Request.Context().Value(relayRequestContextKey{}).(*routedRelayRequest)
 			if routedRequest.provider == accounts.ProviderClaude {
+				if routedRequest.claudeFastMode && upstreamResponse.StatusCode == http.StatusTooManyRequests && !claudeNamesUsageLimit(upstreamResponse.Header) {
+					return handler.passClaudeFastModeRefusal(routedRequest, upstreamResponse)
+				}
 				if handler.accountObserver != nil {
 					handler.accountObserver.ObserveClaudeResponse(routedRequest.routeDecision.AccountName, routedRequest.modelSlug, upstreamResponse.Header, upstreamResponse.StatusCode)
 				}

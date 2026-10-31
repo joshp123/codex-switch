@@ -68,6 +68,40 @@ func (handler *TrafficRelayHandler) observeClaudeRejection(request *routedRelayR
 	return nil
 }
 
+// passClaudeFastModeRefusal hands Claude Code Anthropic's 429 for a fast-mode
+// request unchanged when it names no usage limit. Subscriptions pay for fast
+// mode only from usage credits, so an account without them refuses it while it
+// has allowance left. Claude Code then retries at standard speed, on the same
+// account and its prompt cache, so the account is not held back. A usage limit
+// on a fast-mode request is answered as any other.
+func (handler *TrafficRelayHandler) passClaudeFastModeRefusal(request *routedRelayRequest, response *http.Response) error {
+	if request.workKind == store.ModelTurnWorkKind {
+		request.responseObserver.settleModelRequest("", store.ModelRequestFailed)
+		request.responseObserver.admittedRequests = 0
+	}
+	head := peekResponseBody(response)
+	log.Printf("%s: Anthropic refused fast mode for %s (%s)%s; Claude Code retries at standard speed on the same account",
+		describeModelRequest(request.taskID, request.client, request.routeDecision.DisplayName), request.modelSlug,
+		describeClaudeLimitHeaders(response.Header), describeRejection(response.Header, head))
+	return nil
+}
+
+// claudeNamesUsageLimit is whether a 429 names a usage limit: a representative
+// claim, or a window Anthropic reports rejected.
+func claudeNamesUsageLimit(header http.Header) bool {
+	if header.Get("Anthropic-Ratelimit-Unified-Representative-Claim") != "" {
+		return true
+	}
+	for name, values := range header {
+		name = strings.ToLower(name)
+		if strings.HasPrefix(name, "anthropic-ratelimit-unified-") && strings.HasSuffix(name, "-status") &&
+			name != "anthropic-ratelimit-unified-status" && name != "anthropic-ratelimit-unified-overage-status" && slices.Contains(values, "rejected") {
+			return true
+		}
+	}
+	return false
+}
+
 // answerClaudeRejection decides what Claude Code sees of Anthropic's 429. No
 // rejected request is replayed: the client's next request chooses from the
 // whole pool. Claude Code stops at a 429 that names a usage limit, so while an
