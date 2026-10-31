@@ -91,7 +91,7 @@ func TestClaudeRegistryRenameAndEndedSessionTitle(t *testing.T) {
 	}
 	writeTranscript("Changed after session ended")
 	check("Final app title")
-	restarted, err := OpenUsageLedger(ledger.database, ledger.dataDirectory, nil)
+	restarted, err := OpenUsageLedger(ledger.database, ledger.dataDirectory, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

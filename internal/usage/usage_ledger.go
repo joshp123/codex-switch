@@ -13,6 +13,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -28,6 +29,7 @@ type UsageLedger struct {
 	sqlDatabase    *sql.DB
 	dataDirectory  string
 	httpClient     *http.Client
+	upstreamOrigin *url.URL
 	sessionFiles   sessionFileCache
 	codexDiscovery codexSessionDiscovery
 	piDiscovery    piSessionDiscovery
@@ -39,10 +41,11 @@ type UsageLedger struct {
 }
 
 // OpenUsageLedger creates the usage tables when absent. httpClient reads
-// OpenAI's daily token history for the accounts in dataDirectory.
-func OpenUsageLedger(database *store.StoreDatabase, dataDirectory string, httpClient *http.Client) (*UsageLedger, error) {
+// OpenAI's daily token history for the accounts in dataDirectory from
+// upstreamOrigin.
+func OpenUsageLedger(database *store.StoreDatabase, dataDirectory string, upstreamOrigin *url.URL, httpClient *http.Client) (*UsageLedger, error) {
 	ledger := &UsageLedger{
-		database: database, sqlDatabase: database.SQLDatabase(), dataDirectory: dataDirectory, httpClient: httpClient,
+		database: database, sqlDatabase: database.SQLDatabase(), dataDirectory: dataDirectory, httpClient: httpClient, upstreamOrigin: upstreamOrigin,
 		lastLoggedFor: map[string]string{},
 	}
 	if err := createOpenAIDailyTokenHistorySchema(ledger.sqlDatabase); err != nil {

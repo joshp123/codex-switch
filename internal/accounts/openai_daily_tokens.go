@@ -8,13 +8,14 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
 )
 
 const (
-	openAIDailyTokenProfileURL       = "https://chatgpt.com/backend-api/wham/profiles/me"
+	openAIDailyTokenProfilePath      = "/backend-api/wham/profiles/me"
 	maximumOpenAIDailyTokenBodyBytes = 4 << 20
 )
 
@@ -37,21 +38,24 @@ type OpenAIDailyTokenHistory struct {
 type OpenAIDailyTokenSource struct {
 	credentials *savedLogin
 	client      *http.Client
+	origin      *url.URL
 	now         func() time.Time
 }
 
-func NewOpenAIDailyTokenSource(home string, client *http.Client) *OpenAIDailyTokenSource {
+// NewOpenAIDailyTokenSource reads from origin, which is chatgpt.com except in
+// the system test.
+func NewOpenAIDailyTokenSource(home string, origin *url.URL, client *http.Client) *OpenAIDailyTokenSource {
 	credentials := newSavedLogin(home, client)
 	readOnlyClient := *credentials.client
 	readOnlyClient.CheckRedirect = func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	}
-	return &OpenAIDailyTokenSource{credentials: credentials, client: &readOnlyClient, now: time.Now}
+	return &OpenAIDailyTokenSource{credentials: credentials, client: &readOnlyClient, origin: origin, now: time.Now}
 }
 
 func (s *OpenAIDailyTokenSource) Read(ctx context.Context) (OpenAIDailyTokenHistory, error) {
 	readStarted := s.now().UTC()
-	accountID, encoded, err := s.get(ctx, openAIDailyTokenProfileURL)
+	accountID, encoded, err := s.get(ctx, s.origin.ResolveReference(&url.URL{Path: openAIDailyTokenProfilePath}).String())
 	if err != nil {
 		return OpenAIDailyTokenHistory{}, err
 	}

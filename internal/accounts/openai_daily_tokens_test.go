@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -12,6 +13,8 @@ import (
 	"testing"
 	"time"
 )
+
+var chatGPTOrigin = &url.URL{Scheme: "https", Host: "chatgpt.com"}
 
 func TestOpenAIDailyTokenSourceReadsOnlyValidatedAccountBuckets(t *testing.T) {
 	home := t.TempDir()
@@ -37,11 +40,11 @@ func TestOpenAIDailyTokenSourceReadsOnlyValidatedAccountBuckets(t *testing.T) {
 		}`), nil
 	})}
 
-	history, err := NewOpenAIDailyTokenSource(home, client).Read(t.Context())
+	history, err := NewOpenAIDailyTokenSource(home, chatGPTOrigin, client).Read(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if request == nil || request.Method != http.MethodGet || request.URL.String() != openAIDailyTokenProfileURL {
+	if request == nil || request.Method != http.MethodGet || request.URL.String() != "https://chatgpt.com"+openAIDailyTokenProfilePath {
 		t.Fatalf("request = %#v", request)
 	}
 	if requests != 1 {
@@ -157,7 +160,7 @@ func TestOpenAIDailyTokenSourceRejectsExpiringCredentialsWithoutOpenAIOrAuthWrit
 		return nil, errors.New("OpenAI must not be called with expiring credentials")
 	})}
 
-	if _, err := NewOpenAIDailyTokenSource(home, client).Read(t.Context()); !requiresSignIn(err) {
+	if _, err := NewOpenAIDailyTokenSource(home, chatGPTOrigin, client).Read(t.Context()); !requiresSignIn(err) {
 		t.Fatalf("expired credentials error = %T %v", err, err)
 	}
 	if requests != 0 {
@@ -176,7 +179,7 @@ func TestOpenAIDailyTokenSourceRejects401WithoutRetryOrAuthWrite(t *testing.T) {
 		return tokenResponse(http.StatusUnauthorized, `{"detail":"private OpenAI response"}`), nil
 	})}
 
-	_, err := NewOpenAIDailyTokenSource(home, client).Read(t.Context())
+	_, err := NewOpenAIDailyTokenSource(home, chatGPTOrigin, client).Read(t.Context())
 	if !requiresSignIn(err) || strings.Contains(err.Error(), "private OpenAI response") {
 		t.Fatalf("401 error = %T %v", err, err)
 	}
@@ -209,7 +212,7 @@ func TestOpenAIDailyTokenSourceRejectsRedirectsWithoutFollowingOrAuthWrite(t *te
 				}, nil
 			})}
 
-			_, err := NewOpenAIDailyTokenSource(home, client).Read(t.Context())
+			_, err := NewOpenAIDailyTokenSource(home, chatGPTOrigin, client).Read(t.Context())
 			if err == nil || strings.Contains(err.Error(), "private redirect response") {
 				t.Fatalf("redirect error = %v", err)
 			}
@@ -233,7 +236,7 @@ func TestOpenAIDailyTokenSourceDoesNotExposeOpenAIFailureBody(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return tokenResponse(http.StatusBadGateway, `{"detail":"private OpenAI response"}`), nil
 	})}
-	_, err := NewOpenAIDailyTokenSource(home, client).Read(t.Context())
+	_, err := NewOpenAIDailyTokenSource(home, chatGPTOrigin, client).Read(t.Context())
 	if err == nil || strings.Contains(err.Error(), "private OpenAI response") {
 		t.Fatalf("OpenAI error = %v", err)
 	}

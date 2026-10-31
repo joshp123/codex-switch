@@ -108,7 +108,7 @@ func openSharedImportLedger(t *testing.T, path string) *UsageLedger {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { database.CloseStoreDatabase() })
-	ledger, err := OpenUsageLedger(database, t.TempDir(), nil)
+	ledger, err := OpenUsageLedger(database, t.TempDir(), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

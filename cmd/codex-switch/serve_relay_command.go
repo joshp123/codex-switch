@@ -117,7 +117,7 @@ func serveRelay(tcpListenAddress string) {
 		}
 		log.Printf("process %d: provider check passed", os.Getpid())
 	}
-	usageLedger, err := usage.OpenUsageLedger(storeDatabase, dataDir(), &http.Client{Timeout: 15 * time.Second, Transport: upstreamTransport})
+	usageLedger, err := usage.OpenUsageLedger(storeDatabase, dataDir(), upstreamOrigin, &http.Client{Timeout: 15 * time.Second, Transport: upstreamTransport})
 	if err != nil {
 		log.Fatal(err)
 	}

@@ -31,7 +31,7 @@ func (ledger *UsageLedger) refreshOpenAIDailyTokenHistories(ctx context.Context)
 			defer workers.Done()
 			requestContext, cancel := context.WithTimeout(ctx, 15*time.Second)
 			defer cancel()
-			profileSource := accounts.NewOpenAIDailyTokenSource(filepath.Join(ledger.dataDirectory, account.Name), ledger.httpClient)
+			profileSource := accounts.NewOpenAIDailyTokenSource(filepath.Join(ledger.dataDirectory, account.Name), ledger.upstreamOrigin, ledger.httpClient)
 			history, err := profileSource.Read(requestContext)
 			if err != nil {
 				if ctx.Err() == nil {

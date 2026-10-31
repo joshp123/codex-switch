@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-const openAIDailyUsageBreakdownURL = "https://chatgpt.com/backend-api/wham/usage/daily-token-usage-breakdown"
+const openAIDailyUsageBreakdownPath = "/backend-api/wham/usage/daily-token-usage-breakdown"
 
 // OpenAIModelDayCredits is the Codex credits one model at one speed used on
 // one UTC day, as a percentage of the busiest day in the same read. OpenAI
@@ -33,7 +33,7 @@ func (s *OpenAIDailyTokenSource) ReadDailyModelCredits(ctx context.Context, firs
 	query.Set("start_date", firstDate.UTC().Format(time.DateOnly))
 	query.Set("end_date", lastDate.UTC().Format(time.DateOnly))
 	query.Set("group_by", "day")
-	accountID, encoded, err := s.get(ctx, openAIDailyUsageBreakdownURL+"?"+query.Encode())
+	accountID, encoded, err := s.get(ctx, s.origin.ResolveReference(&url.URL{Path: openAIDailyUsageBreakdownPath, RawQuery: query.Encode()}).String())
 	if err != nil {
 		return "", nil, err
 	}
