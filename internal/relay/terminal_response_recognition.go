@@ -80,9 +80,15 @@ type structuredResponseEvent struct {
 
 type providerErrorWire struct {
 	Type     string `json:"type"`
+	Code     string `json:"code"`
 	Message  string `json:"message"`
 	ResetsAt int64  `json:"resets_at"`
 }
+
+// openAIWebSocketAgeLimitCode is OpenAI's error when a Responses WebSocket
+// reaches its one-hour lifetime. Codex and Pi open a new connection and send a
+// refused request again.
+const openAIWebSocketAgeLimitCode = "websocket_connection_limit_reached"
 
 type httpJSONResponseWire struct {
 	completedResponseWire
@@ -142,7 +148,12 @@ func (observer *terminalResponseObserver) observeStructuredEvent(eventBytes []by
 		return false
 	case "error":
 		observer.settleModelRequest("", store.ModelRequestFailed)
-		reconnect := observer.logProviderFailure(event.Error)
+		reconnect := false
+		if event.Error != nil && event.Error.Code == openAIWebSocketAgeLimitCode {
+			observer.logWebSocketAgeLimit()
+		} else {
+			reconnect = observer.logProviderFailure(event.Error)
+		}
 		if observer.activeResponses == 0 && observer.admittedRequests <= 1 {
 			observer.admittedRequests = max(0, observer.admittedRequests-1)
 			// A WebSocket handshake carries no model, so reconnecting helps only
@@ -211,6 +222,17 @@ func (observer *terminalResponseObserver) logProviderFailure(providerError *prov
 	}
 	log.Printf("%s: OpenAI failed the %s response%s", subject, observer.modelSlug, reason)
 	return false
+}
+
+// logWebSocketAgeLimit logs OpenAI ending a WebSocket at its one-hour limit.
+// On an idle connection it is no failure: OpenAI sends it with nothing in
+// progress, an hour after the connection opened.
+func (observer *terminalResponseObserver) logWebSocketAgeLimit() {
+	if observer.activeResponses == 0 && observer.admittedRequests == 0 {
+		log.Printf("%s: OpenAI closed the WebSocket at its one-hour limit with no request in progress; the next request opens a new connection", observer.describe())
+		return
+	}
+	log.Printf("%s: OpenAI refused the %s request at the WebSocket's one-hour limit; the client sends it again on a new connection", observer.describe(), observer.modelSlug)
 }
 
 func (observer *terminalResponseObserver) describe() string {

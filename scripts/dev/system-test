@@ -544,6 +544,30 @@ def exhausted_task_moves_on_its_next_turn(system):
             f'None of its {len(forwarded)} model requests reached OpenAI twice, its tool effect ran once, and Codex showed no error.')
 
 
+def websocket_age_limit_does_not_interrupt_work(system):
+    """When OpenAI ends a WebSocket at its one-hour limit during a tool call, the goal carries on over a new connection: no replay, no error shown"""
+    with simulating(system, 'websocket-age-limit 1.5'):
+        goal = rig.Goal('age-limit-goal', SLEEPING_GOAL)
+        rig.wait_for(lambda: rig.fake_provider_events('websocket-age-limit', thread=goal.thread), "OpenAI to end the goal's WebSocket at its age limit")
+    (rig.RUN / 'work/age-limit-goal-release').touch()
+    errors = goal.finish()
+    system.record_codex_task('goal across the WebSocket age limit', goal.thread)
+
+    forwarded = rig.forwarded_requests(thread=goal.thread)
+    require_no_replay('The goal', forwarded)
+    opened = rig.fake_provider_events('websocket-open', thread=goal.thread)
+    if len(opened) < 2:
+        raise Failure(f'The goal finished on {len(opened)} WebSocket connection(s); the test expected a new one after the age limit.')
+    if errors:
+        raise Failure(f'The goal finished, but Codex showed {describe_errors(errors)}.')
+    logged = [line.split(': ', 1)[1] for line in rig.proxy_log().splitlines() if goal.thread in line and 'one-hour limit' in line]
+    if logged != ['OpenAI closed the WebSocket at its one-hour limit with no request in progress; the next request opens a new connection']:
+        raise Failure(f'The proxy log described the age limit as {logged}.')
+    return (f'A goal\'s tool call was running when OpenAI ended its WebSocket at the age limit. The proxy logged: {logged[0]}.\n'
+            f'The goal\'s next request went over a new connection ({len(opened)} opened) and the goal finished by itself.\n'
+            f'None of its {len(forwarded)} model requests reached OpenAI twice, its tool effect ran once, and Codex showed no error.')
+
+
 def goal_continues_when_an_account_returns(system):
     """With every account exhausted, a running goal continues by itself when one comes back"""
     start = system.best_account()
@@ -974,6 +998,7 @@ GROUPS = [
     ('routing', 'cli', [t3_reads_the_account_pool, new_work_goes_to_the_most_allowance_left, request_without_task_id_is_served]),
     ('exhaustion', 'cli', [exhausted_task_moves_on_its_next_turn]),
     ('outage-goal', 'cli', [goal_continues_when_an_account_returns]),
+    ('websocket-age-limit', 'cli', [websocket_age_limit_does_not_interrupt_work]),
     ('claude', 'cli', [claude_works_through_the_https_proxy]),
     ('claude-throttle', 'cli', [claude_throttle_holds_the_account_briefly]),
     ('claude-fast-mode', 'cli', [claude_fast_mode_refusal_stays_on_the_account]),

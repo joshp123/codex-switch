@@ -167,22 +167,24 @@ type providers struct {
 //	usage-error                     usage reads receive a provider HTTP error
 //	claude-throttle COUNT           the next COUNT Claude model requests receive a 429 that names no usage limit
 //	claude-limited account-N        the Claude account's five-hour allowance has run out
+//	websocket-age-limit SECONDS     a WebSocket opened now gets OpenAI's one-hour limit error after SECONDS, then closes
 //
 // Fast-mode Claude requests are always refused, as for an account without usage credits.
 type controls struct {
-	weeklyUsed     map[string]float64
-	limited        map[string]bool
-	httpOnly       bool
-	holdResponses  map[string]bool
-	breakResponses bool
-	providerError  bool
-	usageError     bool
-	claudeThrottle bool
-	claudeLimited  map[string]bool
-	resetTest      bool
-	resetSoon      bool
-	resetDrop      bool
-	claudeGrant    bool
+	weeklyUsed        map[string]float64
+	limited           map[string]bool
+	httpOnly          bool
+	holdResponses     map[string]bool
+	breakResponses    bool
+	providerError     bool
+	usageError        bool
+	claudeThrottle    bool
+	claudeLimited     map[string]bool
+	resetTest         bool
+	resetSoon         bool
+	resetDrop         bool
+	claudeGrant       bool
+	webSocketAgeLimit time.Duration
 }
 
 func (providers *providers) readControls() (controls, error) {
@@ -227,6 +229,12 @@ func (providers *providers) readControls() (controls, error) {
 				return controls{}, fmt.Errorf("invalid control line %q", scanner.Text())
 			}
 			parsed.claudeThrottle = count > 0
+		case len(fields) == 2 && fields[0] == "websocket-age-limit":
+			seconds, err := strconv.ParseFloat(fields[1], 64)
+			if err != nil || seconds <= 0 {
+				return controls{}, fmt.Errorf("invalid control line %q", scanner.Text())
+			}
+			parsed.webSocketAgeLimit = time.Duration(seconds * float64(time.Second))
 		case len(fields) == 3 && fields[0] == "exhaust-after" && providers.knownAlias(fields[1]):
 			if count, err := strconv.Atoi(fields[2]); err != nil || count < 0 {
 				return controls{}, fmt.Errorf("invalid control line %q", scanner.Text())
@@ -329,7 +337,7 @@ func (providers *providers) ServeHTTP(writer http.ResponseWriter, request *http.
 		providers.logRequest("rejected-usage-limit", request, http.StatusTooManyRequests)
 		writeJSON(writer, http.StatusTooManyRequests, usageLimitError())
 	case webSocket:
-		providers.serveCodexWebSocket(writer, request)
+		providers.serveCodexWebSocket(writer, request, controls.webSocketAgeLimit)
 	default:
 		providers.serveCodexHTTP(writer, request)
 	}
@@ -377,6 +385,12 @@ func accountsCheck(accountID string) []byte {
 		"account_routing_override": "NO_CONSTRAINT", "name": nil, "profile_picture_url": nil, "sso_connection_name": nil}
 	encoded, _ := json.Marshal(map[string]any{"accounts": []any{account}, "default_account_id": accountID, "account_ordering": []string{accountID}})
 	return encoded
+}
+
+// webSocketAgeLimitError is what OpenAI sends when a Responses WebSocket has
+// been open an hour, as Codex's own tests reproduce it.
+func webSocketAgeLimitError() []byte {
+	return []byte(`{"type":"error","status":400,"error":{"type":"invalid_request_error","code":"websocket_connection_limit_reached","message":"Responses websocket connection limit reached (60 minutes). Create a new websocket connection to continue."}}`)
 }
 
 func usageLimitError() []byte {
@@ -673,7 +687,7 @@ func (providers *providers) serveCodexHTTP(writer http.ResponseWriter, request *
 // Messages are read on their own goroutine, so a client that goes away cancels
 // a held reply. A simulated limit lands between two model requests, as a real
 // limit would.
-func (providers *providers) serveCodexWebSocket(writer http.ResponseWriter, request *http.Request) {
+func (providers *providers) serveCodexWebSocket(writer http.ResponseWriter, request *http.Request, ageLimit time.Duration) {
 	client, err := websocket.Accept(writer, request, &websocket.AcceptOptions{CompressionMode: websocket.CompressionContextTakeover})
 	if err != nil {
 		return
@@ -698,11 +712,22 @@ func (providers *providers) serveCodexWebSocket(writer http.ResponseWriter, requ
 			}
 		}
 	}()
+	// OpenAI ends a connection at its age limit even while it is idle, as it
+	// did to Codex's idle connections in October 2026.
+	var ageLimitReached <-chan time.Time
+	if ageLimit > 0 {
+		ageLimitReached = time.After(ageLimit)
+	}
 	forwarded := 0
 	for {
 		var payload []byte
 		select {
 		case payload = <-messages:
+		case <-ageLimitReached:
+			providers.logRequest("websocket-age-limit", request, http.StatusBadRequest)
+			_ = client.Write(ctx, websocket.MessageText, webSocketAgeLimitError())
+			client.Close(websocket.StatusNormalClosure, "")
+			return
 		case <-ctx.Done():
 			return
 		}
