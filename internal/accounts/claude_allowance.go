@@ -185,7 +185,10 @@ func mergeClaudeAllowance(current, incoming AllowanceSample) AllowanceSample {
 		}
 	}
 	if incoming.ObservedAt.After(current.ObservedAt) {
-		current.AvailableResetCredits = incoming.AvailableResetCredits
+		// Response headers carry no grant count; only a usage read replaces it.
+		if incoming.AvailableResetCredits != nil {
+			current.AvailableResetCredits = incoming.AvailableResetCredits
+		}
 		current.ObservedAt = incoming.ObservedAt
 	}
 	if current.AccountID == "" {

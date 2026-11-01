@@ -269,3 +269,28 @@ func TestClaudeRejectionNamesUsageLimitAsTheAccountRulesDo(t *testing.T) {
 		}
 	}
 }
+
+// Response headers carry no reset-grant count, so an ordinary Claude turn must
+// not hide grants the usage read reported.
+func TestClaudeResetGrantsSurviveAnOrdinaryResponse(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	data := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(data, "account-1"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	origin, _ := url.Parse("https://api.anthropic.com")
+	monitor := NewMonitor(data, origin, "", http.DefaultClient, monitorTestDatabase(t))
+	grants := uint32(2)
+	monitor.monitoredAccountLocked("account-1", ProviderClaude).fact = AccountRoutingFact{Provider: ProviderClaude, AccountState: AccountReady, AllowanceSample: AllowanceSample{
+		AccountID: "subscription", ObservedAt: now.Add(-time.Minute), AvailableResetCredits: &grants,
+		Windows: []ReportedWindow{{ObservedAt: now.Add(-time.Minute), UsedPercent: 10, DurationSeconds: 5 * 3600, ResetsAt: now.Add(time.Hour)}},
+	}}
+	headers := make(http.Header)
+	headers.Set("anthropic-ratelimit-unified-5h-utilization", "0.2")
+	headers.Set("anthropic-ratelimit-unified-5h-reset", strconv.FormatInt(now.Add(time.Hour).Unix(), 10))
+	monitor.ObserveClaudeResponse("account-1", "claude-opus-4-5", headers, 200)
+	got := monitor.accounts["account-1"].fact.AllowanceSample.AvailableResetCredits
+	if got == nil || *got != 2 {
+		t.Fatalf("reset grants after an ordinary response = %v, want 2", got)
+	}
+}
