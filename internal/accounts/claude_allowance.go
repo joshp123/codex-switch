@@ -341,6 +341,7 @@ func ClaudeWeeklyAllowanceLeft(fact AccountRoutingFact, model string, now time.T
 }
 
 func updateClaudeSharedState(fact *AccountRoutingFact, now time.Time) {
+	dropEndedClaudeWindows(&fact.AllowanceSample, now)
 	if fact.AccountState == AccountSignInRequired || fact.AccountState == AccountCredentialsUnavailable {
 		return
 	}
@@ -353,4 +354,13 @@ func updateClaudeSharedState(fact *AccountRoutingFact, now time.Time) {
 	if reason != "" {
 		fact.AccountState = AccountLimited
 	}
+}
+
+// dropEndedClaudeWindows removes windows whose reset has passed. Anthropic
+// stops reporting a five-hour window once it ends and reports a new one only
+// after the next request; until then the old reading describes nothing.
+func dropEndedClaudeWindows(sample *AllowanceSample, now time.Time) {
+	sample.Windows = slices.DeleteFunc(slices.Clone(sample.Windows), func(window ReportedWindow) bool {
+		return !window.ResetsAt.After(now)
+	})
 }
