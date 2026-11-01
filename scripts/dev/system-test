@@ -224,9 +224,15 @@ def t3_reads_the_account_pool(system):
         raise Failure(f'Expected six Codex and Claude accounts, got {files!r}')
     def call(account, url, method='GET'):
         return request('api-call', {'auth_index': account, 'method': method, 'url': url, 'header': {'Authorization': 'Bearer $TOKEN$'}})
-    codex = call('account-1', 'https://chatgpt.com/backend-api/wham/usage')
-    credits = call('account-1', 'https://chatgpt.com/backend-api/wham/rate-limit-reset-credits')
-    claude = call('account-4', 'https://api.anthropic.com/api/oauth/usage')
+    # A stopped provider cannot answer: these calls must use the monitor's readings.
+    provider = rig.started_processes[0]
+    os.kill(provider.pid, signal.SIGSTOP)
+    try:
+        codex = call('account-1', 'https://chatgpt.com/backend-api/wham/usage')
+        credits = call('account-1', 'https://chatgpt.com/backend-api/wham/rate-limit-reset-credits')
+        claude = call('account-4', 'https://api.anthropic.com/api/oauth/usage')
+    finally:
+        os.kill(provider.pid, signal.SIGCONT)
     if codex['status_code'] != 200 or not json.loads(codex['body'])['rate_limit']:
         raise Failure('Codex allowance was not returned.')
     if credits['status_code'] != 200 or len(json.loads(credits['body'])['credits']) != 1:
@@ -242,7 +248,7 @@ def t3_reads_the_account_pool(system):
     except urllib.error.HTTPError as error:
         if error.code != 401:
             raise
-    return 'Six accounts, Codex and Claude allowances and a reset credit were visible; redemption, arbitrary calls and a wrong key were rejected.'
+    return 'Six accounts, allowances and a reset credit were visible with the provider paused; redemption, arbitrary calls and a wrong key were rejected.'
 
 
 def new_work_goes_to_the_most_allowance_left(system):

@@ -24,6 +24,7 @@ import (
 	"github.com/joshp123/codex-switch/internal/relay"
 	"github.com/joshp123/codex-switch/internal/routing"
 	"github.com/joshp123/codex-switch/internal/store"
+	"github.com/joshp123/codex-switch/internal/t3usage"
 	"github.com/joshp123/codex-switch/internal/usage"
 )
 
@@ -152,7 +153,7 @@ func serveRelay(tcpListenAddress string) {
 		log.Fatal(err)
 	}
 
-	forwardProxy, err := relay.CreateClaudeForwardProxy(dataDir(), capability, relayHandler, t3UsageOrRelay(capability, dataDir(), accountMonitor, upstreamOrigin, claudeUpstreamOrigin, upstreamTransport, snapshots.serveOrRelay(capability, profileOrRelay(capability, deployStatusOrRelay(capability, relayHandler, activity)))))
+	forwardProxy, err := relay.CreateClaudeForwardProxy(dataDir(), capability, relayHandler, t3usage.Handler(capability, dataDir(), accountMonitor, snapshots.serveOrRelay(capability, profileOrRelay(capability, deployStatusOrRelay(capability, relayHandler, activity)))))
 	if err != nil {
 		log.Fatal(err)
 	}

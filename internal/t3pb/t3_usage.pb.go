@@ -581,6 +581,282 @@ func (x *ClaudeUsage) GetLimits() []*ClaudeLimit {
 	return nil
 }
 
+type CodexWindow struct {
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	UsedPercent        float64                `protobuf:"fixed64,1,opt,name=used_percent,json=usedPercent,proto3" json:"used_percent,omitempty"`
+	LimitWindowSeconds int32                  `protobuf:"varint,2,opt,name=limit_window_seconds,json=limitWindowSeconds,proto3" json:"limit_window_seconds,omitempty"`
+	ResetAt            float64                `protobuf:"fixed64,3,opt,name=reset_at,json=resetAt,proto3" json:"reset_at,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
+}
+
+func (x *CodexWindow) Reset() {
+	*x = CodexWindow{}
+	mi := &file_t3_usage_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CodexWindow) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CodexWindow) ProtoMessage() {}
+
+func (x *CodexWindow) ProtoReflect() protoreflect.Message {
+	mi := &file_t3_usage_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CodexWindow.ProtoReflect.Descriptor instead.
+func (*CodexWindow) Descriptor() ([]byte, []int) {
+	return file_t3_usage_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *CodexWindow) GetUsedPercent() float64 {
+	if x != nil {
+		return x.UsedPercent
+	}
+	return 0
+}
+
+func (x *CodexWindow) GetLimitWindowSeconds() int32 {
+	if x != nil {
+		return x.LimitWindowSeconds
+	}
+	return 0
+}
+
+func (x *CodexWindow) GetResetAt() float64 {
+	if x != nil {
+		return x.ResetAt
+	}
+	return 0
+}
+
+type CodexRateLimit struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	PrimaryWindow   *CodexWindow           `protobuf:"bytes,1,opt,name=primary_window,json=primaryWindow,proto3" json:"primary_window,omitempty"`
+	SecondaryWindow *CodexWindow           `protobuf:"bytes,2,opt,name=secondary_window,json=secondaryWindow,proto3" json:"secondary_window,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *CodexRateLimit) Reset() {
+	*x = CodexRateLimit{}
+	mi := &file_t3_usage_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CodexRateLimit) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CodexRateLimit) ProtoMessage() {}
+
+func (x *CodexRateLimit) ProtoReflect() protoreflect.Message {
+	mi := &file_t3_usage_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CodexRateLimit.ProtoReflect.Descriptor instead.
+func (*CodexRateLimit) Descriptor() ([]byte, []int) {
+	return file_t3_usage_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *CodexRateLimit) GetPrimaryWindow() *CodexWindow {
+	if x != nil {
+		return x.PrimaryWindow
+	}
+	return nil
+}
+
+func (x *CodexRateLimit) GetSecondaryWindow() *CodexWindow {
+	if x != nil {
+		return x.SecondaryWindow
+	}
+	return nil
+}
+
+type CodexUsage struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	PlanType      string                 `protobuf:"bytes,1,opt,name=plan_type,json=planType,proto3" json:"plan_type,omitempty"`
+	RateLimit     *CodexRateLimit        `protobuf:"bytes,2,opt,name=rate_limit,json=rateLimit,proto3" json:"rate_limit,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CodexUsage) Reset() {
+	*x = CodexUsage{}
+	mi := &file_t3_usage_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CodexUsage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CodexUsage) ProtoMessage() {}
+
+func (x *CodexUsage) ProtoReflect() protoreflect.Message {
+	mi := &file_t3_usage_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CodexUsage.ProtoReflect.Descriptor instead.
+func (*CodexUsage) Descriptor() ([]byte, []int) {
+	return file_t3_usage_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *CodexUsage) GetPlanType() string {
+	if x != nil {
+		return x.PlanType
+	}
+	return ""
+}
+
+func (x *CodexUsage) GetRateLimit() *CodexRateLimit {
+	if x != nil {
+		return x.RateLimit
+	}
+	return nil
+}
+
+type Credit struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Status        string                 `protobuf:"bytes,2,opt,name=status,proto3" json:"status,omitempty"`
+	ResetType     string                 `protobuf:"bytes,3,opt,name=reset_type,json=resetType,proto3" json:"reset_type,omitempty"`
+	ExpiresAt     string                 `protobuf:"bytes,4,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Credit) Reset() {
+	*x = Credit{}
+	mi := &file_t3_usage_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Credit) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Credit) ProtoMessage() {}
+
+func (x *Credit) ProtoReflect() protoreflect.Message {
+	mi := &file_t3_usage_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Credit.ProtoReflect.Descriptor instead.
+func (*Credit) Descriptor() ([]byte, []int) {
+	return file_t3_usage_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *Credit) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Credit) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+func (x *Credit) GetResetType() string {
+	if x != nil {
+		return x.ResetType
+	}
+	return ""
+}
+
+func (x *Credit) GetExpiresAt() string {
+	if x != nil {
+		return x.ExpiresAt
+	}
+	return ""
+}
+
+type CreditList struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Credits       []*Credit              `protobuf:"bytes,1,rep,name=credits,proto3" json:"credits,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CreditList) Reset() {
+	*x = CreditList{}
+	mi := &file_t3_usage_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CreditList) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CreditList) ProtoMessage() {}
+
+func (x *CreditList) ProtoReflect() protoreflect.Message {
+	mi := &file_t3_usage_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CreditList.ProtoReflect.Descriptor instead.
+func (*CreditList) Descriptor() ([]byte, []int) {
+	return file_t3_usage_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *CreditList) GetCredits() []*Credit {
+	if x != nil {
+		return x.Credits
+	}
+	return nil
+}
+
 var File_t3_usage_proto protoreflect.FileDescriptor
 
 const file_t3_usage_proto_rawDesc = "" +
@@ -626,7 +902,29 @@ const file_t3_usage_proto_rawDesc = "" +
 	"\vClaudeUsage\x12:\n" +
 	"\tfive_hour\x18\x01 \x01(\v2\x1d.codex_switch.t3.ClaudeWindowR\bfiveHour\x12:\n" +
 	"\tseven_day\x18\x02 \x01(\v2\x1d.codex_switch.t3.ClaudeWindowR\bsevenDay\x124\n" +
-	"\x06limits\x18\x03 \x03(\v2\x1c.codex_switch.t3.ClaudeLimitR\x06limitsB0Z.github.com/joshp123/codex-switch/internal/t3pbb\x06proto3"
+	"\x06limits\x18\x03 \x03(\v2\x1c.codex_switch.t3.ClaudeLimitR\x06limits\"}\n" +
+	"\vCodexWindow\x12!\n" +
+	"\fused_percent\x18\x01 \x01(\x01R\vusedPercent\x120\n" +
+	"\x14limit_window_seconds\x18\x02 \x01(\x05R\x12limitWindowSeconds\x12\x19\n" +
+	"\breset_at\x18\x03 \x01(\x01R\aresetAt\"\x9e\x01\n" +
+	"\x0eCodexRateLimit\x12C\n" +
+	"\x0eprimary_window\x18\x01 \x01(\v2\x1c.codex_switch.t3.CodexWindowR\rprimaryWindow\x12G\n" +
+	"\x10secondary_window\x18\x02 \x01(\v2\x1c.codex_switch.t3.CodexWindowR\x0fsecondaryWindow\"i\n" +
+	"\n" +
+	"CodexUsage\x12\x1b\n" +
+	"\tplan_type\x18\x01 \x01(\tR\bplanType\x12>\n" +
+	"\n" +
+	"rate_limit\x18\x02 \x01(\v2\x1f.codex_switch.t3.CodexRateLimitR\trateLimit\"n\n" +
+	"\x06Credit\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x16\n" +
+	"\x06status\x18\x02 \x01(\tR\x06status\x12\x1d\n" +
+	"\n" +
+	"reset_type\x18\x03 \x01(\tR\tresetType\x12\x1d\n" +
+	"\n" +
+	"expires_at\x18\x04 \x01(\tR\texpiresAt\"?\n" +
+	"\n" +
+	"CreditList\x121\n" +
+	"\acredits\x18\x01 \x03(\v2\x17.codex_switch.t3.CreditR\acreditsB0Z.github.com/joshp123/codex-switch/internal/t3pbb\x06proto3"
 
 var (
 	file_t3_usage_proto_rawDescOnce sync.Once
@@ -640,34 +938,43 @@ func file_t3_usage_proto_rawDescGZIP() []byte {
 	return file_t3_usage_proto_rawDescData
 }
 
-var file_t3_usage_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
+var file_t3_usage_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
 var file_t3_usage_proto_goTypes = []any{
-	(*AuthFile)(nil),     // 0: codex_switch.t3.AuthFile
-	(*AuthIdentity)(nil), // 1: codex_switch.t3.AuthIdentity
-	(*AuthFiles)(nil),    // 2: codex_switch.t3.AuthFiles
-	(*ApiCall)(nil),      // 3: codex_switch.t3.ApiCall
-	(*ApiResponse)(nil),  // 4: codex_switch.t3.ApiResponse
-	(*ClaudeWindow)(nil), // 5: codex_switch.t3.ClaudeWindow
-	(*ClaudeModel)(nil),  // 6: codex_switch.t3.ClaudeModel
-	(*ClaudeScope)(nil),  // 7: codex_switch.t3.ClaudeScope
-	(*ClaudeLimit)(nil),  // 8: codex_switch.t3.ClaudeLimit
-	(*ClaudeUsage)(nil),  // 9: codex_switch.t3.ClaudeUsage
-	nil,                  // 10: codex_switch.t3.ApiCall.HeaderEntry
+	(*AuthFile)(nil),       // 0: codex_switch.t3.AuthFile
+	(*AuthIdentity)(nil),   // 1: codex_switch.t3.AuthIdentity
+	(*AuthFiles)(nil),      // 2: codex_switch.t3.AuthFiles
+	(*ApiCall)(nil),        // 3: codex_switch.t3.ApiCall
+	(*ApiResponse)(nil),    // 4: codex_switch.t3.ApiResponse
+	(*ClaudeWindow)(nil),   // 5: codex_switch.t3.ClaudeWindow
+	(*ClaudeModel)(nil),    // 6: codex_switch.t3.ClaudeModel
+	(*ClaudeScope)(nil),    // 7: codex_switch.t3.ClaudeScope
+	(*ClaudeLimit)(nil),    // 8: codex_switch.t3.ClaudeLimit
+	(*ClaudeUsage)(nil),    // 9: codex_switch.t3.ClaudeUsage
+	(*CodexWindow)(nil),    // 10: codex_switch.t3.CodexWindow
+	(*CodexRateLimit)(nil), // 11: codex_switch.t3.CodexRateLimit
+	(*CodexUsage)(nil),     // 12: codex_switch.t3.CodexUsage
+	(*Credit)(nil),         // 13: codex_switch.t3.Credit
+	(*CreditList)(nil),     // 14: codex_switch.t3.CreditList
+	nil,                    // 15: codex_switch.t3.ApiCall.HeaderEntry
 }
 var file_t3_usage_proto_depIdxs = []int32{
 	1,  // 0: codex_switch.t3.AuthFile.id_token:type_name -> codex_switch.t3.AuthIdentity
 	0,  // 1: codex_switch.t3.AuthFiles.files:type_name -> codex_switch.t3.AuthFile
-	10, // 2: codex_switch.t3.ApiCall.header:type_name -> codex_switch.t3.ApiCall.HeaderEntry
+	15, // 2: codex_switch.t3.ApiCall.header:type_name -> codex_switch.t3.ApiCall.HeaderEntry
 	6,  // 3: codex_switch.t3.ClaudeScope.model:type_name -> codex_switch.t3.ClaudeModel
 	7,  // 4: codex_switch.t3.ClaudeLimit.scope:type_name -> codex_switch.t3.ClaudeScope
 	5,  // 5: codex_switch.t3.ClaudeUsage.five_hour:type_name -> codex_switch.t3.ClaudeWindow
 	5,  // 6: codex_switch.t3.ClaudeUsage.seven_day:type_name -> codex_switch.t3.ClaudeWindow
 	8,  // 7: codex_switch.t3.ClaudeUsage.limits:type_name -> codex_switch.t3.ClaudeLimit
-	8,  // [8:8] is the sub-list for method output_type
-	8,  // [8:8] is the sub-list for method input_type
-	8,  // [8:8] is the sub-list for extension type_name
-	8,  // [8:8] is the sub-list for extension extendee
-	0,  // [0:8] is the sub-list for field type_name
+	10, // 8: codex_switch.t3.CodexRateLimit.primary_window:type_name -> codex_switch.t3.CodexWindow
+	10, // 9: codex_switch.t3.CodexRateLimit.secondary_window:type_name -> codex_switch.t3.CodexWindow
+	11, // 10: codex_switch.t3.CodexUsage.rate_limit:type_name -> codex_switch.t3.CodexRateLimit
+	13, // 11: codex_switch.t3.CreditList.credits:type_name -> codex_switch.t3.Credit
+	12, // [12:12] is the sub-list for method output_type
+	12, // [12:12] is the sub-list for method input_type
+	12, // [12:12] is the sub-list for extension type_name
+	12, // [12:12] is the sub-list for extension extendee
+	0,  // [0:12] is the sub-list for field type_name
 }
 
 func init() { file_t3_usage_proto_init() }
@@ -681,7 +988,7 @@ func file_t3_usage_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_t3_usage_proto_rawDesc), len(file_t3_usage_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   11,
+			NumMessages:   16,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

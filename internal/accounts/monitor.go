@@ -37,6 +37,8 @@ type AccountRoutingFact struct {
 	AccountState       AccountState
 	AccountStateCause  error
 	AllowanceSample    AllowanceSample
+	ResetCredits       []ResetCredit
+	ResetCreditsReadAt time.Time
 	RefreshedAt        time.Time
 	// Nil means the catalogue has not been observed; an empty slice means no models.
 	SupportedModelSlugs []string
@@ -49,6 +51,7 @@ type AccountRoutingFact struct {
 // latest facts without waiting on the network.
 type Monitor struct {
 	claudeOrigin    *url.URL
+	codexOrigin     *url.URL
 	dataDirectory   string
 	usageURL        string
 	modelsURL       string
@@ -79,6 +82,7 @@ type monitoredAccount struct {
 // that codexExecutable's version of Codex would see.
 func NewMonitor(dataDirectory string, upstreamOrigin *url.URL, codexExecutable string, httpClient *http.Client, storeDatabase *store.StoreDatabase) *Monitor {
 	return &Monitor{
+		codexOrigin:     upstreamOrigin,
 		claudeOrigin:    &url.URL{Scheme: "https", Host: "api.anthropic.com"},
 		dataDirectory:   dataDirectory,
 		usageURL:        upstreamOrigin.ResolveReference(&url.URL{Path: "/backend-api/wham/usage"}).String(),

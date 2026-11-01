@@ -18,7 +18,7 @@ import (
 
 // ResetDecision reports the result of an explicit reset request.
 type ResetDecision struct{ Message string }
-type resetCredit struct {
+type ResetCredit struct {
 	ID        string    `json:"id"`
 	Status    string    `json:"status"`
 	ResetType string    `json:"reset_type"`
@@ -54,7 +54,7 @@ func ResetCodexPool(ctx context.Context, directory string, origin *url.URL, clie
 		count := 0
 		type candidate struct {
 			account PoolAccount
-			credit  resetCredit
+			credit  ResetCredit
 		}
 		var candidates []candidate
 		var nextAvailable time.Time
@@ -99,7 +99,7 @@ func ResetCodexPool(ctx context.Context, directory string, origin *url.URL, clie
 				return nil
 			}
 			var list struct {
-				Credits []resetCredit `json:"credits"`
+				Credits []ResetCredit `json:"credits"`
 			}
 			if err := resetRequest(ctx, client, origin, credentials, http.MethodGet, "/backend-api/wham/rate-limit-reset-credits", nil, &list); err != nil {
 				return fmt.Errorf("%s: cannot check reset credits: %w", account.DisplayName, err)

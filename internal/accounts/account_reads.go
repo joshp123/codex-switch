@@ -72,6 +72,20 @@ func (monitor *Monitor) observeAccount(parent context.Context, account PoolAccou
 		fact.RefreshedAt = startedAt
 	}
 
+	// Credit details are read by the monitor, never by T3. Failed reads remain
+	// unavailable and are retried on the next account observation.
+	if time.Since(fact.ResetCreditsReadAt) >= 5*time.Minute {
+		var list struct {
+			Credits []ResetCredit `json:"credits"`
+		}
+		if creditErr := resetRequest(ctx, monitor.httpClient, monitor.codexOrigin, credentials, http.MethodGet, "/backend-api/wham/rate-limit-reset-credits", nil, &list); creditErr != nil {
+			log.Printf("%s: cannot read reset credits: %v", account.DisplayName, creditErr)
+		} else {
+			fact.ResetCredits = append([]ResetCredit{}, list.Credits...)
+			fact.ResetCreditsReadAt = time.Now()
+		}
+	}
+
 	if !readModelList {
 		return fact
 	}

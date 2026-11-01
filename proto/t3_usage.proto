@@ -27,3 +27,8 @@ message ClaudeModel { string display_name = 1; }
 message ClaudeScope { ClaudeModel model = 1; }
 message ClaudeLimit { string kind = 1; double percent = 2; string resets_at = 3; ClaudeScope scope = 4; }
 message ClaudeUsage { ClaudeWindow five_hour = 1; ClaudeWindow seven_day = 2; repeated ClaudeLimit limits = 3; }
+message CodexWindow { double used_percent = 1; int32 limit_window_seconds = 2; double reset_at = 3; }
+message CodexRateLimit { CodexWindow primary_window = 1; CodexWindow secondary_window = 2; }
+message CodexUsage { string plan_type = 1; CodexRateLimit rate_limit = 2; }
+message Credit { string id = 1; string status = 2; string reset_type = 3; string expires_at = 4; }
+message CreditList { repeated Credit credits = 1; }
