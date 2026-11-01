@@ -42,7 +42,18 @@ func ResetCodexPool(ctx context.Context, directory string, origin *url.URL, clie
 			if err := json.Unmarshal(data, &pending); err != nil {
 				return fmt.Errorf("read pending reset: %w", err)
 			}
-			return completeReset(ctx, directory, origin, client, pendingPath, pending, &decision)
+			unspent, err := pendingCreditUnspent(ctx, directory, origin, client, pending)
+			if err != nil {
+				return fmt.Errorf("reset outcome unknown; run the command again to retry: %w", err)
+			}
+			if !unspent {
+				return completeReset(ctx, directory, origin, client, pendingPath, pending, &decision)
+			}
+			// The lost request never spent the credit, so the pool may no longer
+			// need it: decide again from current allowance.
+			if err := os.Remove(pendingPath); err != nil {
+				return err
+			}
 		} else if !os.IsNotExist(readErr) {
 			return readErr
 		}
@@ -137,22 +148,43 @@ func ResetCodexPool(ctx context.Context, directory string, origin *url.URL, clie
 	return
 }
 
-func completeReset(ctx context.Context, directory string, origin *url.URL, client *http.Client, path string, pending pendingReset, decision *ResetDecision) error {
+func pendingResetAccount(ctx context.Context, directory string, client *http.Client, pending pendingReset) (PoolAccount, Credentials, error) {
 	pool, err := ReadPool(directory)
 	if err != nil {
-		return err
+		return PoolAccount{}, Credentials{}, err
 	}
-	var account *PoolAccount
-	for i := range pool {
-		if pool[i].Name == pending.AccountName && pool[i].AccountID == pending.AccountID && pool[i].Provider == ProviderCodex {
-			account = &pool[i]
-			break
+	for _, account := range pool {
+		if account.Name == pending.AccountName && account.AccountID == pending.AccountID && account.Provider == ProviderCodex {
+			credentials, err := newSavedLogin(filepath.Join(directory, account.Name), client).Credentials(ctx)
+			return account, credentials, err
 		}
 	}
-	if account == nil {
-		return fmt.Errorf("pending reset account is no longer in the pool")
+	return PoolAccount{}, Credentials{}, fmt.Errorf("pending reset account is no longer in the pool")
+}
+
+// pendingCreditUnspent reports whether the credit of a reset whose response
+// was lost is still listed as available, meaning the request never spent it.
+func pendingCreditUnspent(ctx context.Context, directory string, origin *url.URL, client *http.Client, pending pendingReset) (bool, error) {
+	_, credentials, err := pendingResetAccount(ctx, directory, client, pending)
+	if err != nil {
+		return false, err
 	}
-	credentials, err := newSavedLogin(filepath.Join(directory, account.Name), client).Credentials(ctx)
+	var list struct {
+		Credits []ResetCredit `json:"credits"`
+	}
+	if err := resetRequest(ctx, client, origin, credentials, http.MethodGet, "/backend-api/wham/rate-limit-reset-credits", nil, &list); err != nil {
+		return false, err
+	}
+	for _, credit := range list.Credits {
+		if credit.ID == pending.CreditID {
+			return credit.Status == "available", nil
+		}
+	}
+	return false, nil
+}
+
+func completeReset(ctx context.Context, directory string, origin *url.URL, client *http.Client, path string, pending pendingReset, decision *ResetDecision) error {
+	account, credentials, err := pendingResetAccount(ctx, directory, client, pending)
 	if err != nil {
 		return err
 	}

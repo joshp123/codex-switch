@@ -970,6 +970,20 @@ def stored_resets(system):
         raise Failure(f'Near reset: {soon.stdout} {soon.stderr}')
     if 'event=reset-claim' in rig.read('logs/fake-providers.log'):
         raise Failure('A credit was spent while an account was available or returning soon.')
+    system.extra = ['reset-test', 'reset-refuse']
+    system.apply()
+    refused = command('reset', 'codex')
+    if refused.returncode == 0 or 'outcome unknown' not in refused.stderr:
+        raise Failure(f'Refused redemption: {refused.stdout} {refused.stderr}')
+    system.limited = set(system.accounts) - {'account-1'}
+    system.extra = ['reset-test']
+    system.apply()
+    recovered = command('reset', 'codex')
+    if recovered.returncode or 'can continue working' not in recovered.stdout:
+        raise Failure(f'Retry after capacity returned: {recovered.stdout} {recovered.stderr}')
+    if 'event=reset-claim' in rig.read('logs/fake-providers.log'):
+        raise Failure('A retry spent a credit after another account could work again.')
+    system.limited = set(system.accounts)
     system.extra = ['reset-test', 'reset-drop']
     system.apply()
     reads_before_reset = rig.usage_reads('account-2', system.weekly['account-2'])
@@ -987,7 +1001,7 @@ def stored_resets(system):
     system.record_codex_task('work after reset', task.thread)
     if rig.pinned_account(task.thread) != 'account-2':
         raise Failure(f'Work after the reset used {rig.pinned_account(task.thread)}, not the reset account.')
-    return 'Status showed 2 Claude resets; available and near-reset pools spent none. The exhausted pool chose the earliest credit, retried its lost response with the same request ID, and resumed work on that account.'
+    return 'Status showed 2 Claude resets; available and near-reset pools spent none. A refused redemption spent nothing once another account could work. The exhausted pool chose the earliest credit, retried its lost response with the same request ID, and resumed work on that account.'
 
 
 # Each group shares one isolated system and runs at once with every other group. Only the first update starts from

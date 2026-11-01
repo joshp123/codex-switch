@@ -183,6 +183,7 @@ type controls struct {
 	resetTest         bool
 	resetSoon         bool
 	resetDrop         bool
+	resetRefuse       bool
 	claudeGrant       bool
 	webSocketAgeLimit time.Duration
 }
@@ -206,6 +207,8 @@ func (providers *providers) readControls() (controls, error) {
 			parsed.resetSoon = true
 		case len(fields) == 1 && fields[0] == "reset-drop":
 			parsed.resetDrop = true
+		case len(fields) == 1 && fields[0] == "reset-refuse":
+			parsed.resetRefuse = true
 		case len(fields) == 1 && fields[0] == "claude-grant":
 			parsed.claudeGrant = true
 		case len(fields) == 1 && fields[0] == "http-only":
@@ -284,7 +287,11 @@ func (providers *providers) ServeHTTP(writer http.ResponseWriter, request *http.
 		if alias == "account-2" {
 			expiry = 3600
 		}
-		body := fmt.Appendf(nil, `{"credits":[{"id":%q,"status":"available","reset_type":"codex_rate_limits","expires_at":%q}]}`, "credit-"+alias, time.Now().Add(time.Duration(expiry)*time.Second).Format(time.RFC3339))
+		status := "available"
+		if _, redeemed := providers.resetAccounts.Load(alias); redeemed {
+			status = "redeemed"
+		}
+		body := fmt.Appendf(nil, `{"credits":[{"id":%q,"status":%q,"reset_type":"codex_rate_limits","expires_at":%q}]}`, "credit-"+alias, status, time.Now().Add(time.Duration(expiry)*time.Second).Format(time.RFC3339))
 		writeJSON(writer, http.StatusOK, body)
 	case request.URL.Path == "/backend-api/wham/rate-limit-reset-credits/consume" && controls.resetTest:
 		var claim struct {
@@ -292,6 +299,11 @@ func (providers *providers) ServeHTTP(writer http.ResponseWriter, request *http.
 			RequestID string `json:"redeem_request_id"`
 		}
 		_ = json.NewDecoder(request.Body).Decode(&claim)
+		if controls.resetRefuse {
+			log.Printf("event=reset-refused account=%s credit=%s", alias, claim.CreditID)
+			http.Error(writer, "provider unavailable (simulation)", http.StatusServiceUnavailable)
+			return
+		}
 		log.Printf("event=reset-claim account=%s credit=%s request=%s", alias, claim.CreditID, claim.RequestID)
 		_, already := providers.resetClaims.LoadOrStore(claim.RequestID, true)
 		providers.resetAccounts.Store(alias, true)
