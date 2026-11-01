@@ -91,5 +91,5 @@ func upstreamRequestDescription(request *http.Request) string {
 	if routed, ok := request.Context().Value(relayRequestContextKey{}).(*routedRelayRequest); ok {
 		return describeModelRequest(routed.taskID, routed.client, routed.routeDecision.DisplayName)
 	}
-	return "Claude account request " + request.Method + " " + request.URL.Path
+	return "account request " + request.Method + " " + request.URL.Host + request.URL.Path
 }
