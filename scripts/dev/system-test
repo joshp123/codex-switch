@@ -15,6 +15,7 @@ scripts/dev/smoke-test checks the real services with real accounts.
 import contextlib
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -144,6 +145,8 @@ def run_group(name):
     leftovers = []
     try:
         system = System(rig.prepare(first_proxy))
+        if name == "resets":
+            system.extra = ["claude-grant"]
         system.apply()  # before the proxy's first allowance read
         rig.start_fake_providers()
         system.base = rig.start_proxy()
@@ -873,10 +876,56 @@ def format_duration(seconds):
     return f'{minutes}m {seconds:02d}s'
 
 
+def stored_resets(system):
+    """An agent spends a reset only when the pool is exhausted, choosing the first expiry and safely retrying a lost response"""
+    env = dict(os.environ, **rig.proxy_environment())
+    def command(*args):
+        return subprocess.run([str(rig.RUN / 'cli'), *args], env=env, capture_output=True, text=True, timeout=15)
+    status = command('status')
+    if status.returncode or 'reset credits: 2' not in status.stdout:
+        raise Failure(f'Claude grants missing from status: {status.stdout} {status.stderr}')
+    (rig.RUN / 'reset-status.txt').write_text(status.stdout)
+    claude = command('reset', 'claude')
+    if claude.returncode or 'not supported yet' not in claude.stdout:
+        raise Failure(f'Claude reset: {claude.stdout} {claude.stderr}')
+    system.extra = ['reset-test']
+    system.apply()
+    available = command('reset', 'codex')
+    if available.returncode or 'can continue working' not in available.stdout:
+        raise Failure(f'Available pool: {available.stdout} {available.stderr}')
+    system.limited = set(system.accounts)
+    system.extra = ['reset-test', 'reset-soon']
+    system.apply()
+    soon = command('reset', 'codex')
+    if soon.returncode or 'within 30 minutes' not in soon.stdout:
+        raise Failure(f'Near reset: {soon.stdout} {soon.stderr}')
+    if 'event=reset-claim' in rig.read('logs/fake-providers.log'):
+        raise Failure('A credit was spent while an account was available or returning soon.')
+    system.extra = ['reset-test', 'reset-drop']
+    system.apply()
+    reads_before_reset = rig.usage_reads('account-2', system.weekly['account-2'])
+    lost = command('reset', 'codex')
+    if lost.returncode == 0 or 'outcome unknown' not in lost.stderr:
+        raise Failure(f'Lost response: {lost.stdout} {lost.stderr}')
+    retry = command('reset', 'codex')
+    if retry.returncode or 'already redeemed' not in retry.stdout:
+        raise Failure(f'Retry: {retry.stdout} {retry.stderr}')
+    claims = re.findall(r'event=reset-claim account=(\S+) credit=(\S+) request=(\S+)', rig.read('logs/fake-providers.log'))
+    if len(claims) != 2 or claims[0] != claims[1] or claims[0][:2] != ('account-2', 'credit-account-2'):
+        raise Failure(f'Expected two identical claims for the earliest credit; got {claims}')
+    rig.wait_for(lambda: rig.usage_reads('account-2', system.weekly['account-2']) > reads_before_reset, 'the proxy to observe the reset account')
+    task = rig.CodexTask('reset-resumed-work', 'Reply with the word resumed.').finish()
+    system.record_codex_task('work after reset', task.thread)
+    if rig.pinned_account(task.thread) != 'account-2':
+        raise Failure(f'Work after the reset used {rig.pinned_account(task.thread)}, not the reset account.')
+    return 'Status showed 2 Claude resets; available and near-reset pools spent none. The exhausted pool chose the earliest credit, retried its lost response with the same request ID, and resumed work on that account.'
+
+
 # Each group shares one isolated system and runs at once with every other group. Only the first update starts from
 # the published release; every other system starts on a build of this tree.
 GROUPS = [
     ('update', 'published-release', [update_waits_for_work, update_during_work_finishes_on_the_old_process]),
+    ('resets', 'cli', [stored_resets]),
     ('routing', 'cli', [new_work_goes_to_the_most_allowance_left, request_without_task_id_is_served]),
     ('exhaustion', 'cli', [exhausted_task_moves_on_its_next_turn]),
     ('outage-goal', 'cli', [goal_continues_when_an_account_returns]),

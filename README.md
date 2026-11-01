@@ -267,6 +267,12 @@ At 10% or less, new work and the next turn of pinned tasks use another account.
 The reserves are off by default; use `codex-switch reserve "Claude 1" off` to
 clear both.
 
+To use a stored Codex reset when the pool is exhausted, run
+`codex-switch reset codex`. It keeps the credit when an account can still work
+or will reset within 30 minutes, and otherwise uses the credit that expires
+first. If the response is lost, run the same command again to resolve it.
+Claude reset redemption is not supported yet.
+
 ## How updates work
 
 The app checks for signed, notarised releases every hour and installs them as

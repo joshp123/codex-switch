@@ -100,12 +100,13 @@ func clearClaudeRestrictionsFromSample(fact *AccountRoutingFact, sample Allowanc
 }
 
 func (monitor *Monitor) readClaudeAllowance(ctx context.Context, account PoolAccount, credentials Credentials) (AllowanceSample, time.Time, error) {
-	endpoint := monitor.claudeOrigin.ResolveReference(&url.URL{Path: "/api/oauth/usage"})
+	endpoint := monitor.claudeOrigin.ResolveReference(&url.URL{Path: "/api/oauth/usage", RawQuery: "cedar_ember=1&skip_spend=1"})
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
 	if err != nil {
 		return AllowanceSample{}, time.Time{}, err
 	}
 	setClaudeOAuthHeaders(request, credentials.AccessToken)
+	request.Header.Set("User-Agent", "claude-code/2.1.273")
 	response, err := monitor.httpClient.Do(request)
 	if err != nil {
 		return AllowanceSample{}, time.Time{}, err

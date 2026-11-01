@@ -14,12 +14,21 @@ type claudeUsageWindow struct {
 	ResetsAt    time.Time `json:"resets_at"`
 }
 
+type claudeResetGrantStatus struct {
+	Eligible *bool `json:"eligible"`
+	Grants   []struct {
+		ResetsLeft *uint32    `json:"resets_left"`
+		EndsAt     *time.Time `json:"ends_at"`
+	} `json:"grants"`
+}
+
 type claudeUsageResponse struct {
-	FiveHour       *claudeUsageWindow `json:"five_hour"`
-	SevenDay       *claudeUsageWindow `json:"seven_day"`
-	SevenDayOpus   *claudeUsageWindow `json:"seven_day_opus"`
-	SevenDaySonnet *claudeUsageWindow `json:"seven_day_sonnet"`
-	SevenDayFable  *claudeUsageWindow `json:"seven_day_fable"`
+	ResetGrants    *claudeResetGrantStatus `json:"cedar_ember"`
+	FiveHour       *claudeUsageWindow      `json:"five_hour"`
+	SevenDay       *claudeUsageWindow      `json:"seven_day"`
+	SevenDayOpus   *claudeUsageWindow      `json:"seven_day_opus"`
+	SevenDaySonnet *claudeUsageWindow      `json:"seven_day_sonnet"`
+	SevenDayFable  *claudeUsageWindow      `json:"seven_day_fable"`
 	Limits         []struct {
 		Kind     string    `json:"kind"`
 		Percent  *float64  `json:"percent"`
@@ -35,6 +44,19 @@ type claudeUsageResponse struct {
 
 func (usage claudeUsageResponse) sample(account PoolAccount, observedAt time.Time) (AllowanceSample, error) {
 	sample := AllowanceSample{AccountID: account.AccountID, Plan: account.Plan, Allowed: true, ObservedAt: observedAt}
+	if usage.ResetGrants != nil && usage.ResetGrants.Eligible != nil {
+		var count uint32
+		for _, grant := range usage.ResetGrants.Grants {
+			if grant.EndsAt != nil && !grant.EndsAt.After(observedAt) {
+				continue
+			}
+			if grant.ResetsLeft == nil {
+				return sample, fmt.Errorf("Claude reset grant has no remaining count")
+			}
+			count += *grant.ResetsLeft
+		}
+		sample.AvailableResetCredits = &count
+	}
 	for _, limit := range usage.Limits {
 		duration := int64(7 * 86400)
 		switch limit.Kind {
@@ -163,6 +185,7 @@ func mergeClaudeAllowance(current, incoming AllowanceSample) AllowanceSample {
 		}
 	}
 	if incoming.ObservedAt.After(current.ObservedAt) {
+		current.AvailableResetCredits = incoming.AvailableResetCredits
 		current.ObservedAt = incoming.ObservedAt
 	}
 	if current.AccountID == "" {

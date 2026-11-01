@@ -156,6 +156,9 @@ func writeCurrentStatus(output io.Writer, snapshot *menupb.MenuSnapshot) {
 			}
 		}
 		fmt.Fprintf(output, "\n%s · %s\n", label, state)
+		if account.GetAllowance() != nil && account.GetAllowance().AvailableResetCredits != nil && account.GetAllowance().GetAvailableResetCredits() > 0 {
+			fmt.Fprintf(output, "  reset credits: %d\n", account.GetAllowance().GetAvailableResetCredits())
+		}
 		for _, window := range account.GetAllowance().GetWindows() {
 			label := accountapi.AllowancePeriodLabel(window.PeriodSeconds)
 			model := window.ModelName

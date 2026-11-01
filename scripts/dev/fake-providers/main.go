@@ -151,6 +151,8 @@ type providers struct {
 	// conversations holds where each response left its conversation, by
 	// response ID: Codex sends only the new items with previous_response_id.
 	conversations sync.Map
+	resetClaims   sync.Map
+	resetAccounts sync.Map
 }
 
 // controls is one reading of the simulation file:
@@ -177,6 +179,10 @@ type controls struct {
 	usageError     bool
 	claudeThrottle bool
 	claudeLimited  map[string]bool
+	resetTest      bool
+	resetSoon      bool
+	resetDrop      bool
+	claudeGrant    bool
 }
 
 func (providers *providers) readControls() (controls, error) {
@@ -192,6 +198,14 @@ func (providers *providers) readControls() (controls, error) {
 		fields := strings.Fields(scanner.Text())
 		switch {
 		case len(fields) == 0:
+		case len(fields) == 1 && fields[0] == "reset-test":
+			parsed.resetTest = true
+		case len(fields) == 1 && fields[0] == "reset-soon":
+			parsed.resetSoon = true
+		case len(fields) == 1 && fields[0] == "reset-drop":
+			parsed.resetDrop = true
+		case len(fields) == 1 && fields[0] == "claude-grant":
+			parsed.claudeGrant = true
 		case len(fields) == 1 && fields[0] == "http-only":
 			parsed.httpOnly = true
 		case len(fields) == 1 && fields[0] == "break-responses":
@@ -257,10 +271,40 @@ func (providers *providers) ServeHTTP(writer http.ResponseWriter, request *http.
 		writeJSON(writer, http.StatusOK, codexModels)
 	case request.URL.Path == accountsCheckPath:
 		writeJSON(writer, http.StatusOK, accountsCheck(request.Header.Get("ChatGPT-Account-ID")))
+	case request.URL.Path == "/backend-api/wham/rate-limit-reset-credits" && controls.resetTest:
+		expiry := 7200
+		if alias == "account-2" {
+			expiry = 3600
+		}
+		body := fmt.Appendf(nil, `{"credits":[{"id":%q,"status":"available","reset_type":"codex_rate_limits","expires_at":%q}]}`, "credit-"+alias, time.Now().Add(time.Duration(expiry)*time.Second).Format(time.RFC3339))
+		writeJSON(writer, http.StatusOK, body)
+	case request.URL.Path == "/backend-api/wham/rate-limit-reset-credits/consume" && controls.resetTest:
+		var claim struct {
+			CreditID  string `json:"credit_id"`
+			RequestID string `json:"redeem_request_id"`
+		}
+		_ = json.NewDecoder(request.Body).Decode(&claim)
+		log.Printf("event=reset-claim account=%s credit=%s request=%s", alias, claim.CreditID, claim.RequestID)
+		_, already := providers.resetClaims.LoadOrStore(claim.RequestID, true)
+		providers.resetAccounts.Store(alias, true)
+		if controls.resetDrop && !already {
+			if connection, _, err := writer.(http.Hijacker).Hijack(); err == nil {
+				_ = connection.Close()
+			}
+			return
+		}
+		if already {
+			writeJSON(writer, http.StatusOK, []byte(`{"code":"already_redeemed"}`))
+		} else {
+			writeJSON(writer, http.StatusOK, []byte(`{"code":"reset"}`))
+		}
 	case request.URL.Path == usagePath && controls.usageError:
 		providers.logRequest("usage-error", request, http.StatusServiceUnavailable)
 		http.Error(writer, "provider unavailable (simulation)", http.StatusServiceUnavailable)
 	case request.URL.Path == usagePath:
+		if _, reset := providers.resetAccounts.Load(alias); reset {
+			delete(controls.limited, alias)
+		}
 		used, body := openAIUsage(controls, alias)
 		log.Printf("event=usage-read account=%s used=%g", alias, used)
 		writeJSON(writer, http.StatusOK, body)
@@ -279,7 +323,7 @@ func (providers *providers) ServeHTTP(writer http.ResponseWriter, request *http.
 	case webSocket && controls.httpOnly:
 		providers.logRequest("websocket-refused", request, http.StatusUpgradeRequired)
 		http.Error(writer, "WebSocket refused (simulation)", http.StatusUpgradeRequired)
-	case controls.limited[alias]:
+	case controls.limited[alias] && !providers.accountReset(alias):
 		providers.logRequest("rejected-usage-limit", request, http.StatusTooManyRequests)
 		writeJSON(writer, http.StatusTooManyRequests, usageLimitError())
 	case webSocket:
@@ -287,6 +331,11 @@ func (providers *providers) ServeHTTP(writer http.ResponseWriter, request *http.
 	default:
 		providers.serveCodexHTTP(writer, request)
 	}
+}
+
+func (providers *providers) accountReset(alias string) bool {
+	_, reset := providers.resetAccounts.Load(alias)
+	return reset
 }
 
 func writeJSON(writer http.ResponseWriter, status int, body []byte) {
@@ -305,6 +354,9 @@ func openAIUsage(controls controls, alias string) (float64, []byte) {
 		used = 100
 	}
 	resetAfter := int64(3600)
+	if controls.resetSoon && alias == "account-2" {
+		resetAfter = 300
+	}
 	if !limited {
 		resetAfter = 4 * 86400
 	}
@@ -680,6 +732,8 @@ func (providers *providers) serveCodexWebSocket(writer http.ResponseWriter, requ
 func (providers *providers) serveAnthropic(writer http.ResponseWriter, request *http.Request, controls controls) {
 	alias := providers.alias(request)
 	switch {
+	case request.URL.Path == claudeUsagePath && controls.claudeGrant:
+		writeJSON(writer, http.StatusOK, fmt.Appendf(nil, `{"five_hour":{"utilization":10,"resets_at":%q},"cedar_ember":{"eligible":true,"grants":[{"resets_left":2},{"resets_left":1,"ends_at":%q}]}}`, time.Now().Add(3*time.Hour).Format(time.RFC3339), time.Now().Add(-time.Hour).Format(time.RFC3339)))
 	case request.URL.Path == claudeUsagePath && controls.claudeLimited[alias]:
 		providers.logRequest("claude-usage-read-limited", request, http.StatusOK)
 		writeJSON(writer, http.StatusOK, fmt.Appendf(nil, `{"five_hour":{"utilization":100,"resets_at":%q}}`, claudeLimitReset().Format(time.RFC3339)))
