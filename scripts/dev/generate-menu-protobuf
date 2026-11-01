@@ -2,7 +2,7 @@
 set -eu
 cd "$(dirname "$0")/../.."
 if [ "${1:-}" = "--go-only" ]; then
-  protoc -I proto --go_out=. --go_opt=module=github.com/joshp123/codex-switch proto/menu_snapshot.proto
+  protoc -I proto --go_out=. --go_opt=module=github.com/joshp123/codex-switch proto/menu_snapshot.proto proto/t3_usage.proto
   exit 0
 fi
 swift package --package-path macos/CodexSwitchMenu resolve
@@ -11,3 +11,5 @@ swift_generator_dir=$(swift build --package-path macos/CodexSwitchMenu/.build/ch
 protoc --plugin=protoc-gen-swift="$swift_generator_dir/protoc-gen-swift" -I proto --go_out=. --go_opt=module=github.com/joshp123/codex-switch \
   --swift_out=macos/CodexSwitchMenu/Sources/CodexSwitchMenu \
   proto/menu_snapshot.proto
+
+protoc -I proto --go_out=. --go_opt=module=github.com/joshp123/codex-switch proto/t3_usage.proto

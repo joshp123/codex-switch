@@ -301,6 +301,8 @@ func (providers *providers) ServeHTTP(writer http.ResponseWriter, request *http.
 	case request.URL.Path == usagePath && controls.usageError:
 		providers.logRequest("usage-error", request, http.StatusServiceUnavailable)
 		http.Error(writer, "provider unavailable (simulation)", http.StatusServiceUnavailable)
+	case request.URL.Path == "/backend-api/wham/rate-limit-reset-credits":
+		writeJSON(writer, http.StatusOK, []byte(`{"credits":[{"id":"test-credit","status":"available","reset_type":"codex_rate_limits","expires_at":"2099-01-01T00:00:00Z"}]}`))
 	case request.URL.Path == usagePath:
 		if _, reset := providers.resetAccounts.Load(alias); reset {
 			delete(controls.limited, alias)
