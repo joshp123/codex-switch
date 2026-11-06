@@ -106,7 +106,7 @@ func TestProxyProcessHTTPStartsAuthenticatesAndForwards(t *testing.T) {
 	command = exec.Command(binary, "accounts")
 	command.Env = append(os.Environ(), "CODEX_SWITCH_DATA_DIR="+data)
 	listed, err := command.CombinedOutput()
-	if err != nil || !bytes.Contains(listed, []byte("Claude 1\taccount-4\t")) || !bytes.Contains(listed, []byte("Codex 2\taccount-10\t")) {
+	if err != nil || !bytes.Contains(listed, []byte("Claude 1\tclaude:claude@example.test\n")) || !bytes.Contains(listed, []byte("Codex 2\tchatgpt:signed-out@example.test\n")) {
 		t.Fatalf("accounts: %v\n%s", err, listed)
 	}
 	database, err := store.OpenStoreDatabase(filepath.Join(data, "codex-switch.db"))
@@ -115,15 +115,15 @@ func TestProxyProcessHTTPStartsAuthenticatesAndForwards(t *testing.T) {
 	}
 	pin, found, err := database.ReadTaskAccountPin(store.TaskID(turn.task))
 	database.CloseStoreDatabase()
-	if err != nil || !found || pin.AccountName != "account-1" {
-		t.Fatalf("storage pin changed: %v, %v, %v", pin, found, err)
+	if err != nil || !found || pin.AccountKey != "chatgpt:http-user@example.test" {
+		t.Fatalf("task pin: %v, %v, %v", pin, found, err)
 	}
 	// Keep the test's discarded credentials in its temporary directory.
 	trashExecutable := filepath.Join(root, "trash")
 	if err := os.WriteFile(trashExecutable, []byte("#!/bin/sh\nexec /bin/mv \"$1\" \"$CODEX_SWITCH_TEST_TRASH\"\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	for _, target := range []string{"Claude 1", "account-10"} {
+	for _, target := range []string{"Claude 1", "chatgpt:signed-out@example.test"} {
 		command = exec.Command(binary, "remove", target)
 		command.Env = append(os.Environ(), "CODEX_SWITCH_DATA_DIR="+data, "PATH="+root+":"+os.Getenv("PATH"), "CODEX_SWITCH_TEST_TRASH="+filepath.Join(root, target))
 		output, err := command.CombinedOutput()

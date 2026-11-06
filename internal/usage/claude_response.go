@@ -101,7 +101,7 @@ func mergeClaudeUsage(usage *claudeMessageUsage, delta claudeMessageUsage) {
 
 // Record normalises Anthropic's disjoint input categories into the shared
 // ledger's inclusive input count, preserving the cache subsets.
-func (observation *ClaudeResponseUsage) Record(taskID store.TaskID, account store.AccountName, completedAt time.Time) (store.CompletedResponseRecord, error) {
+func (observation *ClaudeResponseUsage) Record(taskID store.TaskID, account store.AccountKey, completedAt time.Time) (store.CompletedResponseRecord, error) {
 	if !observation.complete || observation.responseID == "" || observation.usage.Input == nil || observation.usage.Output == nil {
 		return store.CompletedResponseRecord{}, errors.New("Claude response is missing completed usage")
 	}
@@ -115,7 +115,7 @@ func (observation *ClaudeResponseUsage) Record(taskID store.TaskID, account stor
 	cacheWrite := claudeTokenCount(usage.CacheWrite)
 	record := store.CompletedResponseRecord{
 		CompletedResponseID: store.CompletedResponseID("claude:" + observation.responseID),
-		TaskID:              taskID, AccountName: account, ModelSlug: observation.model, HarnessMode: observation.speed,
+		TaskID:              taskID, AccountKey: account, ModelSlug: observation.model, HarnessMode: observation.speed,
 		InputTokens:       *usage.Input + claudeTokenCount(usage.CacheRead) + cacheWrite,
 		CachedInputTokens: claudeTokenCount(usage.CacheRead), CacheWriteInputTokens: &cacheWrite,
 		OutputTokens: *usage.Output, CompletedAt: completedAt,

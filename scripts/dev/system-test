@@ -233,17 +233,17 @@ def t3_reads_the_account_pool(system):
             return json.load(response)
 
     files = request('auth-files')['files']
-    if len(files) != 6 or {f['provider'] for f in files} != {'codex', 'claude'}:
-        raise Failure(f'Expected six Codex and Claude accounts, got {files!r}')
+    if len(files) != 6 or {f['provider'] for f in files} != {'codex', 'claude'} or {f['auth_index'] for f in files} != {rig.account_key(account) for account in (*rig.CODEX_ACCOUNTS, *rig.CLAUDE_ACCOUNTS)}:
+        raise Failure(f'Expected six Codex and Claude accounts, each named by its account key, got {files!r}')
     def call(account, url, method='GET'):
         return request('api-call', {'auth_index': account, 'method': method, 'url': url, 'header': {'Authorization': 'Bearer $TOKEN$'}})
     # A stopped provider cannot answer: these calls must use the monitor's readings.
     provider = rig.started_processes[0]
     os.kill(provider.pid, signal.SIGSTOP)
     try:
-        codex = call('account-1', 'https://chatgpt.com/backend-api/wham/usage')
-        credits = call('account-1', 'https://chatgpt.com/backend-api/wham/rate-limit-reset-credits')
-        claude = call('account-4', 'https://api.anthropic.com/api/oauth/usage')
+        codex = call(rig.account_key('account-1'), 'https://chatgpt.com/backend-api/wham/usage')
+        credits = call(rig.account_key('account-1'), 'https://chatgpt.com/backend-api/wham/rate-limit-reset-credits')
+        claude = call(rig.account_key('account-4'), 'https://api.anthropic.com/api/oauth/usage')
     finally:
         os.kill(provider.pid, signal.SIGCONT)
     if codex['status_code'] != 200 or not json.loads(codex['body'])['rate_limit']:
@@ -253,7 +253,7 @@ def t3_reads_the_account_pool(system):
     if claude['status_code'] != 200 or not json.loads(claude['body'])['five_hour']:
         raise Failure('Claude allowance was not returned.')
     for url, method in [('https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume', 'POST'), ('https://example.com/', 'GET')]:
-        if call('account-1', url, method)['status_code'] != 403:
+        if call(rig.account_key('account-1'), url, method)['status_code'] != 403:
             raise Failure('The proxy accepted a forbidden call.')
     try:
         request('auth-files', key='wrong')
@@ -308,7 +308,7 @@ def new_work_goes_to_the_allowance_that_resets_first(system):
 
     replacement = system.best_account(excluding={runner_up})
     reserve = 100 - system.weekly[runner_up]
-    account_name = next(name for name, key in rig.account_keys_by_name().items() if key == runner_up)
+    account_name = next(name for name, key in rig.account_keys_by_display_name().items() if key == rig.account_key(runner_up))
     rig.proxy_command('reserve', account_name, str(reserve), '0')
     try:
         previous_requests = len(rig.forwarded_requests(thread=new_task.thread))
@@ -330,7 +330,7 @@ def new_work_goes_to_the_allowance_that_resets_first(system):
             raise Failure(f'Codex showed {describe_errors(continued.errors + fresh.errors)} at the soft reserve.')
 
         previous_requests = len(rig.forwarded_requests(thread=new_task.thread))
-        rig.proxy_command('reserve', runner_up, str(reserve), str(reserve))
+        rig.proxy_command('reserve', rig.account_key(runner_up), str(reserve), str(reserve))
         continued = rig.CodexTask('hard-reserve-pinned-task', 'Reply with the word continued.', thread=new_task.thread).finish()
         fresh = rig.CodexTask('hard-reserve-new-task', 'Reply with the word fresh.').finish()
         system.record_codex_task('new task with an account at its hard reserve', fresh.thread)
@@ -350,7 +350,7 @@ def new_work_goes_to_the_allowance_that_resets_first(system):
         if continued.errors or fresh.errors:
             raise Failure(f'Codex showed {describe_errors(continued.errors + fresh.errors)} while an account was held in reserve.')
     finally:
-        rig.proxy_command('reserve', runner_up, 'off')
+        rig.proxy_command('reserve', rig.account_key(runner_up), 'off')
     return (f'A {" and a ".join(tasks)} started on {leader_reason}.\n'
             f'Then {runner_up}\'s week had not started. Each took its second turn on {leader} again, and a new Codex task went to {runner_up}.\n'
             f'A fork of the Codex task, made through the Codex app-server, was served by {leader} too.\n'
@@ -409,7 +409,7 @@ def claude_throttle_holds_the_account_briefly(system):
     session, throttled_before = str(uuid.uuid4()), len(rig.fake_provider_events('claude-throttled'))
     # A full reserve holds every other account back, so only the throttled account can serve.
     for account in others:
-        rig.proxy_command('reserve', account, '100', '100')
+        rig.proxy_command('reserve', rig.account_key(account), '100', '100')
     try:
         with simulating(system, 'claude-throttle 1'):
             began = time.monotonic()
@@ -417,7 +417,7 @@ def claude_throttle_holds_the_account_briefly(system):
             took = time.monotonic() - began
     finally:
         for account in others:
-            rig.proxy_command('reserve', account, 'off')
+            rig.proxy_command('reserve', rig.account_key(account), 'off')
     reply, task = result.get('result', '').strip(), 'claude:code:' + session
     if len(rig.fake_provider_events('claude-throttled')) != throttled_before + 1:
         raise Failure('The fake providers did not throttle exactly one Claude request.')
@@ -652,6 +652,7 @@ def update_during_work_finishes_on_the_old_process(system):
     token_parts = auth['tokens']['id_token'].split('.')
     claims = rig.json.loads(rig.base64.urlsafe_b64decode(token_parts[1] + '==='))
     claims.setdefault('https://api.openai.com/auth', {})['chatgpt_user_id'] = 'signed-out-test-user'
+    claims['email'] = 'signed-out@system-test.invalid'
     token_parts[1] = rig.base64.urlsafe_b64encode(rig.json.dumps(claims).encode()).decode().rstrip('=')
     auth['tokens']['id_token'] = '.'.join(token_parts)
     (signed_out / 'auth.json').write_text(rig.json.dumps(auth))

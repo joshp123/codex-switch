@@ -30,7 +30,7 @@ const (
 type AccountRoutingFact struct {
 	Provider           Provider
 	ClaudeRestrictions map[string]ClaudeRestriction
-	AccountName        store.AccountName
+	AccountKey         store.AccountKey
 	DisplayName        string
 	Reserve            AccountReserve
 	Credentials        Credentials
@@ -63,7 +63,7 @@ type Monitor struct {
 	readInterval time.Duration
 
 	mutex         sync.Mutex
-	accounts      map[store.AccountName]*monitoredAccount
+	accounts      map[store.AccountKey]*monitoredAccount
 	readRequested chan struct{}
 	firstReadDone chan struct{}
 }
@@ -91,7 +91,7 @@ func NewMonitor(dataDirectory string, upstreamOrigin *url.URL, codexExecutable s
 		httpClient:      httpClient,
 		storeDatabase:   storeDatabase,
 		readInterval:    accountReadInterval,
-		accounts:        map[store.AccountName]*monitoredAccount{},
+		accounts:        map[store.AccountKey]*monitoredAccount{},
 		readRequested:   make(chan struct{}, 1),
 		firstReadDone:   make(chan struct{}),
 	}
@@ -140,6 +140,11 @@ func (monitor *Monitor) startDueReads(ctx context.Context, reads *sync.WaitGroup
 		log.Printf("could not read the account pool: %v", err)
 		return now.Add(monitor.readInterval)
 	}
+	if filled, err := recordAccountKeys(pool, monitor.storeDatabase); err != nil {
+		log.Printf("could not record account keys: %v", err)
+	} else if filled > 0 {
+		log.Printf("recorded account keys on %d records an earlier build wrote", filled)
+	}
 	interval := monitor.readInterval
 	if readRequested {
 		interval = requestedAccountReadInterval
@@ -147,7 +152,7 @@ func (monitor *Monitor) startDueReads(ctx context.Context, reads *sync.WaitGroup
 	monitor.mutex.Lock()
 	defer monitor.mutex.Unlock()
 	for _, account := range pool {
-		monitored := monitor.monitoredAccountLocked(store.AccountName(account.Name), account.Provider)
+		monitored := monitor.monitoredAccountLocked(account)
 		if monitored.reading || now.Sub(monitored.lastReadStarted) < interval {
 			dueAt := monitored.lastReadStarted.Add(monitor.readInterval)
 			if monitored.reading && !dueAt.After(now) {
@@ -238,7 +243,7 @@ func (monitor *Monitor) ReadAccountRoutingFacts() ([]AccountRoutingFact, error) 
 	defer monitor.mutex.Unlock()
 	facts := make([]AccountRoutingFact, 0, len(pool))
 	for _, account := range pool {
-		monitored, known := monitor.accounts[store.AccountName(account.Name)]
+		monitored, known := monitor.accounts[account.Key]
 		if known && monitored.fact.Credentials.AccountID == account.AccountID {
 			fact := monitored.fact
 			fact.DisplayName = account.DisplayName
@@ -267,26 +272,30 @@ func (monitor *Monitor) RequestAccountRoutingFactsRefresh() {
 // ExcludeUnsupportedAccountModel records that OpenAI rejected modelSlug for the
 // account before admitting work. An in-flight catalogue read cannot overwrite
 // this newer observation.
-func (monitor *Monitor) ExcludeUnsupportedAccountModel(accountName store.AccountName, modelSlug string) {
+func (monitor *Monitor) ExcludeUnsupportedAccountModel(accountKey store.AccountKey, modelSlug string) {
 	monitor.mutex.Lock()
-	monitored := monitor.monitoredAccountLocked(accountName)
+	monitored, known := monitor.accounts[accountKey]
+	if !known {
+		monitor.mutex.Unlock()
+		return
+	}
 	monitored.fact.SupportedModelSlugs = slices.DeleteFunc(slices.Clone(monitored.fact.SupportedModelSlugs), func(slug string) bool { return slug == modelSlug })
 	monitor.mutex.Unlock()
 	monitor.RequestAccountRoutingFactsRefresh()
 }
 
 // RefreshAccountCredentialsAfterUnauthorized prepares the account for the next routed request.
-func (monitor *Monitor) RefreshAccountCredentialsAfterUnauthorized(accountName store.AccountName, rejected Credentials) error {
+func (monitor *Monitor) RefreshAccountCredentialsAfterUnauthorized(accountKey store.AccountKey, rejected Credentials) error {
 	pool, err := ReadPool(monitor.dataDirectory)
 	if err != nil {
 		return err
 	}
-	index := slices.IndexFunc(pool, func(account PoolAccount) bool { return store.AccountName(account.Name) == accountName })
+	index := slices.IndexFunc(pool, func(account PoolAccount) bool { return account.Key == accountKey })
 	if index < 0 {
 		return fmt.Errorf("account is no longer in the pool")
 	}
 	monitor.mutex.Lock()
-	monitored := monitor.monitoredAccountLocked(accountName, pool[index].Provider)
+	monitored := monitor.monitoredAccountLocked(pool[index])
 	monitor.mutex.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), accountReadTimeout)
 	refreshed, refreshErr := monitored.savedLogin.RefreshAfterUnauthorized(ctx, rejected)
@@ -294,26 +303,24 @@ func (monitor *Monitor) RefreshAccountCredentialsAfterUnauthorized(accountName s
 	monitor.mutex.Lock()
 	defer monitor.mutex.Unlock()
 	if refreshErr != nil {
-		if requiresSignIn(refreshErr) && monitored.fact.AccountName != "" && monitored.fact.Credentials == rejected {
+		if requiresSignIn(refreshErr) && monitored.fact.AccountKey != "" && monitored.fact.Credentials == rejected {
 			monitored.fact.AccountState = AccountSignInRequired
 			monitored.fact.AccountStateCause = refreshErr
 		}
 		return refreshErr
 	}
-	if monitored.fact.AccountName != "" {
+	if monitored.fact.AccountKey != "" {
 		monitored.fact.Credentials = refreshed
 	}
 	return nil
 }
 
-func (monitor *Monitor) monitoredAccountLocked(accountName store.AccountName, providers ...Provider) *monitoredAccount {
-	monitored, known := monitor.accounts[accountName]
-	if !known {
-		monitored = &monitoredAccount{savedLogin: newSavedLogin(filepath.Join(monitor.dataDirectory, string(accountName)), monitor.httpClient)}
-		if len(providers) > 0 {
-			monitored.savedLogin.provider = providers[0]
-		}
-		monitor.accounts[accountName] = monitored
+func (monitor *Monitor) monitoredAccountLocked(account PoolAccount) *monitoredAccount {
+	monitored, known := monitor.accounts[account.Key]
+	if !known || monitored.savedLogin.home != filepath.Join(monitor.dataDirectory, account.Folder) {
+		monitored = &monitoredAccount{savedLogin: newSavedLogin(filepath.Join(monitor.dataDirectory, account.Folder), monitor.httpClient)}
+		monitored.savedLogin.provider = account.Provider
+		monitor.accounts[account.Key] = monitored
 	}
 	return monitored
 }

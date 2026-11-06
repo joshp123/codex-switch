@@ -49,7 +49,7 @@ func readAccountReserve(accountDirectory string) (AccountReserve, error) {
 }
 
 // SetAccountReserve changes placement and cutover thresholds without a restart.
-func SetAccountReserve(dataDirectory, accountName string, reserve AccountReserve) (PoolAccount, error) {
+func SetAccountReserve(dataDirectory, target string, reserve AccountReserve) (PoolAccount, error) {
 	if err := reserve.validate(); err != nil {
 		return PoolAccount{}, err
 	}
@@ -60,13 +60,13 @@ func SetAccountReserve(dataDirectory, accountName string, reserve AccountReserve
 			return err
 		}
 		for _, account := range pool {
-			if account.Name == accountName || account.DisplayName == accountName {
+			if string(account.Key) == target || account.DisplayName == target {
 				selected = account
 				data := []byte(fmt.Sprintf("%d %d\n", reserve.SoftPercent, reserve.HardPercent))
-				return writeAtomicData(filepath.Join(dataDirectory, account.Name, reserveFilename), data)
+				return writeAtomicData(filepath.Join(dataDirectory, account.Folder, reserveFilename), data)
 			}
 		}
-		return fmt.Errorf("unknown account %s", accountName)
+		return fmt.Errorf("unknown account %s", target)
 	})
 	return selected, err
 }

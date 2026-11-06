@@ -26,7 +26,7 @@ func (monitor *Monitor) observeAccount(parent context.Context, account PoolAccou
 	if fact.Credentials.AccountID != account.AccountID {
 		fact = AccountRoutingFact{Credentials: Credentials{AccountID: account.AccountID}}
 	}
-	fact.AccountName = store.AccountName(account.Name)
+	fact.AccountKey = account.Key
 	fact.AccountStateCause = nil
 	startedAt := time.Now()
 	ctx, cancel := context.WithTimeout(parent, accountReadTimeout)
@@ -131,7 +131,7 @@ func (monitor *Monitor) readAllowanceSample(ctx context.Context, account PoolAcc
 	if err != nil {
 		return AllowanceSample{}, err
 	}
-	monitor.recordWeeklyAllowance(account.Name, sample)
+	monitor.recordWeeklyAllowance(account.Key, sample)
 	for _, window := range []*usageWindow{usage.RateLimit.Primary, usage.RateLimit.Secondary} {
 		if window == nil || *window.UsedPercent <= 0 || window.ResetAt == nil || *window.ResetAt <= 0 {
 			continue
@@ -149,16 +149,16 @@ func (monitor *Monitor) readAllowanceSample(ctx context.Context, account PoolAcc
 	return sample, nil
 }
 
-func (monitor *Monitor) recordWeeklyAllowance(accountName string, sample AllowanceSample) {
+func (monitor *Monitor) recordWeeklyAllowance(accountKey store.AccountKey, sample AllowanceSample) {
 	for _, window := range sample.Windows {
 		if window.DurationSeconds != 7*86400 || window.ModelID != "" || window.ModelName != "" || window.ResetsAt.IsZero() {
 			continue
 		}
 		if err := monitor.storeDatabase.RecordWeeklyAllowanceReading(store.WeeklyAllowanceReading{
-			AccountName: store.AccountName(accountName), ResetsAt: window.ResetsAt,
+			AccountKey: accountKey, ResetsAt: window.ResetsAt,
 			UsedPercent: window.UsedPercent, ObservedAt: sample.ObservedAt,
 		}); err != nil {
-			log.Printf("%s: could not record weekly allowance: %v", accountName, err)
+			log.Printf("%s: could not record weekly allowance: %v", accountKey, err)
 		}
 	}
 }

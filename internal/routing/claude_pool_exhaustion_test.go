@@ -19,10 +19,11 @@ func TestExhaustedClaudePoolNamesTheFirstResetThatFreesAnAccount(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer database.CloseStoreDatabase()
+	rememberTestAccounts(t, database, "claude-1", "claude-2", "claude-3")
 	now := time.Now().UTC().Truncate(time.Second)
-	claudeAccount := func(name store.AccountName, reserve int, windows ...accounts.ReportedWindow) accounts.AccountRoutingFact {
+	claudeAccount := func(name store.AccountKey, reserve int, windows ...accounts.ReportedWindow) accounts.AccountRoutingFact {
 		return accounts.AccountRoutingFact{
-			Provider: accounts.ProviderClaude, AccountName: name, DisplayName: string(name), AccountState: accounts.AccountReady,
+			Provider: accounts.ProviderClaude, AccountKey: name, DisplayName: string(name), AccountState: accounts.AccountReady,
 			Credentials:     accounts.Credentials{AccountID: string(name), AccessToken: "test"},
 			Reserve:         accounts.AccountReserve{SoftPercent: reserve, HardPercent: reserve},
 			AllowanceSample: accounts.AllowanceSample{Windows: windows},

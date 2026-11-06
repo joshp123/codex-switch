@@ -31,7 +31,7 @@ func (observer *terminalResponseObserver) recordRequestOutcome(request *observed
 	if request.warmup || observer.requestCounters == nil {
 		return
 	}
-	if err := observer.requestCounters.RecordModelRequestOutcome(observer.accountName, request.admittedAt, outcome); err != nil {
+	if err := observer.requestCounters.RecordModelRequestOutcome(observer.accountKey, request.admittedAt, outcome); err != nil {
 		log.Printf("%s: could not record the request count: %v", observer.describe(), err)
 	}
 }

@@ -31,20 +31,20 @@ func (ledger *UsageLedger) refreshOpenAIDailyTokenHistories(ctx context.Context)
 			defer workers.Done()
 			requestContext, cancel := context.WithTimeout(ctx, 15*time.Second)
 			defer cancel()
-			profileSource := accounts.NewOpenAIDailyTokenSource(filepath.Join(ledger.dataDirectory, account.Name), ledger.upstreamOrigin, ledger.httpClient)
+			profileSource := accounts.NewOpenAIDailyTokenSource(filepath.Join(ledger.dataDirectory, account.Folder), ledger.upstreamOrigin, ledger.httpClient)
 			history, err := profileSource.Read(requestContext)
 			if err != nil {
 				if ctx.Err() == nil {
-					ledger.logOnChange(account.Name, fmt.Sprintf("%s: could not read OpenAI's daily token history: %v", account.DisplayName, err))
+					ledger.logOnChange(string(account.Key), fmt.Sprintf("%s: could not read OpenAI's daily token history: %v", account.DisplayName, err))
 				}
 				return
 			}
 			if history.AccountID != account.AccountID {
-				ledger.logOnChange(account.Name, fmt.Sprintf("%s: OpenAI's daily token history belongs to a different account than its saved login", account.DisplayName))
+				ledger.logOnChange(string(account.Key), fmt.Sprintf("%s: OpenAI's daily token history belongs to a different account than its saved login", account.DisplayName))
 				return
 			}
 			if _, err = ledger.saveOpenAIDailyTokenHistory(history); err != nil {
-				ledger.logOnChange(account.Name, fmt.Sprintf("%s: could not save OpenAI's daily token history: %v", account.DisplayName, err))
+				ledger.logOnChange(string(account.Key), fmt.Sprintf("%s: could not save OpenAI's daily token history: %v", account.DisplayName, err))
 				return
 			}
 			lastDate := time.Now().UTC()
@@ -52,19 +52,19 @@ func (ledger *UsageLedger) refreshOpenAIDailyTokenHistories(ctx context.Context)
 			creditsAccountID, credits, err := profileSource.ReadDailyModelCredits(requestContext, firstDate, lastDate)
 			if err != nil {
 				if ctx.Err() == nil {
-					ledger.logOnChange(account.Name, fmt.Sprintf("%s: could not read OpenAI's daily usage by model: %v", account.DisplayName, err))
+					ledger.logOnChange(string(account.Key), fmt.Sprintf("%s: could not read OpenAI's daily usage by model: %v", account.DisplayName, err))
 				}
 				return
 			}
 			if creditsAccountID != account.AccountID {
-				ledger.logOnChange(account.Name, fmt.Sprintf("%s: OpenAI's daily usage by model belongs to a different account than its saved login", account.DisplayName))
+				ledger.logOnChange(string(account.Key), fmt.Sprintf("%s: OpenAI's daily usage by model belongs to a different account than its saved login", account.DisplayName))
 				return
 			}
 			if err = ledger.saveOpenAIModelDayCredits(account.AccountID, credits); err != nil {
-				ledger.logOnChange(account.Name, fmt.Sprintf("%s: could not save OpenAI's daily usage by model: %v", account.DisplayName, err))
+				ledger.logOnChange(string(account.Key), fmt.Sprintf("%s: could not save OpenAI's daily usage by model: %v", account.DisplayName, err))
 				return
 			}
-			ledger.logOnChange(account.Name, "")
+			ledger.logOnChange(string(account.Key), "")
 		}(account)
 	}
 	workers.Wait()

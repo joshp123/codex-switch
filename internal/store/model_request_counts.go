@@ -3,7 +3,7 @@ package store
 import "time"
 
 type ModelRequestCounts struct {
-	AccountName AccountName
+	AccountKey  AccountKey
 	Requests    int64
 	Successful  int64
 	Failed      int64
@@ -24,7 +24,11 @@ func (database *StoreDatabase) StartModelRequestObservation(now time.Time) error
 	return err
 }
 
-func (database *StoreDatabase) RecordModelRequestOutcome(account AccountName, admittedAt time.Time, outcome ModelRequestOutcome) error {
+func (database *StoreDatabase) RecordModelRequestOutcome(account AccountKey, admittedAt time.Time, outcome ModelRequestOutcome) error {
+	folder, err := database.accountFolder(account)
+	if err != nil {
+		return err
+	}
 	day := admittedAt.UTC().Format("2006-01-02")
 	var requests, successful, failed, interrupted int
 	switch outcome {
@@ -37,10 +41,10 @@ func (database *StoreDatabase) RecordModelRequestOutcome(account AccountName, ad
 	case ModelRequestInterrupted:
 		interrupted = 1
 	}
-	_, err := database.sqlDatabase.Exec(`INSERT INTO model_request_counts (account_name, admission_date, requests, successful, failed, interrupted)
-	VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(account_name, admission_date) DO UPDATE SET
+	_, err = database.sqlDatabase.Exec(`INSERT INTO model_request_counts (account_name, account_key, admission_date, requests, successful, failed, interrupted)
+	VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(account_name, admission_date) DO UPDATE SET account_key = excluded.account_key,
 	requests = requests + excluded.requests, successful = successful + excluded.successful,
-	failed = failed + excluded.failed, interrupted = interrupted + excluded.interrupted`, account, day, requests, successful, failed, interrupted)
+	failed = failed + excluded.failed, interrupted = interrupted + excluded.interrupted`, folder, account, day, requests, successful, failed, interrupted)
 	return err
 }
 
@@ -53,7 +57,8 @@ func (database *StoreDatabase) ReadModelRequestCounts() (time.Time, []ModelReque
 	if startedAt == 0 {
 		return time.Time{}, nil, nil
 	}
-	rows, err := database.sqlDatabase.Query(`SELECT account_name, SUM(requests), SUM(successful), SUM(failed), SUM(interrupted) FROM model_request_counts GROUP BY account_name ORDER BY account_name`)
+	accountKey := StoredAccountKey("model_request_counts")
+	rows, err := database.sqlDatabase.Query(`SELECT ` + accountKey + `, SUM(requests), SUM(successful), SUM(failed), SUM(interrupted) FROM model_request_counts GROUP BY 1 ORDER BY 1`)
 	if err != nil {
 		return time.Time{}, nil, err
 	}
@@ -61,7 +66,7 @@ func (database *StoreDatabase) ReadModelRequestCounts() (time.Time, []ModelReque
 	var counts []ModelRequestCounts
 	for rows.Next() {
 		var count ModelRequestCounts
-		if err := rows.Scan(&count.AccountName, &count.Requests, &count.Successful, &count.Failed, &count.Interrupted); err != nil {
+		if err := rows.Scan(&count.AccountKey, &count.Requests, &count.Successful, &count.Failed, &count.Interrupted); err != nil {
 			return time.Time{}, nil, err
 		}
 		counts = append(counts, count)

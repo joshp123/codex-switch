@@ -92,6 +92,14 @@ func serveRelay(tcpListenAddress string) {
 	if err := storeDatabase.StartModelRequestObservation(time.Now().UTC()); err != nil {
 		log.Fatal(err)
 	}
+	// An earlier build records an account by its folder alone. Its records take
+	// the account's key before this process serves, and the account monitor
+	// does the same for records the previous proxy writes while it drains.
+	if filled, err := accountapi.RecordAccountKeys(dataDir(), storeDatabase); err != nil {
+		log.Printf("could not record account keys: %v", err)
+	} else if filled > 0 {
+		log.Printf("recorded account keys on %d records an earlier build wrote", filled)
+	}
 
 	upstreamTransport := relay.NewUpstreamTransport()
 	accountMonitor := accountapi.NewMonitor(dataDir(), upstreamOrigin, codexstate.FindCodexExecutable(), &http.Client{Timeout: 30 * time.Second, Transport: upstreamTransport}, storeDatabase)

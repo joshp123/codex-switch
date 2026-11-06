@@ -10,9 +10,9 @@ import (
 func TestWeeklyAllowanceBurn(t *testing.T) {
 	now := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
 	day := 24 * time.Hour
-	reading := func(account AccountName, daysAgo float64, window int, used float64) WeeklyAllowanceReading {
+	reading := func(account AccountKey, daysAgo float64, window int, used float64) WeeklyAllowanceReading {
 		return WeeklyAllowanceReading{
-			AccountName: account,
+			AccountKey:  account,
 			ObservedAt:  now.Add(-time.Duration(daysAgo * float64(day))),
 			ResetsAt:    now.Add(time.Duration(window) * 7 * day),
 			UsedPercent: used,
@@ -37,7 +37,7 @@ func TestWeeklyAllowanceBurn(t *testing.T) {
 			name: "a reset reported a minute apart is the same window",
 			readings: []WeeklyAllowanceReading{
 				reading("first", 2, 1, 80),
-				{AccountName: "first", ObservedAt: now.Add(-day), ResetsAt: now.Add(7*day - time.Minute), UsedPercent: 85},
+				{AccountKey: "first", ObservedAt: now.Add(-day), ResetsAt: now.Add(7*day - time.Minute), UsedPercent: 85},
 				reading("first", 0, 1, 90),
 			},
 			want: 0.1 * 7 / 2, visible: true,
@@ -116,6 +116,7 @@ func TestWeeklyAllowanceBurn(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer database.CloseStoreDatabase()
+			rememberTestAccounts(t, database, "first", "second")
 			for _, sample := range test.readings {
 				if err := database.RecordWeeklyAllowanceReading(sample); err != nil {
 					t.Fatal(err)
@@ -132,7 +133,7 @@ func TestWeeklyAllowanceBurn(t *testing.T) {
 			if storedReadings != wantStoredReadings {
 				t.Fatalf("stored readings = %d, want %d", storedReadings, wantStoredReadings)
 			}
-			burn, err := database.ReadWeeklyAllowanceBurn([]AccountName{"first", "second"}, now)
+			burn, err := database.ReadWeeklyAllowanceBurn([]AccountKey{"first", "second"}, now)
 			if err != nil {
 				t.Fatal(err)
 			}

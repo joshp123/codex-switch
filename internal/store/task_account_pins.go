@@ -12,9 +12,9 @@ func (database *StoreDatabase) ReadTaskAccountPin(taskID TaskID) (TaskAccountPin
 	var pin TaskAccountPin
 	var pinnedAtUnixNano int64
 	err := database.sqlDatabase.QueryRow(`
-SELECT codex_task_id, account_name, pinned_at_unix_nano
+SELECT codex_task_id, `+StoredAccountKey("task_account_pins")+`, pinned_at_unix_nano
 FROM task_account_pins
-WHERE codex_task_id = ?`, taskID).Scan(&pin.TaskID, &pin.AccountName, &pinnedAtUnixNano)
+WHERE codex_task_id = ?`, taskID).Scan(&pin.TaskID, &pin.AccountKey, &pinnedAtUnixNano)
 	if errors.Is(err, sql.ErrNoRows) {
 		return TaskAccountPin{}, false, nil
 	}
@@ -27,23 +27,27 @@ WHERE codex_task_id = ?`, taskID).Scan(&pin.TaskID, &pin.AccountName, &pinnedAtU
 
 // PinTaskAccountIfAbsent returns the winner when two proxy generations first see the same task.
 func (database *StoreDatabase) PinTaskAccountIfAbsent(candidate TaskAccountPin) (TaskAccountPin, error) {
+	folder, err := database.accountFolder(candidate.AccountKey)
+	if err != nil {
+		return TaskAccountPin{}, err
+	}
 	transaction, err := database.sqlDatabase.Begin()
 	if err != nil {
 		return TaskAccountPin{}, fmt.Errorf("begin task account pin: %w", err)
 	}
 	defer transaction.Rollback()
 	if _, err := transaction.Exec(`
-INSERT INTO task_account_pins (codex_task_id, account_name, pinned_at_unix_nano)
-VALUES (?, ?, ?)
-ON CONFLICT(codex_task_id) DO NOTHING`, candidate.TaskID, candidate.AccountName, candidate.PinnedAt.UTC().UnixNano()); err != nil {
+INSERT INTO task_account_pins (codex_task_id, account_name, account_key, pinned_at_unix_nano)
+VALUES (?, ?, ?, ?)
+ON CONFLICT(codex_task_id) DO NOTHING`, candidate.TaskID, folder, candidate.AccountKey, candidate.PinnedAt.UTC().UnixNano()); err != nil {
 		return TaskAccountPin{}, fmt.Errorf("insert task account pin: %w", err)
 	}
 	var winner TaskAccountPin
 	var pinnedAtUnixNano int64
 	if err := transaction.QueryRow(`
-SELECT codex_task_id, account_name, pinned_at_unix_nano
+SELECT codex_task_id, `+StoredAccountKey("task_account_pins")+`, pinned_at_unix_nano
 FROM task_account_pins
-WHERE codex_task_id = ?`, candidate.TaskID).Scan(&winner.TaskID, &winner.AccountName, &pinnedAtUnixNano); err != nil {
+WHERE codex_task_id = ?`, candidate.TaskID).Scan(&winner.TaskID, &winner.AccountKey, &pinnedAtUnixNano); err != nil {
 		return TaskAccountPin{}, fmt.Errorf("read inserted task account pin: %w", err)
 	}
 	winner.PinnedAt = time.Unix(0, pinnedAtUnixNano).UTC()
@@ -54,12 +58,16 @@ WHERE codex_task_id = ?`, candidate.TaskID).Scan(&winner.TaskID, &winner.Account
 }
 
 // CompareAndSwapTaskAccountPin makes a concurrent exhaustion report a no-op after another process moves the pin.
-func (database *StoreDatabase) CompareAndSwapTaskAccountPin(taskID TaskID, servedAccountName AccountName, nextAccountName AccountName, movedAt time.Time) (bool, error) {
+func (database *StoreDatabase) CompareAndSwapTaskAccountPin(taskID TaskID, servedAccountKey AccountKey, nextAccountKey AccountKey, movedAt time.Time) (bool, error) {
+	folder, err := database.accountFolder(nextAccountKey)
+	if err != nil {
+		return false, err
+	}
 	result, err := database.sqlDatabase.Exec(`
 UPDATE task_account_pins
-SET account_name = ?, pinned_at_unix_nano = ?
-WHERE codex_task_id = ? AND account_name = ?`,
-		nextAccountName, movedAt.UTC().UnixNano(), taskID, servedAccountName)
+SET account_name = ?, account_key = ?, pinned_at_unix_nano = ?
+WHERE codex_task_id = ? AND `+StoredAccountKey("task_account_pins")+` = ?`,
+		folder, nextAccountKey, movedAt.UTC().UnixNano(), taskID, servedAccountKey)
 	if err != nil {
 		return false, fmt.Errorf("move exhausted task pin: %w", err)
 	}

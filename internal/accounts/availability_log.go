@@ -12,7 +12,7 @@ import (
 // failures of the same kind do not count as changes; the first observation
 // after the proxy starts always does.
 func describeAccountAvailabilityChange(previous, current AccountRoutingFact, email string) string {
-	firstObservation := previous.AccountName == ""
+	firstObservation := previous.AccountKey == ""
 	stateChanged := previous.AccountState != current.AccountState
 	modelListChanged := (previous.SupportedModelSlugs == nil) != (current.SupportedModelSlugs == nil)
 	allowanceReadChanged := allowanceReadFailing(previous) != allowanceReadFailing(current)

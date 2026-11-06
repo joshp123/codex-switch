@@ -12,10 +12,14 @@ import (
 
 // ObserveClaudeResponse retains all reported windows, including a model bucket
 // absent from the next side request. Account state uses shared windows only.
-func (monitor *Monitor) ObserveClaudeResponse(name store.AccountName, model string, headers http.Header, status int) {
+func (monitor *Monitor) ObserveClaudeResponse(key store.AccountKey, model string, headers http.Header, status int) {
 	now := time.Now()
 	monitor.mutex.Lock()
-	monitored := monitor.monitoredAccountLocked(name, ProviderClaude)
+	monitored, known := monitor.accounts[key]
+	if !known {
+		monitor.mutex.Unlock()
+		return
+	}
 	fact := monitored.fact
 	fact.Provider = ProviderClaude
 	incoming := AllowanceSample{ObservedAt: now}
@@ -65,7 +69,7 @@ func (monitor *Monitor) ObserveClaudeResponse(name store.AccountName, model stri
 			incoming.Windows = append(incoming.Windows, window)
 		}
 	}
-	monitor.recordWeeklyAllowance(string(name), incoming)
+	monitor.recordWeeklyAllowance(key, incoming)
 	fact.AllowanceSample = mergeClaudeAllowance(fact.AllowanceSample, incoming)
 	fact.ClaudeRestrictions = mergeClaudeRestrictions(nil, fact.ClaudeRestrictions)
 	if status == http.StatusTooManyRequests {
@@ -80,7 +84,7 @@ func (monitor *Monitor) ObserveClaudeResponse(name store.AccountName, model stri
 	if availabilityChange != "" {
 		log.Print(availabilityChange)
 	}
-	if err := monitor.saveClaudeAllowanceCache(string(name), claudeAllowanceCache{Sample: fact.AllowanceSample, Restrictions: fact.ClaudeRestrictions}); err != nil {
+	if err := monitor.saveClaudeAllowanceCache(monitored.savedLogin.home, claudeAllowanceCache{Sample: fact.AllowanceSample, Restrictions: fact.ClaudeRestrictions}); err != nil {
 		log.Printf("%s: could not save Claude limits: %v", fact.DisplayName, err)
 	}
 }

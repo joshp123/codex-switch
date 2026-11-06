@@ -2,8 +2,10 @@ package store
 
 import "time"
 
-// AccountName keeps durable local identity separate from provider account IDs and emails.
-type AccountName string
+// AccountKey identifies a subscription account by its provider and email,
+// such as "chatgpt:you@example.com", so every Mac records an account under the
+// same key.
+type AccountKey string
 
 // TaskID makes the affinity key impossible to swap with another string identifier.
 type TaskID string
@@ -18,9 +20,9 @@ const (
 
 // TaskAccountPin is durable so draining proxy generations agree on the next account.
 type TaskAccountPin struct {
-	TaskID      TaskID
-	AccountName AccountName
-	PinnedAt    time.Time
+	TaskID     TaskID
+	AccountKey AccountKey
+	PinnedAt   time.Time
 }
 
 // CompletedResponseID is the provider identity used to record one completion exactly once.
@@ -30,7 +32,7 @@ type CompletedResponseID string
 type CompletedResponseRecord struct {
 	CompletedResponseID   CompletedResponseID
 	TaskID                TaskID
-	AccountName           AccountName
+	AccountKey            AccountKey
 	ModelSlug             string
 	HarnessMode           string
 	InputTokens           int64

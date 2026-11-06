@@ -31,7 +31,7 @@ func (handler *TrafficRelayHandler) observeRejectedResponse(routedRequest *route
 		return nil
 	}
 	if upstreamResponse.StatusCode == http.StatusUnauthorized {
-		handler.taskRouter.ReportUnauthorizedTurn(routedRequest.routeDecision.AccountName, routedRequest.routeDecision.Credentials)
+		handler.taskRouter.ReportUnauthorizedTurn(routedRequest.routeDecision.AccountKey, routedRequest.routeDecision.Credentials)
 	}
 	responseObserver := routedRequest.responseObserver
 	responseObserver.settleModelRequest("", store.ModelRequestFailed)

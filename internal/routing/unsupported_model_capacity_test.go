@@ -27,9 +27,10 @@ func TestUnsupportedModelRetryEntersCapacityWait(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer database.CloseStoreDatabase()
+			rememberTestAccounts(t, database, "free", "pro")
 			facts := capacityWaitFacts{
-				{AccountName: "free", Credentials: accounts.Credentials{AccessToken: "test", AccountID: "free"}, AccountState: accounts.AccountReady, SupportedModelSlugs: test.rejectedModels},
-				{AccountName: "pro", Credentials: accounts.Credentials{AccessToken: "test", AccountID: "pro"}, AccountState: accounts.AccountLimited, SupportedModelSlugs: test.otherModels},
+				{AccountKey: "free", Credentials: accounts.Credentials{AccessToken: "test", AccountID: "free"}, AccountState: accounts.AccountReady, SupportedModelSlugs: test.rejectedModels},
+				{AccountKey: "pro", Credentials: accounts.Credentials{AccessToken: "test", AccountID: "pro"}, AccountState: accounts.AccountLimited, SupportedModelSlugs: test.otherModels},
 			}
 			router := CreateTaskRouter(database, facts)
 			if got := router.ReportUnsupportedModel("task", "free", "astra"); got != test.retry {
@@ -51,13 +52,13 @@ func (facts capacityWaitFacts) ReadAccountRoutingFacts() ([]accounts.AccountRout
 	return facts, nil
 }
 func (facts capacityWaitFacts) RequestAccountRoutingFactsRefresh() {}
-func (facts capacityWaitFacts) RefreshAccountCredentialsAfterUnauthorized(store.AccountName, accounts.Credentials) error {
+func (facts capacityWaitFacts) RefreshAccountCredentialsAfterUnauthorized(store.AccountKey, accounts.Credentials) error {
 	return nil
 }
 
-func (facts capacityWaitFacts) ExcludeUnsupportedAccountModel(name store.AccountName, modelSlug string) {
+func (facts capacityWaitFacts) ExcludeUnsupportedAccountModel(name store.AccountKey, modelSlug string) {
 	for index := range facts {
-		if facts[index].AccountName == name {
+		if facts[index].AccountKey == name {
 			facts[index].SupportedModelSlugs = slices.DeleteFunc(slices.Clone(facts[index].SupportedModelSlugs), func(slug string) bool { return slug == modelSlug })
 		}
 	}

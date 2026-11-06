@@ -13,9 +13,9 @@ import (
 )
 
 // SignIn runs Codex's browser login into a staging directory, then adds the
-// signed-in account to the pool. With accountName set, it replaces that
+// signed-in account to the pool. With replacing set, it replaces that
 // account's login instead, and only if the browser signed in to the same user.
-func SignIn(dataDirectory, codexExecutable, accountName string) (PoolAccount, error) {
+func SignIn(dataDirectory, codexExecutable string, replacing store.AccountKey) (PoolAccount, error) {
 	if err := os.MkdirAll(dataDirectory, 0o700); err != nil {
 		return PoolAccount{}, err
 	}
@@ -38,14 +38,14 @@ func SignIn(dataDirectory, codexExecutable, accountName string) (PoolAccount, er
 	var published PoolAccount
 	err = withPoolLock(dataDirectory, func() error {
 		var publishErr error
-		published, publishErr = publishLogin(dataDirectory, staging, accountName, signedIn)
+		published, publishErr = publishLogin(dataDirectory, staging, replacing, signedIn)
 		return publishErr
 	})
 	if err != nil {
 		_ = trash(staging)
 		return PoolAccount{}, err
 	}
-	if accountName != "" {
+	if replacing != "" {
 		if err := trash(staging); err != nil {
 			log.Printf("warning: temporary login files remain at %s: %v", staging, err)
 		}
@@ -53,21 +53,21 @@ func SignIn(dataDirectory, codexExecutable, accountName string) (PoolAccount, er
 	return published, nil
 }
 
-func publishLogin(dataDirectory, staging, accountName string, signedIn PoolAccount) (PoolAccount, error) {
+func publishLogin(dataDirectory, staging string, replacing store.AccountKey, signedIn PoolAccount) (PoolAccount, error) {
 	existing, err := ReadPool(dataDirectory)
 	if err != nil {
 		return PoolAccount{}, err
 	}
-	if accountName != "" {
+	if replacing != "" {
 		var selected *PoolAccount
 		for index := range existing {
-			if existing[index].Name == accountName {
+			if existing[index].Key == replacing {
 				selected = &existing[index]
 				break
 			}
 		}
 		if selected == nil {
-			return PoolAccount{}, fmt.Errorf("unknown account %s", accountName)
+			return PoolAccount{}, fmt.Errorf("unknown account %s", replacing)
 		}
 		if signedIn.Provider != selected.Provider || signedIn.ID != selected.ID {
 			providerName := "ChatGPT"
@@ -76,24 +76,20 @@ func publishLogin(dataDirectory, staging, accountName string, signedIn PoolAccou
 			}
 			return PoolAccount{}, fmt.Errorf("the browser signed in to a different %s account; %s was not changed", providerName, selected.DisplayName)
 		}
-		active := filepath.Join(dataDirectory, accountName)
+		active := filepath.Join(dataDirectory, selected.Folder)
 		if err := withAuthLock(active, func() error {
 			return replaceAuthFile(active, filepath.Join(staging, "auth.json"))
 		}); err != nil {
 			return PoolAccount{}, err
 		}
-		signedIn.Name = selected.Name
+		signedIn.Folder = selected.Folder
 		signedIn.Index = selected.Index
 		return signedIn, nil
 	}
 
 	for _, account := range existing {
-		if account.Provider == signedIn.Provider && account.ID == signedIn.ID {
-			providerName := "ChatGPT"
-			if signedIn.Provider == ProviderClaude {
-				providerName = "Claude"
-			}
-			return PoolAccount{}, fmt.Errorf("the same %s account was selected more than once", providerName)
+		if account.Key == signedIn.Key || account.Provider == signedIn.Provider && account.ID == signedIn.ID {
+			return PoolAccount{}, fmt.Errorf("%s is already signed in as %s; to sign it in again, run codex-switch login \"%s\"", signedIn.Email, account.DisplayName, account.DisplayName)
 		}
 	}
 	database, err := store.OpenStoreDatabase(filepath.Join(dataDirectory, "codex-switch.db"))
@@ -110,12 +106,11 @@ func publishLogin(dataDirectory, staging, accountName string, signedIn PoolAccou
 	if err != nil {
 		return PoolAccount{}, err
 	}
-	name := fmt.Sprintf("account-%d", index)
-	signedIn.Name = name
+	signedIn.Folder = fmt.Sprintf("account-%d", index)
 	if err := rememberPoolAccount(database, signedIn); err != nil {
 		return PoolAccount{}, err
 	}
-	if err := os.Rename(staging, filepath.Join(dataDirectory, name)); err != nil {
+	if err := os.Rename(staging, filepath.Join(dataDirectory, signedIn.Folder)); err != nil {
 		return PoolAccount{}, err
 	}
 	signedIn.Index = index
@@ -167,10 +162,10 @@ func replaceAuthFileWithRename(accountDirectory, stagedPath string, rename func(
 	return rename(temporaryPath, filepath.Join(accountDirectory, "auth.json"))
 }
 
-// RemoveAccount takes the account out of the pool, forgets its task pins and
-// moves its saved login to the Trash. It returns the removed account and how
-// many task pins it had.
-func RemoveAccount(dataDirectory, accountName string) (PoolAccount, int64, error) {
+// RemoveAccount takes the account named by its display name or key out of the
+// pool, forgets its task pins and moves its saved login to the Trash. It
+// returns the removed account and how many task pins it had.
+func RemoveAccount(dataDirectory, target string) (PoolAccount, int64, error) {
 	var selected *PoolAccount
 	var removed string
 	var removedPins int64
@@ -180,16 +175,16 @@ func RemoveAccount(dataDirectory, accountName string) (PoolAccount, int64, error
 			return err
 		}
 		for index := range pool {
-			if pool[index].Name == accountName || pool[index].DisplayName == accountName {
+			if string(pool[index].Key) == target || pool[index].DisplayName == target {
 				selected = &pool[index]
 				break
 			}
 		}
 		if selected == nil {
-			return fmt.Errorf("unknown account %s", accountName)
+			return fmt.Errorf("unknown account %s", target)
 		}
-		removed = filepath.Join(dataDirectory, fmt.Sprintf(".remove-%s-%d", selected.Name, time.Now().Unix()))
-		active := filepath.Join(dataDirectory, selected.Name)
+		removed = filepath.Join(dataDirectory, fmt.Sprintf(".remove-%s-%d", selected.Folder, time.Now().Unix()))
+		active := filepath.Join(dataDirectory, selected.Folder)
 		if err := withAuthLock(active, func() error {
 			return os.Rename(active, removed)
 		}); err != nil {
@@ -205,7 +200,7 @@ func RemoveAccount(dataDirectory, accountName string) (PoolAccount, int64, error
 				return errors.Join(err, restoreAccountAfterFailedRemoval(removed, active))
 			}
 		}
-		removedPins, err = database.RemoveAccountRoutingState(store.AccountName(selected.Name))
+		removedPins, err = database.RemoveAccountRoutingState(selected.Key)
 		closeErr := database.CloseStoreDatabase()
 		if err != nil || closeErr != nil {
 			return errors.Join(err, closeErr, restoreAccountAfterFailedRemoval(removed, active))
@@ -223,8 +218,52 @@ func RemoveAccount(dataDirectory, accountName string) (PoolAccount, int64, error
 
 func rememberPoolAccount(database *store.StoreDatabase, account PoolAccount) error {
 	return database.RememberAccountIdentity(store.AccountIdentity{
-		AccountName: store.AccountName(account.Name), ProviderAccountID: account.AccountID, Email: account.Email,
+		AccountFolder: account.Folder, AccountKey: account.Key, ProviderAccountID: account.AccountID, Email: account.Email,
 	})
+}
+
+// RecordAccountKeys records which folder holds which account, gives accounts
+// recorded by earlier builds their key, and fills the key into records that
+// earlier builds wrote with only a folder name. It returns how many records it
+// filled. The proxy runs it whenever it reads the pool: an earlier build may
+// write records while an update switches proxies, or after a rollback.
+func RecordAccountKeys(dataDirectory string, database *store.StoreDatabase) (int64, error) {
+	pool, err := ReadPool(dataDirectory)
+	if err != nil {
+		return 0, err
+	}
+	return recordAccountKeys(pool, database)
+}
+
+func recordAccountKeys(pool []PoolAccount, database *store.StoreDatabase) (int64, error) {
+	identities, err := database.ReadAccountIdentities()
+	if err != nil {
+		return 0, err
+	}
+	recorded := make(map[string]store.AccountIdentity, len(identities))
+	for _, identity := range identities {
+		recorded[identity.AccountFolder] = identity
+	}
+	for _, account := range pool {
+		identity, known := recorded[account.Folder]
+		if known && identity.AccountKey == account.Key && identity.Email == account.Email {
+			continue
+		}
+		if err := rememberPoolAccount(database, account); err != nil {
+			return 0, err
+		}
+		delete(recorded, account.Folder)
+	}
+	for _, identity := range recorded {
+		if identity.AccountKey != "" {
+			continue
+		}
+		identity.AccountKey = AccountKeyFor(providerOfAccountID(identity.ProviderAccountID), identity.Email)
+		if err := database.RememberAccountIdentity(identity); err != nil {
+			return 0, err
+		}
+	}
+	return database.FillAccountKeys()
 }
 
 func restoreAccountAfterFailedRemoval(removedPath, activePath string) error {

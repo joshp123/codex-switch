@@ -569,11 +569,30 @@ class TunnelPair:
 # Evidence
 
 
+def account_key(folder):
+    """The key the proxy records an account under, from the login saved in its folder: its provider and email."""
+    path = RUN / 'data' / folder / 'auth.json'
+    if not path.exists():
+        return None
+    auth = json.loads(path.read_text())
+    if auth.get('provider') == 'claude':
+        return 'claude:' + auth['email'].lower()
+    claims = json.loads(base64.urlsafe_b64decode(auth['tokens']['id_token'].split('.')[1] + '==='))
+    return 'chatgpt:' + claims['email'].lower()
+
+
+def account_folder(key):
+    """The folder of the signed-in account with this key; the fake providers and the test name accounts by folder."""
+    return next((folder.name for folder in (RUN / 'data').glob('account-*') if account_key(folder.name) == key), key)
+
+
 def database_rows(task):
-    """Completed responses the proxy recorded for a task, oldest first."""
+    """Completed responses the proxy recorded for a task, oldest first, each with the folder of the account its key
+    names. A response the published release recorded has only its folder until a later build gives it its key."""
     with sqlite3.connect(f'file:{RUN / "data/codex-switch.db"}?mode=ro', uri=True) as database:
-        return database.execute('SELECT account_name, input_tokens, cached_input_tokens, output_tokens, reasoning_tokens '
+        rows = database.execute('SELECT account_key, account_name, input_tokens, cached_input_tokens, output_tokens, reasoning_tokens '
                                 'FROM completed_responses WHERE codex_task_id = ? ORDER BY completed_at_unix_nano', (task,)).fetchall()
+    return [(account_folder(key) if key else folder, *tokens) for key, folder, *tokens in rows]
 
 
 def database_row_count():
@@ -582,9 +601,13 @@ def database_row_count():
 
 
 def pinned_account(task):
+    """The folder of the account the task is pinned to, by the key in its pin. A pin the published release wrote has
+    only its folder until a later build gives it its key."""
     with sqlite3.connect(f'file:{RUN / "data/codex-switch.db"}?mode=ro', uri=True) as database:
-        row = database.execute('SELECT account_name FROM task_account_pins WHERE codex_task_id = ?', (task,)).fetchone()
-    return row[0] if row else None
+        row = database.execute('SELECT account_key, account_name FROM task_account_pins WHERE codex_task_id = ?', (task,)).fetchone()
+    if not row:
+        return None
+    return account_folder(row[0]) if row[0] else row[1]
 
 
 def fake_provider_events(event, **only):
@@ -651,7 +674,7 @@ def proxy_command(*arguments):
     return result.stdout
 
 
-def account_keys_by_name():
+def account_keys_by_display_name():
     return dict(line.split('\t')[:2] for line in proxy_command('accounts').splitlines() if '\t' in line)
 
 

@@ -224,13 +224,13 @@ func (snapshots *menuSnapshots) compose(ctx context.Context) error {
 
 func readProviderBurns(database *store.StoreDatabase, snapshot *menupb.MenuSnapshot) error {
 	for _, provider := range []menupb.Provider{menupb.Provider_PROVIDER_CHATGPT, menupb.Provider_PROVIDER_CLAUDE} {
-		var accountNames []store.AccountName
+		var accountKeys []store.AccountKey
 		for _, account := range snapshot.Accounts {
 			if account.Provider == provider {
-				accountNames = append(accountNames, store.AccountName(account.Key))
+				accountKeys = append(accountKeys, store.AccountKey(account.Key))
 			}
 		}
-		burn, err := database.ReadWeeklyAllowanceBurn(accountNames, snapshot.GeneratedAt.AsTime())
+		burn, err := database.ReadWeeklyAllowanceBurn(accountKeys, snapshot.GeneratedAt.AsTime())
 		if err != nil {
 			return fmt.Errorf("read weekly allowance burn: %w", err)
 		}
@@ -395,15 +395,15 @@ func readServingMenuSnapshot(dataDirectory string, router *routing.TaskRouter, m
 	if len(facts) != len(installed) {
 		return nil, fmt.Errorf("account observations are not ready")
 	}
-	identities := map[store.AccountName]accountapi.PoolAccount{}
+	identities := map[store.AccountKey]accountapi.PoolAccount{}
 	for _, account := range installed {
-		identities[store.AccountName(account.Name)] = account
+		identities[account.Key] = account
 	}
 	snapshot := &menupb.MenuSnapshot{GeneratedAt: timestamppb.Now(), Connection: &menupb.Connection{}}
 	for _, fact := range facts {
-		identity := identities[fact.AccountName]
+		identity := identities[fact.AccountKey]
 		sample := fact.AllowanceSample
-		account := &menupb.Account{Key: string(fact.AccountName), AccountNumber: uint32(identity.ProviderNumber), Email: identity.Email, Plan: sample.Plan, State: menuAccountState(fact.AccountState), Usable: unavailableReasons[fact.AccountName] == "", UnavailableReason: unavailableReasons[fact.AccountName], OffersConfiguredModel: modelSlug == "" || slices.Contains(fact.SupportedModelSlugs, modelSlug)}
+		account := &menupb.Account{Key: string(fact.AccountKey), AccountNumber: uint32(identity.ProviderNumber), Email: identity.Email, Plan: sample.Plan, State: menuAccountState(fact.AccountState), Usable: unavailableReasons[fact.AccountKey] == "", UnavailableReason: unavailableReasons[fact.AccountKey], OffersConfiguredModel: modelSlug == "" || slices.Contains(fact.SupportedModelSlugs, modelSlug)}
 		if account.Usable {
 			account.ReserveStatus = accountapi.ReserveStatus(fact, snapshot.GeneratedAt.AsTime())
 		}

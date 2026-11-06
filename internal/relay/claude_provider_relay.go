@@ -17,7 +17,7 @@ import (
 )
 
 type ClaudeAccountObserver interface {
-	ObserveClaudeResponse(store.AccountName, string, http.Header, int)
+	ObserveClaudeResponse(store.AccountKey, string, http.Header, int)
 }
 
 func prepareClaudeHeaders(headers http.Header) {
@@ -56,7 +56,7 @@ func (handler *TrafficRelayHandler) observeClaudeRejection(request *routedRelayR
 			" (" + describeClaudeLimitHeaders(response.Header) + ")" + describeRejection(response.Header, head)
 		answerClaudeRejection(response, handler.taskRouter, request.modelSlug, limited)
 	case http.StatusUnauthorized:
-		handler.taskRouter.ReportUnauthorizedTurn(request.routeDecision.AccountName, request.routeDecision.Credentials)
+		handler.taskRouter.ReportUnauthorizedTurn(request.routeDecision.AccountKey, request.routeDecision.Credentials)
 		response.StatusCode = http.StatusServiceUnavailable
 		response.Status = "503 Service Unavailable"
 		response.Header.Set("Retry-After", "1")
@@ -162,7 +162,7 @@ func (observer *terminalResponseObserver) observeClaudeUsage(payload []byte) {
 	if !complete {
 		return
 	}
-	record, err := observer.claudeUsage.Record(observer.taskID, observer.accountName, time.Now().UTC())
+	record, err := observer.claudeUsage.Record(observer.taskID, observer.accountKey, time.Now().UTC())
 	if err != nil {
 		log.Printf("%s: price Claude usage: %v", observer.describe(), err)
 		return

@@ -79,7 +79,7 @@ cp "$CODEX_SWITCH_FAKE_AUTH" "$CODEX_HOME/auth.json"
 	t.Setenv("CODEX_SWITCH_FAKE_CODEX", fakeCodex)
 	t.Setenv("CODEX_SWITCH_FAKE_AUTH", filepath.Join(staged, "auth.json"))
 
-	output, err := runLoginCLIProcess(t, "account-1")
+	output, err := runLoginCLIProcess(t, "Codex 1")
 	if err != nil {
 		t.Fatalf("named login while runtime active: %v\n%s", err, output)
 	}

@@ -8,6 +8,7 @@ import (
 
 	accountapi "github.com/joshp123/codex-switch/internal/accounts"
 	"github.com/joshp123/codex-switch/internal/codexstate"
+	"github.com/joshp123/codex-switch/internal/store"
 )
 
 func loginCommand(args []string) {
@@ -16,9 +17,10 @@ func loginCommand(args []string) {
 	claude := flags.Bool("claude", false, "sign in to a Claude subscription account")
 	_ = flags.Parse(args)
 	if flags.NArg() > 1 {
-		log.Fatal("usage: codex-switch login [--claude] [account-N | \"Codex N\" | \"Claude N\"]")
+		log.Fatal("usage: codex-switch login [--claude] [\"Codex N\" | \"Claude N\" | account key]")
 	}
 	target := flags.Arg(0)
+	var replacing store.AccountKey
 	if target == "" {
 		fmt.Println("Sign in to the account you want to add")
 	} else {
@@ -26,25 +28,23 @@ func loginCommand(args []string) {
 		if err != nil {
 			log.Fatal(err)
 		}
-		found := false
 		for _, account := range pool {
-			if target == account.Name || target == account.DisplayName {
-				target = account.Name
+			if target == string(account.Key) || target == account.DisplayName {
+				replacing = account.Key
 				fmt.Printf("Sign in again to %s\n", account.DisplayName)
-				found = true
 				break
 			}
 		}
-		if !found {
+		if replacing == "" {
 			log.Fatalf("unknown account %s", target)
 		}
 	}
 	var published accountapi.PoolAccount
 	var err error
 	if *claude {
-		published, err = accountapi.SignInClaude(dataDir(), target)
+		published, err = accountapi.SignInClaude(dataDir(), replacing)
 	} else {
-		published, err = accountapi.SignIn(dataDir(), *codex, target)
+		published, err = accountapi.SignIn(dataDir(), *codex, replacing)
 	}
 	if err != nil {
 		log.Fatal(err)
@@ -53,7 +53,7 @@ func loginCommand(args []string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	displayName, _ := accountapi.AccountDisplayName(pool, published.Name)
+	displayName, _ := accountapi.AccountDisplayName(pool, published.Key)
 	if target != "" {
 		fmt.Printf("Updated %s  %s\n", displayName, published.Email)
 		return
@@ -74,13 +74,13 @@ func accountsCommand(args []string) {
 		return
 	}
 	for _, account := range pool {
-		fmt.Printf("%s\t%s\t%s\n", account.DisplayName, account.Name, account.Email)
+		fmt.Printf("%s\t%s\n", account.DisplayName, account.Key)
 	}
 }
 
 func removeCommand(args []string) {
 	if len(args) != 1 {
-		log.Fatal("usage: codex-switch remove account-N | \"Codex N\" | \"Claude N\"")
+		log.Fatal("usage: codex-switch remove \"Codex N\" | \"Claude N\" | account key")
 	}
 	removed, removedPins, err := accountapi.RemoveAccount(dataDir(), args[0])
 	if err != nil {

@@ -21,7 +21,7 @@ func routedWorkWithRequestCounts(state *usageFold, metadata taskMetadataLookup, 
 		activity.RequestsStartedAt = timestamppb.New(requestsStartedAt)
 	}
 	for _, count := range counts {
-		key := string(count.AccountName)
+		key := string(count.AccountKey)
 		if accountActivity[key] == nil {
 			accountActivity[key] = &menupb.ProxyAccountActivity{AccountKey: key}
 		}

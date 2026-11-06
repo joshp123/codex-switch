@@ -21,6 +21,7 @@ func TestClaudeScopedAllowanceSurvivesHaikuSideRequestAndProxyRestart(t *testing
 	}
 	origin, _ := url.Parse("https://api.anthropic.com")
 	monitor := NewMonitor(data, origin, "", http.DefaultClient, monitorTestDatabase(t))
+	monitor.monitoredAccountLocked(claudeTestAccount)
 	var payload claudeUsageResponse
 	if err := json.Unmarshal([]byte(`{"limits":[{"kind":"weekly_all","percent":14,"resets_at":"`+now.Add(7*24*time.Hour).Format(time.RFC3339)+`"},{"kind":"weekly_scoped","percent":100,"resets_at":"`+now.Add(7*24*time.Hour).Format(time.RFC3339)+`","scope":{"model":{"id":null,"display_name":"Fable"}}}]}`), &payload); err != nil {
 		t.Fatal(err)
@@ -29,12 +30,12 @@ func TestClaudeScopedAllowanceSurvivesHaikuSideRequestAndProxyRestart(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	monitor.monitoredAccountLocked("account-1", ProviderClaude).fact = AccountRoutingFact{Provider: ProviderClaude, AccountState: AccountReady, AllowanceSample: sample}
+	monitor.monitoredAccountLocked(claudeTestAccount).fact = AccountRoutingFact{Provider: ProviderClaude, AccountState: AccountReady, AllowanceSample: sample}
 	headers := make(http.Header)
 	headers.Set("anthropic-ratelimit-unified-7d-utilization", "0.15")
 	headers.Set("anthropic-ratelimit-unified-7d-reset", strconv.FormatInt(now.Add(7*24*time.Hour).Unix(), 10))
-	monitor.ObserveClaudeResponse("account-1", "claude-haiku-4-5", headers, 200)
-	fact := monitor.accounts["account-1"].fact
+	monitor.ObserveClaudeResponse(claudeTestAccount.Key, "claude-haiku-4-5", headers, 200)
+	fact := monitor.accounts[claudeTestAccount.Key].fact
 	if fact.AccountState != AccountReady {
 		t.Fatalf("Fable window marked whole account %s", fact.AccountState)
 	}
@@ -45,7 +46,7 @@ func TestClaudeScopedAllowanceSurvivesHaikuSideRequestAndProxyRestart(t *testing
 		t.Fatal("Fable limit blocked Opus")
 	}
 	restarted := NewMonitor(data, origin, "", http.DefaultClient, monitorTestDatabase(t))
-	cache, _, err := restarted.reserveClaudeUsageRead("account-1", now)
+	cache, _, err := restarted.reserveClaudeUsageRead(filepath.Join(data, "account-1"), now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,12 +64,13 @@ func TestClaudeResponseModelBucketUsesRequestingModelAndPreservesSharedCapacity(
 	}
 	origin, _ := url.Parse("https://api.anthropic.com")
 	monitor := NewMonitor(data, origin, "", http.DefaultClient, monitorTestDatabase(t))
+	monitor.monitoredAccountLocked(claudeTestAccount)
 	headers := make(http.Header)
 	headers.Set("anthropic-ratelimit-unified-7d_oi-utilization", "1")
 	headers.Set("anthropic-ratelimit-unified-7d_oi-reset", strconv.FormatInt(now.Add(time.Hour).Unix(), 10))
 	headers.Set("anthropic-ratelimit-unified-7d_oi-status", "rejected")
-	monitor.ObserveClaudeResponse("account-1", "claude-fable-5", headers, 429)
-	fact := monitor.accounts["account-1"].fact
+	monitor.ObserveClaudeResponse(claudeTestAccount.Key, "claude-fable-5", headers, 429)
+	fact := monitor.accounts[claudeTestAccount.Key].fact
 	if fact.AccountState != AccountReady {
 		t.Fatal("model rejection changed shared availability")
 	}
@@ -81,8 +83,8 @@ func TestClaudeResponseModelBucketUsesRequestingModelAndPreservesSharedCapacity(
 	sonnetHeaders := make(http.Header)
 	sonnetHeaders.Set("anthropic-ratelimit-unified-7d_sonnet-utilization", "1")
 	sonnetHeaders.Set("anthropic-ratelimit-unified-7d_sonnet-reset", strconv.FormatInt(now.Add(time.Hour).Unix(), 10))
-	monitor.ObserveClaudeResponse("account-1", "claude-haiku-4-5", sonnetHeaders, 200)
-	fact = monitor.accounts["account-1"].fact
+	monitor.ObserveClaudeResponse(claudeTestAccount.Key, "claude-haiku-4-5", sonnetHeaders, 200)
+	fact = monitor.accounts[claudeTestAccount.Key].fact
 	if reason, _ := ClaudeUnavailableReason(fact, "claude-sonnet-4-5", now); reason == "" {
 		t.Fatal("named Sonnet bucket was attached to Haiku side request")
 	}
@@ -99,14 +101,15 @@ func TestClaudeExactModelWindowAppliesToItsUndatedAlias(t *testing.T) {
 	}
 	origin, _ := url.Parse("https://api.anthropic.com")
 	monitor := NewMonitor(data, origin, "", http.DefaultClient, monitorTestDatabase(t))
+	monitor.monitoredAccountLocked(claudeTestAccount)
 	fact := AccountRoutingFact{AllowanceSample: AllowanceSample{Windows: []ReportedWindow{{ModelID: "claude-opus-4-5-20251101", ModelName: "Opus", DurationSeconds: 7 * 86400, UsedPercent: 100, ResetsAt: now.Add(time.Hour)}}}}
-	monitor.monitoredAccountLocked("account-1", ProviderClaude).fact = fact
+	monitor.monitoredAccountLocked(claudeTestAccount).fact = fact
 	headers := make(http.Header)
 	headers.Set("anthropic-ratelimit-unified-7d_oi-utilization", "1")
 	headers.Set("anthropic-ratelimit-unified-7d_oi-status", "rejected")
 	headers.Set("anthropic-ratelimit-unified-7d_oi-reset", strconv.FormatInt(now.Add(time.Hour).Unix(), 10))
-	monitor.ObserveClaudeResponse("account-1", "claude-opus-4-5", headers, 429)
-	fact = monitor.accounts["account-1"].fact
+	monitor.ObserveClaudeResponse(claudeTestAccount.Key, "claude-opus-4-5", headers, 429)
+	fact = monitor.accounts[claudeTestAccount.Key].fact
 	if reason, _ := ClaudeUnavailableReason(fact, "claude-opus-4-5", now); reason == "" {
 		t.Fatal("undated alias bypassed exact model window")
 	}
@@ -124,18 +127,18 @@ func TestClaudeUsageBackoffIsSharedAcrossProxyProcesses(t *testing.T) {
 	first := NewMonitor(data, origin, "", http.DefaultClient, monitorTestDatabase(t))
 	second := NewMonitor(data, origin, "", http.DefaultClient, monitorTestDatabase(t))
 	now := time.Now()
-	cache, due, err := first.reserveClaudeUsageRead("account-1", now)
+	cache, due, err := first.reserveClaudeUsageRead(filepath.Join(data, "account-1"), now)
 	if err != nil || !due {
 		t.Fatalf("first read: due=%v err=%v", due, err)
 	}
 	cache.ReadAfter = now.Add(time.Hour)
-	if err := first.saveClaudeAllowanceCache("account-1", cache); err != nil {
+	if err := first.saveClaudeAllowanceCache(filepath.Join(data, "account-1"), cache); err != nil {
 		t.Fatal(err)
 	}
-	if _, due, err := second.reserveClaudeUsageRead("account-1", now.Add(30*time.Minute)); err != nil || due {
+	if _, due, err := second.reserveClaudeUsageRead(filepath.Join(data, "account-1"), now.Add(30*time.Minute)); err != nil || due {
 		t.Fatalf("backoff was ignored: due=%v err=%v", due, err)
 	}
-	if _, due, err := second.reserveClaudeUsageRead("account-1", now.Add(time.Hour)); err != nil || !due {
+	if _, due, err := second.reserveClaudeUsageRead(filepath.Join(data, "account-1"), now.Add(time.Hour)); err != nil || !due {
 		t.Fatalf("backoff did not expire: due=%v err=%v", due, err)
 	}
 }
@@ -152,6 +155,7 @@ func TestClaudeThrottleHoldsTheAccountOnlyUntilRetryAfter(t *testing.T) {
 	}
 	origin, _ := url.Parse("https://api.anthropic.com")
 	monitor := NewMonitor(data, origin, "", http.DefaultClient, monitorTestDatabase(t))
+	monitor.monitoredAccountLocked(claudeTestAccount)
 	rejection := func(claim string, extra map[string]string) http.Header {
 		headers := make(http.Header)
 		headers.Set("anthropic-ratelimit-unified-status", "rejected")
@@ -170,33 +174,33 @@ func TestClaudeThrottleHoldsTheAccountOnlyUntilRetryAfter(t *testing.T) {
 	}
 	blockedUntil := func(model string) time.Duration {
 		t.Helper()
-		_, until := ClaudeUnavailableReason(monitor.accounts["account-1"].fact, model, now)
+		_, until := ClaudeUnavailableReason(monitor.accounts[claudeTestAccount.Key].fact, model, now)
 		if until.IsZero() {
 			return 0
 		}
 		return until.Sub(now).Round(time.Minute)
 	}
 
-	monitor.ObserveClaudeResponse("account-1", "claude-opus-5-5", rejection("", nil), http.StatusTooManyRequests)
+	monitor.ObserveClaudeResponse(claudeTestAccount.Key, "claude-opus-5-5", rejection("", nil), http.StatusTooManyRequests)
 	if got := blockedUntil("claude-opus-5-5"); got != time.Minute {
 		t.Fatalf("throttle without a named limit held Opus for %s, want a minute", got)
 	}
-	if reason, _ := ClaudeUnavailableReason(monitor.accounts["account-1"].fact, "claude-opus-5-5", now); reason != "Anthropic throttled it" {
+	if reason, _ := ClaudeUnavailableReason(monitor.accounts[claudeTestAccount.Key].fact, "claude-opus-5-5", now); reason != "Anthropic throttled it" {
 		t.Fatalf("throttle reported as %q", reason)
 	}
-	if fact := monitor.accounts["account-1"].fact; fact.AccountState != AccountReady {
+	if fact := monitor.accounts[claudeTestAccount.Key].fact; fact.AccountState != AccountReady {
 		t.Fatalf("throttle on one model made the account %s", fact.AccountState)
 	}
 	if got := blockedUntil("claude-sonnet-5-5"); got != 0 {
 		t.Fatalf("Opus throttle held Sonnet for %s", got)
 	}
 
-	monitor.ObserveClaudeResponse("account-1", "claude-opus-5-5", rejection("", map[string]string{"Retry-After": "600"}), http.StatusTooManyRequests)
+	monitor.ObserveClaudeResponse(claudeTestAccount.Key, "claude-opus-5-5", rejection("", map[string]string{"Retry-After": "600"}), http.StatusTooManyRequests)
 	if got := blockedUntil("claude-opus-5-5"); got != 10*time.Minute {
 		t.Fatalf("throttle held Opus for %s, want its 10 minute Retry-After", got)
 	}
 
-	monitor.ObserveClaudeResponse("account-1", "claude-opus-5-5", rejection("seven_day_opus", nil), http.StatusTooManyRequests)
+	monitor.ObserveClaudeResponse(claudeTestAccount.Key, "claude-opus-5-5", rejection("seven_day_opus", nil), http.StatusTooManyRequests)
 	if got := blockedUntil("claude-opus-5-5"); got != 7*time.Hour {
 		t.Fatalf("named Opus limit held Opus for %s, want until its reset in 7h", got)
 	}
@@ -204,7 +208,7 @@ func TestClaudeThrottleHoldsTheAccountOnlyUntilRetryAfter(t *testing.T) {
 		t.Fatalf("named Opus limit held Sonnet for %s", got)
 	}
 
-	monitor.ObserveClaudeResponse("account-1", "claude-opus-5-5", rejection("", map[string]string{
+	monitor.ObserveClaudeResponse(claudeTestAccount.Key, "claude-opus-5-5", rejection("", map[string]string{
 		"anthropic-ratelimit-unified-5h-utilization": "1", "anthropic-ratelimit-unified-5h-status": "rejected"}), http.StatusTooManyRequests)
 	if got := blockedUntil("claude-sonnet-5-5"); got != 3*time.Hour {
 		t.Fatalf("five-hour limit held Sonnet for %s, want until its reset in 3h", got)
@@ -228,7 +232,8 @@ func TestClaudeRestrictionSavedWithoutItsLimitIsHeldAsAThrottle(t *testing.T) {
 	}
 	origin, _ := url.Parse("https://api.anthropic.com")
 	monitor := NewMonitor(data, origin, "", http.DefaultClient, monitorTestDatabase(t))
-	cache, _, err := monitor.reserveClaudeUsageRead("account-1", now)
+	monitor.monitoredAccountLocked(claudeTestAccount)
+	cache, _, err := monitor.reserveClaudeUsageRead(filepath.Join(data, "account-1"), now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,17 +285,21 @@ func TestClaudeResetGrantsSurviveAnOrdinaryResponse(t *testing.T) {
 	}
 	origin, _ := url.Parse("https://api.anthropic.com")
 	monitor := NewMonitor(data, origin, "", http.DefaultClient, monitorTestDatabase(t))
+	monitor.monitoredAccountLocked(claudeTestAccount)
 	grants := uint32(2)
-	monitor.monitoredAccountLocked("account-1", ProviderClaude).fact = AccountRoutingFact{Provider: ProviderClaude, AccountState: AccountReady, AllowanceSample: AllowanceSample{
+	monitor.monitoredAccountLocked(claudeTestAccount).fact = AccountRoutingFact{Provider: ProviderClaude, AccountState: AccountReady, AllowanceSample: AllowanceSample{
 		AccountID: "subscription", ObservedAt: now.Add(-time.Minute), AvailableResetCredits: &grants,
 		Windows: []ReportedWindow{{ObservedAt: now.Add(-time.Minute), UsedPercent: 10, DurationSeconds: 5 * 3600, ResetsAt: now.Add(time.Hour)}},
 	}}
 	headers := make(http.Header)
 	headers.Set("anthropic-ratelimit-unified-5h-utilization", "0.2")
 	headers.Set("anthropic-ratelimit-unified-5h-reset", strconv.FormatInt(now.Add(time.Hour).Unix(), 10))
-	monitor.ObserveClaudeResponse("account-1", "claude-opus-4-5", headers, 200)
-	got := monitor.accounts["account-1"].fact.AllowanceSample.AvailableResetCredits
+	monitor.ObserveClaudeResponse(claudeTestAccount.Key, "claude-opus-4-5", headers, 200)
+	got := monitor.accounts[claudeTestAccount.Key].fact.AllowanceSample.AvailableResetCredits
 	if got == nil || *got != 2 {
 		t.Fatalf("reset grants after an ordinary response = %v, want 2", got)
 	}
 }
+
+// claudeTestAccount is the Claude account these tests observe, saved in account-1.
+var claudeTestAccount = PoolAccount{Key: "claude:one@example.test", Folder: "account-1", Provider: ProviderClaude}

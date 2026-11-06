@@ -136,9 +136,12 @@ codex-switch accounts
 ```
 
 ```text
-Codex 1	account-1	you@example.com
-Codex 2	account-2	you+work@example.com
+Codex 1	chatgpt:you@example.com
+Codex 2	chatgpt:you+work@example.com
 ```
+
+Each account is known by its provider and email, so it has the same key on
+every Mac. Commands take either its name, such as `"Codex 2"`, or its key.
 
 **3. Point Codex at it.** Run `codex-switch print-codex-config`. It prints one
 line:

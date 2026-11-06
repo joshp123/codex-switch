@@ -19,7 +19,7 @@ import (
 
 type usageCohortKey struct {
 	TaskID, RootTurnID string
-	Account            store.AccountName
+	Account            store.AccountKey
 	Date               time.Time
 }
 
@@ -75,8 +75,8 @@ type usageFold struct {
 	turnOwners                     map[string]usageTurnOwner
 	firstProxy                     map[string]time.Time
 	latestLegacy                   map[string]time.Time
-	providerByName                 map[store.AccountName]store.ProviderAccountID
-	namesByProvider                map[store.ProviderAccountID]store.AccountName
+	providerByKey                  map[store.AccountKey]store.ProviderAccountID
+	keysByProvider                 map[store.ProviderAccountID]store.AccountKey
 	allowanceOwners                map[allowanceIdentityKey]store.ProviderAccountID
 	// consultedAllowanceWindows are the windows some counted usage was
 	// attributed through; only a change to one of their owners matters.
@@ -89,13 +89,13 @@ func (reason usageRefoldReason) Error() string { return string(reason) }
 
 var lastUsageTime = time.Unix(0, math.MaxInt64)
 
-func newUsageFold(today, localDay, standardStart time.Time, providers map[store.AccountName]store.ProviderAccountID, names map[store.ProviderAccountID]store.AccountName, owners map[allowanceIdentityKey]store.ProviderAccountID) *usageFold {
+func newUsageFold(today, localDay, standardStart time.Time, providers map[store.AccountKey]store.ProviderAccountID, keys map[store.ProviderAccountID]store.AccountKey, owners map[allowanceIdentityKey]store.ProviderAccountID) *usageFold {
 	return &usageFold{
 		today: today, localDay: localDay, standardStart: standardStart, hashSeed: maphash.MakeSeed(),
 		responses: make(map[uint64]responseCounted), pending: make(map[uint64]pendingUsageContribution),
 		settled: make(map[usageCohortKey]usageCohortAmount), proxyActivity: make(map[usageCohortKey]usageCohortAmount), standardCost: make(map[string]map[modelDay]nanoUSD),
 		metadata: make(map[string]*taskMetadata), childParents: make(map[string]map[string]bool), turnOwners: make(map[string]usageTurnOwner), firstProxy: make(map[string]time.Time), latestLegacy: make(map[string]time.Time),
-		providerByName: providers, namesByProvider: names, allowanceOwners: owners, consultedAllowanceWindows: make(map[allowanceIdentityKey]bool),
+		providerByKey: providers, keysByProvider: keys, allowanceOwners: owners, consultedAllowanceWindows: make(map[allowanceIdentityKey]bool),
 	}
 }
 
@@ -131,7 +131,7 @@ func (ledger *UsageLedger) refreshUsageFold(ctx context.Context, now time.Time, 
 	if err != nil {
 		return nil, err
 	}
-	providers, names, owners, err := readUsageIdentities(ctx, transaction, pool)
+	providers, keys, owners, err := readUsageIdentities(ctx, transaction, pool)
 	if err != nil {
 		return nil, err
 	}
@@ -149,7 +149,7 @@ func (ledger *UsageLedger) refreshUsageFold(ctx context.Context, now time.Time, 
 		rebuildReason = "the dates used to value OpenAI usage changed"
 	case state.marks.MutationGeneration != marks.MutationGeneration:
 		rebuildReason = "recorded usage was deleted or a session file was rewritten"
-	case !maps.Equal(state.providerByName, providers) || !maps.Equal(state.namesByProvider, names):
+	case !maps.Equal(state.providerByKey, providers) || !maps.Equal(state.keysByProvider, keys):
 		rebuildReason = "an account's identity changed"
 	case consultedOwnerChanged(state, owners):
 		rebuildReason = "the account of an allowance window that attributed usage changed"
@@ -164,13 +164,13 @@ func (ledger *UsageLedger) refreshUsageFold(ctx context.Context, now time.Time, 
 	var rebuildStarted time.Time
 	if refold {
 		rebuildStarted = time.Now()
-		state = newUsageFold(today, localDay, standardStart, providers, names, owners)
+		state = newUsageFold(today, localDay, standardStart, providers, keys, owners)
 	}
 	err = ledger.foldRows(ctx, transaction, state, marks, now, refold)
 	if lateReason, ok := err.(usageRefoldReason); ok {
 		rebuildReason = string(lateReason)
 		rebuildStarted = time.Now()
-		state = newUsageFold(today, localDay, standardStart, providers, names, owners)
+		state = newUsageFold(today, localDay, standardStart, providers, keys, owners)
 		err = ledger.foldRows(ctx, transaction, state, marks, now, true)
 	}
 	if err != nil {
@@ -197,22 +197,22 @@ func (ledger *UsageLedger) refreshUsageFold(ctx context.Context, now time.Time, 
 	return state, nil
 }
 
-func readUsageIdentities(ctx context.Context, query usageQuery, pool []accounts.PoolAccount) (map[store.AccountName]store.ProviderAccountID, map[store.ProviderAccountID]store.AccountName, map[allowanceIdentityKey]store.ProviderAccountID, error) {
-	providers := make(map[store.AccountName]store.ProviderAccountID)
-	names := make(map[store.ProviderAccountID]store.AccountName)
-	rows, err := query.QueryContext(ctx, `SELECT account_name,provider_account_id FROM account_identities ORDER BY account_name`)
+func readUsageIdentities(ctx context.Context, query usageQuery, pool []accounts.PoolAccount) (map[store.AccountKey]store.ProviderAccountID, map[store.ProviderAccountID]store.AccountKey, map[allowanceIdentityKey]store.ProviderAccountID, error) {
+	providers := make(map[store.AccountKey]store.ProviderAccountID)
+	keys := make(map[store.ProviderAccountID]store.AccountKey)
+	rows, err := query.QueryContext(ctx, `SELECT account_key,provider_account_id FROM account_identities WHERE account_key IS NOT NULL ORDER BY account_name`)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	for rows.Next() {
-		var name store.AccountName
+		var key store.AccountKey
 		var provider store.ProviderAccountID
-		if err = rows.Scan(&name, &provider); err != nil {
+		if err = rows.Scan(&key, &provider); err != nil {
 			rows.Close()
 			return nil, nil, nil, err
 		}
-		providers[name] = provider
-		names[provider] = name
+		providers[key] = provider
+		keys[provider] = key
 	}
 	err = rows.Err()
 	rows.Close()
@@ -220,9 +220,9 @@ func readUsageIdentities(ctx context.Context, query usageQuery, pool []accounts.
 		return nil, nil, nil, err
 	}
 	for _, account := range pool {
-		name, provider := store.AccountName(account.Name), store.ProviderAccountID(account.AccountID)
-		providers[name] = provider
-		names[provider] = name
+		provider := store.ProviderAccountID(account.AccountID)
+		providers[account.Key] = provider
+		keys[provider] = account.Key
 	}
 	owners := make(map[allowanceIdentityKey]store.ProviderAccountID)
 	rows, err = query.QueryContext(ctx, `SELECT duration_seconds,resets_at_unix,CASE WHEN COUNT(DISTINCT provider_account_id)=1 THEN MIN(provider_account_id) ELSE '' END FROM account_allowance_window_identities GROUP BY duration_seconds,resets_at_unix`)
@@ -238,7 +238,7 @@ func readUsageIdentities(ctx context.Context, query usageQuery, pool []accounts.
 		}
 		owners[key] = owner
 	}
-	return providers, names, owners, rows.Err()
+	return providers, keys, owners, rows.Err()
 }
 
 func (ledger *UsageLedger) foldRows(ctx context.Context, query usageQuery, state *usageFold, marks usageRowWatermarks, now time.Time, refold bool) error {
@@ -263,7 +263,7 @@ func (ledger *UsageLedger) foldRows(ctx context.Context, query usageQuery, state
 		if !state.standardStart.IsZero() && !response.CompletedAt.Before(state.standardStart) && response.HarnessMode != string(harnessFast) {
 			cost := apiEquivalentPrice(response.ModelSlug, harnessStandard, tokenUsage{InputTokens: response.InputTokens, CachedInputTokens: response.CachedInputTokens, OutputTokens: response.OutputTokens})
 			if cost != nil {
-				account := string(response.AccountName)
+				account := string(response.AccountKey)
 				if state.standardCost[account] == nil {
 					state.standardCost[account] = make(map[modelDay]nanoUSD)
 				}
@@ -286,7 +286,7 @@ func (ledger *UsageLedger) foldRows(ctx context.Context, query usageQuery, state
 		}
 		completion := proxyCompletion(response)
 		var allowance *sessionAllowance
-		needsAllowance := state.providerByName[completion.AccountName] == ""
+		needsAllowance := state.providerByKey[completion.AccountKey] == ""
 		if needsAllowance {
 			var err error
 			allowance, err = latestResponseAllowance(ctx, query, string(response.CompletedResponseID), start, now)
@@ -294,7 +294,7 @@ func (ledger *UsageLedger) foldRows(ctx context.Context, query usageQuery, state
 				return err
 			}
 		}
-		attributeCompletion(&completion, allowance, state.providerByName, state.allowanceOwners, state.consultedAllowanceWindows)
+		attributeCompletion(&completion, allowance, state.providerByKey, state.allowanceOwners, state.consultedAllowanceWindows)
 		state.canonicalAccount(&completion)
 		completion.TaskID = state.canonicalTaskID(completion.TaskID)
 		key, amount := completionCohort(completion)
@@ -371,7 +371,7 @@ func (ledger *UsageLedger) foldRows(ctx context.Context, query usageQuery, state
 			return err
 		}
 		allowance := observation.Allowance
-		needsAllowance := state.providerByName[completion.AccountName] == ""
+		needsAllowance := state.providerByKey[completion.AccountKey] == ""
 		if needsAllowance && observation.ResponseID != "" {
 			latest, err := latestResponseAllowance(ctx, query, observation.ResponseID, start, now)
 			if err != nil {
@@ -381,7 +381,7 @@ func (ledger *UsageLedger) foldRows(ctx context.Context, query usageQuery, state
 				allowance = latest
 			}
 		}
-		attributeCompletion(&completion, allowance, state.providerByName, state.allowanceOwners, state.consultedAllowanceWindows)
+		attributeCompletion(&completion, allowance, state.providerByKey, state.allowanceOwners, state.consultedAllowanceWindows)
 		state.canonicalAccount(&completion)
 		completion.TaskID = state.canonicalTaskID(completion.TaskID)
 		key, amount := completionCohort(completion)
@@ -410,8 +410,8 @@ func (ledger *UsageLedger) foldRows(ctx context.Context, query usageQuery, state
 }
 
 func (state *usageFold) canonicalAccount(completion *reconciledCompletion) {
-	if name := state.namesByProvider[completion.ProviderAccountID]; name != "" {
-		completion.AccountName = name
+	if key := state.keysByProvider[completion.ProviderAccountID]; key != "" {
+		completion.AccountKey = key
 	}
 }
 
@@ -422,7 +422,7 @@ func (state *usageFold) deferUntil(at time.Time) {
 }
 
 func completionCohort(completion reconciledCompletion) (usageCohortKey, usageCohortAmount) {
-	key := usageCohortKey{TaskID: completion.TaskID, Account: completion.AccountName, Date: dateOnly(completion.At)}
+	key := usageCohortKey{TaskID: completion.TaskID, Account: completion.AccountKey, Date: dateOnly(completion.At)}
 	if completion.NativeSource != nil {
 		key.RootTurnID = completion.NativeSource.RootTurnID
 	}
@@ -436,7 +436,7 @@ func completionCohort(completion reconciledCompletion) (usageCohortKey, usageCoh
 	} else {
 		amount.Cost = *completion.Cost
 	}
-	if completion.AccountName == "" {
+	if completion.AccountKey == "" {
 		amount.Unattributed = 1
 	}
 	return key, amount

@@ -19,14 +19,18 @@ func (database *StoreDatabase) RecordCompletedResponse(record CompletedResponseR
 		*record.CacheWriteInputTokens > record.InputTokens-record.CachedInputTokens) {
 		return errors.New("completed response has invalid cache-write token usage")
 	}
-	_, err := database.sqlDatabase.Exec(`
+	folder, err := database.accountFolder(record.AccountKey)
+	if err != nil {
+		return err
+	}
+	_, err = database.sqlDatabase.Exec(`
 INSERT INTO completed_responses (
-    completed_response_id, codex_task_id, account_name, model_slug, harness_mode,
+    completed_response_id, codex_task_id, account_name, account_key, model_slug, harness_mode,
     input_tokens, cached_input_tokens, cache_write_input_tokens, output_tokens, reasoning_tokens,
     completed_at_unix_nano, cost_nano_usd
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT DO NOTHING`,
-		record.CompletedResponseID, record.TaskID, record.AccountName, record.ModelSlug, record.HarnessMode,
+		record.CompletedResponseID, record.TaskID, folder, record.AccountKey, record.ModelSlug, record.HarnessMode,
 		record.InputTokens, record.CachedInputTokens, record.CacheWriteInputTokens, record.OutputTokens, record.ReasoningTokens,
 		record.CompletedAt.UTC().UnixNano(), record.CostNanoUSD)
 	if err != nil {

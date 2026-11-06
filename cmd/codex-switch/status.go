@@ -20,6 +20,7 @@ import (
 
 	accountapi "github.com/joshp123/codex-switch/internal/accounts"
 	"github.com/joshp123/codex-switch/internal/menupb"
+	"github.com/joshp123/codex-switch/internal/store"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -104,16 +105,16 @@ func writeCurrentStatus(output io.Writer, snapshot *menupb.MenuSnapshot) {
 		if account.Provider == menupb.Provider_PROVIDER_CLAUDE {
 			provider = accountapi.ProviderClaude
 		}
-		pool = append(pool, accountapi.PoolAccount{Name: account.Key, Provider: provider})
+		pool = append(pool, accountapi.PoolAccount{Key: store.AccountKey(account.Key), Provider: provider})
 	}
-	accountName := func(key string) string {
-		name, _ := accountapi.AccountDisplayName(pool, key)
+	accountDisplayName := func(key string) string {
+		name, _ := accountapi.AccountDisplayName(pool, store.AccountKey(key))
 		return name
 	}
-	accountNames := func(keys []string) string {
+	accountDisplayNames := func(keys []string) string {
 		names := make([]string, 0, len(keys))
 		for _, key := range keys {
-			names = append(names, accountName(key))
+			names = append(names, accountDisplayName(key))
 		}
 		return strings.Join(names, ", ")
 	}
@@ -149,7 +150,7 @@ func writeCurrentStatus(output io.Writer, snapshot *menupb.MenuSnapshot) {
 		} else if account.ReserveStatus != "" {
 			state = oneLine(account.ReserveStatus)
 		}
-		label := accountName(account.Key)
+		label := accountDisplayName(account.Key)
 		for _, detail := range []string{account.Email, account.Plan} {
 			if detail != "" {
 				label += " · " + oneLine(detail)
@@ -176,10 +177,10 @@ func writeCurrentStatus(output io.Writer, snapshot *menupb.MenuSnapshot) {
 		}
 	}
 	if activity := snapshot.ProxyActivity; activity != nil {
-		writeProxyActivity(output, activity, accountName, accountNames)
+		writeProxyActivity(output, activity, accountDisplayName, accountDisplayNames)
 	}
 	if len(snapshot.ReportingPeriods) > 0 {
-		writeAccountTokenTable(output, snapshot, accountName)
+		writeAccountTokenTable(output, snapshot, accountDisplayName)
 	}
 	var tasks []*menupb.CompletedTask
 	heading := ""
@@ -213,21 +214,21 @@ func writeCurrentStatus(output io.Writer, snapshot *menupb.MenuSnapshot) {
 				fmt.Fprintf(output, " · %s", dollars(task.GetCostNanoUsd()))
 			}
 			if len(task.AccountKeys) > 0 {
-				fmt.Fprintf(output, " · %s", accountNames(task.AccountKeys))
+				fmt.Fprintf(output, " · %s", accountDisplayNames(task.AccountKeys))
 			}
 			fmt.Fprintln(output)
 		}
 	}
 }
 
-func writeProxyActivity(output io.Writer, activity *menupb.ProxyActivity, accountName func(string) string, accountNames func([]string) string) {
+func writeProxyActivity(output io.Writer, activity *menupb.ProxyActivity, accountDisplayName func(string) string, accountDisplayNames func([]string) string) {
 	if activity.RequestsStartedAt != nil {
 		fmt.Fprintf(output, "\nModel requests through this proxy · since %s\n", activity.RequestsStartedAt.AsTime().Local().Format("2 Jan 2006 15:04 MST"))
 		writer := tabwriter.NewWriter(output, 0, 4, 2, ' ', 0)
 		fmt.Fprintln(writer, "Account\tRequests\tSuccessful\tFailed\tInterrupted")
 		for _, account := range activity.Accounts {
 			counts := account.GetRequestCounts()
-			fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\n", accountName(account.AccountKey), groupedTokens(counts.GetRequests()), groupedTokens(counts.GetSuccessful()), groupedTokens(counts.GetFailed()), groupedTokens(counts.GetInterrupted()))
+			fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\n", accountDisplayName(account.AccountKey), groupedTokens(counts.GetRequests()), groupedTokens(counts.GetSuccessful()), groupedTokens(counts.GetFailed()), groupedTokens(counts.GetInterrupted()))
 		}
 		_ = writer.Flush()
 	}
@@ -236,7 +237,7 @@ func writeProxyActivity(output io.Writer, activity *menupb.ProxyActivity, accoun
 	fmt.Fprintln(writer, "Account\tCompleted replies\tTokens")
 	var replies, tokens int64
 	for _, account := range activity.Accounts {
-		fmt.Fprintf(writer, "%s\t%s\t%s\n", accountName(account.AccountKey), groupedTokens(account.CompletedResponses), groupedTokens(account.Tokens))
+		fmt.Fprintf(writer, "%s\t%s\t%s\n", accountDisplayName(account.AccountKey), groupedTokens(account.CompletedResponses), groupedTokens(account.Tokens))
 		replies += account.CompletedResponses
 		tokens += account.Tokens
 	}
@@ -245,12 +246,12 @@ func writeProxyActivity(output io.Writer, activity *menupb.ProxyActivity, accoun
 	if len(activity.Tasks) > 0 {
 		fmt.Fprintln(output, "\nRecent routed tasks in this period:")
 		for _, task := range activity.Tasks {
-			fmt.Fprintf(output, "  %s · %s tokens · %s\n", taskLabel(task), groupedTokens(task.GetTokens()), accountNames(task.AccountKeys))
+			fmt.Fprintf(output, "  %s · %s tokens · %s\n", taskLabel(task), groupedTokens(task.GetTokens()), accountDisplayNames(task.AccountKeys))
 		}
 	}
 }
 
-func writeAccountTokenTable(output io.Writer, snapshot *menupb.MenuSnapshot, accountName func(string) string) {
+func writeAccountTokenTable(output io.Writer, snapshot *menupb.MenuSnapshot, accountDisplayName func(string) string) {
 	fmt.Fprintln(output, "\nAccount usage · UTC days")
 	periods := []menupb.ReportingPeriodKind{menupb.ReportingPeriodKind_REPORTING_PERIOD_TODAY, menupb.ReportingPeriodKind_REPORTING_PERIOD_SEVEN_DAYS, menupb.ReportingPeriodKind_REPORTING_PERIOD_THIRTY_DAYS}
 	byPeriod := make(map[menupb.ReportingPeriodKind]map[string]*menupb.AccountTotal)
@@ -272,7 +273,7 @@ func writeAccountTokenTable(output io.Writer, snapshot *menupb.MenuSnapshot, acc
 		fmt.Fprintf(writer, "\n%s\tToday\t7 Days\t30 Days\n", table.heading)
 		totals := make(map[menupb.ReportingPeriodKind]int64)
 		for _, account := range snapshot.Accounts {
-			fmt.Fprint(writer, accountName(account.Key))
+			fmt.Fprint(writer, accountDisplayName(account.Key))
 			for _, kind := range periods {
 				value := table.value(byPeriod[kind][account.Key])
 				totals[kind] += value

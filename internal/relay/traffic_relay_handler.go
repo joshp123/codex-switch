@@ -306,7 +306,7 @@ func (handler *TrafficRelayHandler) serveAuthenticatedTraffic(response http.Resp
 	}
 	forwardedRequest := request.Clone(context.WithValue(request.Context(), relayRequestContextKey{}, routedRequest))
 	if workKind == store.ModelTurnWorkKind {
-		observer := newTerminalResponseObserver(taskID, client, routeDecision.AccountName, handler.taskRouter, handler.completionLedger)
+		observer := newTerminalResponseObserver(taskID, client, routeDecision.AccountKey, handler.taskRouter, handler.completionLedger)
 		observer.accountDisplayName = routeDecision.DisplayName
 		if provider == accounts.ProviderClaude {
 			observer.claudeUsage = usage.NewClaudeResponseUsage(modelSlug, serviceTier, inferenceGeo)
@@ -370,7 +370,7 @@ func (handler *TrafficRelayHandler) createBytePreservingReverseProxy() *httputil
 					return handler.passClaudeFastModeRefusal(routedRequest, upstreamResponse)
 				}
 				if handler.accountObserver != nil {
-					handler.accountObserver.ObserveClaudeResponse(routedRequest.routeDecision.AccountName, routedRequest.modelSlug, upstreamResponse.Header, upstreamResponse.StatusCode)
+					handler.accountObserver.ObserveClaudeResponse(routedRequest.routeDecision.AccountKey, routedRequest.modelSlug, upstreamResponse.Header, upstreamResponse.StatusCode)
 				}
 				if upstreamResponse.StatusCode >= http.StatusBadRequest {
 					return handler.observeClaudeRejection(routedRequest, upstreamResponse)

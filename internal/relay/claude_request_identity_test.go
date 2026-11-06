@@ -25,15 +25,16 @@ func TestClaudeConversationIdentityKeepsPiPinAndCodeForkAffinity(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer database.CloseStoreDatabase()
-	if _, err := database.PinTaskAccountIfAbsent(store.TaskAccountPin{TaskID: firstID, AccountName: "account-1", PinnedAt: time.Now()}); err != nil {
+	rememberTestAccounts(t, database, "account-1", "account-2")
+	if _, err := database.PinTaskAccountIfAbsent(store.TaskAccountPin{TaskID: firstID, AccountKey: "account-1", PinnedAt: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
-	if pin, found, err := database.ReadTaskAccountPin(continuedID); err != nil || !found || pin.AccountName != "account-1" {
+	if pin, found, err := database.ReadTaskAccountPin(continuedID); err != nil || !found || pin.AccountKey != "account-1" {
 		t.Fatalf("Pi continuation lost its account pin: found=%v, error=%v", found, err)
 	}
 	request.Header.Set("X-Claude-Code-Session-Id", "parent")
 	parentID := claudeSessionForRequest(request, firstPrefixes)
-	if _, err := database.PinTaskAccountIfAbsent(store.TaskAccountPin{TaskID: parentID, AccountName: "account-2", PinnedAt: time.Now()}); err != nil {
+	if _, err := database.PinTaskAccountIfAbsent(store.TaskAccountPin{TaskID: parentID, AccountKey: "account-2", PinnedAt: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
 	if err := database.RememberPromptCachePrefix(parentID, firstPrefixes[0]); err != nil {

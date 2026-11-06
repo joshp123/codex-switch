@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/joshp123/codex-switch/internal/store"
 )
 
 // ResetDecision reports the result of an explicit reset request.
@@ -25,9 +27,9 @@ type ResetCredit struct {
 	ExpiresAt time.Time `json:"expires_at"`
 }
 type pendingReset struct {
-	AccountName string
-	AccountID   string
-	CreditID    string
+	AccountKey store.AccountKey
+	AccountID  string
+	CreditID   string
 }
 
 var resetNamespace = uuid.MustParse("6f1c2a9e-2d4b-4c1e-9a7f-3b8d5e0c1a42")
@@ -75,7 +77,7 @@ func ResetCodexPool(ctx context.Context, directory string, origin *url.URL, clie
 				continue
 			}
 			count++
-			login := newSavedLogin(filepath.Join(directory, account.Name), client)
+			login := newSavedLogin(filepath.Join(directory, account.Folder), client)
 			credentials, err := login.Credentials(ctx)
 			if err != nil {
 				return fmt.Errorf("%s: cannot check credentials: %w", account.DisplayName, err)
@@ -135,7 +137,7 @@ func ResetCodexPool(ctx context.Context, directory string, origin *url.URL, clie
 		}
 		sort.Slice(candidates, func(i, j int) bool { return candidates[i].credit.ExpiresAt.Before(candidates[j].credit.ExpiresAt) })
 		chosen := candidates[0]
-		pending := pendingReset{chosen.account.Name, chosen.account.AccountID, chosen.credit.ID}
+		pending := pendingReset{chosen.account.Key, chosen.account.AccountID, chosen.credit.ID}
 		data, err := json.Marshal(pending)
 		if err != nil {
 			return err
@@ -154,8 +156,8 @@ func pendingResetAccount(ctx context.Context, directory string, client *http.Cli
 		return PoolAccount{}, Credentials{}, err
 	}
 	for _, account := range pool {
-		if account.Name == pending.AccountName && account.AccountID == pending.AccountID && account.Provider == ProviderCodex {
-			credentials, err := newSavedLogin(filepath.Join(directory, account.Name), client).Credentials(ctx)
+		if account.Key == pending.AccountKey && account.AccountID == pending.AccountID && account.Provider == ProviderCodex {
+			credentials, err := newSavedLogin(filepath.Join(directory, account.Folder), client).Credentials(ctx)
 			return account, credentials, err
 		}
 	}

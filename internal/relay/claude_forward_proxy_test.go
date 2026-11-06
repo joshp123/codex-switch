@@ -41,7 +41,7 @@ func (router *forwardProxyRouter) RouteForProviderTask(task store.TaskID, kind s
 	router.mutex.Lock()
 	router.tasks = append(router.tasks, task)
 	router.mutex.Unlock()
-	return routing.RouteDecision{AccountName: "account-2", Credentials: accounts.Credentials{AccessToken: "pool-token"}}, nil
+	return routing.RouteDecision{AccountKey: "account-2", Credentials: accounts.Credentials{AccessToken: "pool-token"}}, nil
 }
 
 type forwardProxyLedger struct {
@@ -175,7 +175,7 @@ func TestClaudeForwardProxyPoolsOnlyModelPostsAndKeepsOneRelay(t *testing.T) {
 		t.Fatal("entry points do not share task identity and accounting")
 	}
 	for _, record := range ledger.records {
-		if record.TaskID != router.tasks[0] || record.AccountName != "account-2" || record.InputTokens != 20 || record.CachedInputTokens != 8 || record.OutputTokens != 3 {
+		if record.TaskID != router.tasks[0] || record.AccountKey != "account-2" || record.InputTokens != 20 || record.CachedInputTokens != 8 || record.OutputTokens != 3 {
 			t.Fatalf("incorrect usage record: %+v", record)
 		}
 	}

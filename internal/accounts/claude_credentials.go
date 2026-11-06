@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -34,16 +35,25 @@ func (auth claudeAuthFile) credentials() Credentials {
 	return Credentials{AccessToken: auth.AccessToken, AccountID: auth.AccountID + "|" + auth.OrganizationID}
 }
 
-func readClaudePoolAccount(data []byte, name string, index int) (PoolAccount, error) {
+// providerOfAccountID tells a Claude account ID, which joins the account and
+// organization IDs, from a ChatGPT one.
+func providerOfAccountID(accountID string) Provider {
+	if strings.Contains(accountID, "|") {
+		return ProviderClaude
+	}
+	return ProviderChatGPT
+}
+
+func readClaudePoolAccount(data []byte, folder string, index int) (PoolAccount, error) {
 	var auth claudeAuthFile
 	if err := json.Unmarshal(data, &auth); err != nil {
 		return PoolAccount{}, err
 	}
 	if auth.AccountID == "" || auth.OrganizationID == "" || auth.Email == "" {
-		return PoolAccount{}, fmt.Errorf("%s has incomplete Claude identity", name)
+		return PoolAccount{}, fmt.Errorf("%s has incomplete Claude identity", folder)
 	}
 	identity := auth.credentials().AccountID
-	return PoolAccount{Name: name, Index: index, Provider: ProviderClaude, ID: identity,
+	return PoolAccount{Key: AccountKeyFor(ProviderClaude, auth.Email), Folder: folder, Index: index, Provider: ProviderClaude, ID: identity,
 		AccountID: identity, OrganizationID: auth.OrganizationID, Email: auth.Email, Plan: auth.Plan}, nil
 }
 

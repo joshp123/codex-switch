@@ -19,7 +19,7 @@ func (monitor *Monitor) CheckProviderAccess(ctx context.Context) error {
 		go func() {
 			readContext, cancel := context.WithTimeout(ctx, accountReadTimeout)
 			defer cancel()
-			login := newSavedLogin(filepath.Join(monitor.dataDirectory, account.Name), monitor.httpClient)
+			login := newSavedLogin(filepath.Join(monitor.dataDirectory, account.Folder), monitor.httpClient)
 			login.provider = account.Provider
 			var storedLoginError error
 			if account.Provider == ProviderClaude {

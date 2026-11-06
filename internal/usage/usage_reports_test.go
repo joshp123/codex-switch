@@ -103,10 +103,13 @@ func TestUsageReportsRefreshProviderTokensAndValuationWithoutNewUsage(t *testing
 	if err := os.WriteFile(filepath.Join(accountDirectory, "auth.json"), []byte(`{"tokens":{"account_id":"provider","id_token":"test.`+claims+`.test"}}`), 0600); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := accounts.RecordAccountKeys(ledger.dataDirectory, ledger.database); err != nil {
+		t.Fatal(err)
+	}
 	now := time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
 	for _, days := range []int{-2, -1} {
 		at := now.AddDate(0, 0, days)
-		if err := ledger.database.RecordCompletedResponse(store.CompletedResponseRecord{CompletedResponseID: store.CompletedResponseID(at.Format(time.DateOnly)), TaskID: "task", AccountName: "account-1", ModelSlug: "gpt-5.6-luna", HarnessMode: "standard", InputTokens: 1000, OutputTokens: 100, CompletedAt: at}); err != nil {
+		if err := ledger.database.RecordCompletedResponse(store.CompletedResponseRecord{CompletedResponseID: store.CompletedResponseID(at.Format(time.DateOnly)), TaskID: "task", AccountKey: "chatgpt:usage-test@example.invalid", ModelSlug: "gpt-5.6-luna", HarnessMode: "standard", InputTokens: 1000, OutputTokens: 100, CompletedAt: at}); err != nil {
 			t.Fatal(err)
 		}
 	}

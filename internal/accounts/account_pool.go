@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+
+	"github.com/joshp123/codex-switch/internal/store"
 )
 
 type Provider string
@@ -23,13 +25,16 @@ const (
 )
 
 // PoolAccount is one signed-in subscription account. Pool accounts live in
-// account-N directories in the data directory, each holding an auth.json.
+// account-N folders in the data directory, each holding an auth.json.
 type PoolAccount struct {
 	Provider       Provider
 	OrganizationID string
 	Plan           string
-	// Name is the directory name, such as account-3, and Index its number.
-	Name           string
+	// Key identifies the account on every Mac; see AccountKeyFor.
+	Key store.AccountKey
+	// Folder is where its login is saved, such as account-3, and Index its
+	// number. Folders are numbered in sign-in order on each Mac.
+	Folder         string
 	Index          int
 	DisplayName    string
 	ProviderNumber int
@@ -43,7 +48,7 @@ type PoolAccount struct {
 }
 
 // ReadPool returns every signed-in account in dataDirectory, ordered by
-// account number. A missing data directory is an empty pool.
+// folder number. A missing data directory is an empty pool.
 func ReadPool(dataDirectory string) ([]PoolAccount, error) {
 	entries, err := os.ReadDir(dataDirectory)
 	if err != nil {
@@ -71,10 +76,26 @@ func ReadPool(dataDirectory string) ([]PoolAccount, error) {
 		result = append(result, account)
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].Index < result[j].Index })
-	for index := range result {
-		result[index].DisplayName, result[index].ProviderNumber = AccountDisplayName(result, result[index].Name)
+	folders := make(map[store.AccountKey]string, len(result))
+	for index, account := range result {
+		if folder, duplicate := folders[account.Key]; duplicate {
+			return nil, fmt.Errorf("%s and %s in %s are both signed in to %s; move one of them to the Trash", folder, account.Folder, dataDirectory, account.Key)
+		}
+		folders[account.Key] = account.Folder
+		result[index].DisplayName, result[index].ProviderNumber = AccountDisplayName(result, account.Key)
 	}
 	return result, nil
+}
+
+// AccountKeyFor names a subscription account by its provider and email, such
+// as "chatgpt:you@example.com". One email can hold both a ChatGPT and a Claude
+// subscription, so the provider is part of the key.
+func AccountKeyFor(provider Provider, email string) store.AccountKey {
+	name := "chatgpt"
+	if provider == ProviderClaude {
+		name = "claude"
+	}
+	return store.AccountKey(name + ":" + strings.ToLower(email))
 }
 
 // poolAccountFiles keeps each account as last parsed, with the identity of
@@ -92,7 +113,7 @@ type parsedPoolAccount struct {
 
 // readPoolAccountFiles reads an account's identity and reserve, from memory
 // while its auth.json and reserve-percent are unchanged.
-func readPoolAccountFiles(accountDirectory, name string, index int) (PoolAccount, error) {
+func readPoolAccountFiles(accountDirectory, folder string, index int) (PoolAccount, error) {
 	authentication, err := os.Stat(filepath.Join(accountDirectory, "auth.json"))
 	if err != nil {
 		return PoolAccount{}, err
@@ -101,20 +122,20 @@ func readPoolAccountFiles(accountDirectory, name string, index int) (PoolAccount
 	if reserve, err := os.Stat(filepath.Join(accountDirectory, reserveFilename)); err == nil {
 		files += " " + fileIdentity(reserve)
 	} else if !os.IsNotExist(err) {
-		return PoolAccount{}, fmt.Errorf("read %s reserve: %w", name, err)
+		return PoolAccount{}, fmt.Errorf("read %s reserve: %w", folder, err)
 	}
 	poolAccountFiles.Lock()
 	parsed, known := poolAccountFiles.byDirectory[accountDirectory]
 	poolAccountFiles.Unlock()
-	if known && parsed.files == files && parsed.account.Name == name && parsed.account.Index == index {
+	if known && parsed.files == files && parsed.account.Folder == folder && parsed.account.Index == index {
 		return parsed.account, nil
 	}
-	account, err := ReadPoolAccount(accountDirectory, name, index)
+	account, err := ReadPoolAccount(accountDirectory, folder, index)
 	if err != nil {
 		return PoolAccount{}, err
 	}
 	if account.Reserve, err = readAccountReserve(accountDirectory); err != nil {
-		return PoolAccount{}, fmt.Errorf("read %s reserve: %w", name, err)
+		return PoolAccount{}, fmt.Errorf("read %s reserve: %w", folder, err)
 	}
 	poolAccountFiles.Lock()
 	poolAccountFiles.byDirectory[accountDirectory] = parsedPoolAccount{files: files, account: account}
@@ -132,7 +153,7 @@ func fileIdentity(info os.FileInfo) string {
 
 // ReadPoolAccount reads the provider identity from the auth.json in
 // accountDirectory.
-func ReadPoolAccount(accountDirectory, name string, index int) (PoolAccount, error) {
+func ReadPoolAccount(accountDirectory, folder string, index int) (PoolAccount, error) {
 	data, err := os.ReadFile(filepath.Join(accountDirectory, "auth.json"))
 	if err != nil {
 		return PoolAccount{}, err
@@ -148,21 +169,21 @@ func ReadPoolAccount(accountDirectory, name string, index int) (PoolAccount, err
 		return PoolAccount{}, err
 	}
 	if value.Provider == ProviderClaude {
-		return readClaudePoolAccount(data, name, index)
+		return readClaudePoolAccount(data, folder, index)
 	}
 	if value.Tokens.AccountID == "" {
-		return PoolAccount{}, fmt.Errorf("%s has no ChatGPT account ID", name)
+		return PoolAccount{}, fmt.Errorf("%s has no ChatGPT account ID", folder)
 	}
 	email, userID, err := decodeIDTokenIdentity(value.Tokens.IDToken)
 	if err != nil {
-		return PoolAccount{}, fmt.Errorf("read %s identity: %w", name, err)
+		return PoolAccount{}, fmt.Errorf("read %s identity: %w", folder, err)
 	}
 	identity := userID
 	if identity == "" {
 		identity = value.Tokens.AccountID + "|" + email
 	}
 	return PoolAccount{
-		Name: name, Index: index, ID: identity,
+		Key: AccountKeyFor(ProviderChatGPT, email), Folder: folder, Index: index, ID: identity,
 		AccountID: value.Tokens.AccountID, Email: email,
 	}, nil
 }
@@ -198,11 +219,11 @@ func decodeIDTokenIdentity(token string) (string, string, error) {
 
 // AccountDisplayName derives a name and provider-local number from pool order.
 // A key outside the current pool belongs to a removed account.
-func AccountDisplayName(pool []PoolAccount, key string) (string, int) {
+func AccountDisplayName(pool []PoolAccount, key store.AccountKey) (string, int) {
 	numbers := map[Provider]int{}
 	for _, account := range pool {
 		numbers[account.Provider]++
-		if account.Name == key {
+		if account.Key == key {
 			provider := "Codex"
 			if account.Provider == ProviderClaude {
 				provider = "Claude"

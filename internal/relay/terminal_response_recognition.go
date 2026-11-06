@@ -24,7 +24,7 @@ type terminalResponseObserver struct {
 	// count toward that task, as the fork has no name or history of its own.
 	forkSourceTaskID   store.TaskID
 	client             string
-	accountName        store.AccountName
+	accountKey         store.AccountKey
 	accountDisplayName string
 	taskRouter         TaskRouter
 	completionLedger   CompletionLedger
@@ -99,12 +99,12 @@ type httpJSONResponseWire struct {
 func newTerminalResponseObserver(
 	taskID store.TaskID,
 	client string,
-	accountName store.AccountName,
+	accountKey store.AccountKey,
 	taskRouter TaskRouter,
 	completionLedger CompletionLedger,
 ) *terminalResponseObserver {
 	return &terminalResponseObserver{
-		taskID: taskID, client: client, accountName: accountName,
+		taskID: taskID, client: client, accountKey: accountKey,
 		taskRouter: taskRouter, completionLedger: completionLedger,
 	}
 }
@@ -274,7 +274,7 @@ func (observer *terminalResponseObserver) reportProviderUsageLimit(providerError
 	}
 	return observer.taskRouter.ReportExhaustedTurn(
 		observer.taskID,
-		observer.accountName,
+		observer.accountKey,
 		time.Unix(providerError.ResetsAt, 0).UTC(),
 	), true
 }
@@ -296,7 +296,7 @@ func (observer *terminalResponseObserver) recordCompletedResponse(response compl
 	record := store.CompletedResponseRecord{
 		CompletedResponseID:   store.CompletedResponseID(response.ID),
 		TaskID:                taskID,
-		AccountName:           observer.accountName,
+		AccountKey:            observer.accountKey,
 		ModelSlug:             response.Model,
 		HarnessMode:           harnessModeForServiceTier(observer.serviceTier),
 		InputTokens:           *response.Usage.InputTokens,
@@ -362,7 +362,7 @@ func (observer *terminalResponseObserver) routeClientMessage(message []byte) boo
 		if decision.Assignment != "" {
 			log.Printf("%s: %s", describeModelRequest(observer.taskID, observer.client, ""), decision.Assignment)
 		}
-		if decision.AccountName != observer.accountName {
+		if decision.AccountKey != observer.accountKey {
 			// Closing the socket before forwarding makes Codex reconnect and send
 			// this message again, now routed to the chosen account.
 			return true
@@ -383,7 +383,7 @@ func (observer *terminalResponseObserver) reportUnsupportedModel(providerError *
 	if strings.TrimSpace(providerError.Message) != expected {
 		return false
 	}
-	return observer.taskRouter.ReportUnsupportedModel(observer.taskID, observer.accountName, observer.modelSlug)
+	return observer.taskRouter.ReportUnsupportedModel(observer.taskID, observer.accountKey, observer.modelSlug)
 }
 
 func (observer *terminalResponseObserver) reportUnsupportedModelDetail(detail string) bool {

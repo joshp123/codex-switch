@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/joshp123/codex-switch/internal/store"
 )
 
 func TestPublishLoginReplacesOnlyTheNamedMatchingAccount(t *testing.T) {
@@ -18,11 +20,11 @@ func TestPublishLoginReplacesOnlyTheNamedMatchingAccount(t *testing.T) {
 	staging := filepath.Join(root, ".login-staging")
 	added := writeAccountFixture(t, staging, "user-one", "one@example.com", "new-access")
 
-	published, err := publishLogin(root, staging, "account-1", added)
+	published, err := publishLogin(root, staging, "chatgpt:one@example.com", added)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if published.Name != "account-1" || published.Index != 1 {
+	if published.Folder != "account-1" || published.Index != 1 {
 		t.Fatalf("published = %#v", published)
 	}
 	if got := accountAccessToken(t, filepath.Join(root, "account-1")); got != "new-access" {
@@ -45,14 +47,14 @@ func TestPublishLoginRejectsInvalidNamedTargetsWithoutChangingCredentials(t *tes
 		wantError   string
 	}{
 		{
-			name: "wrong identity", target: "account-1",
+			name: "wrong identity", target: "chatgpt:one@example.com",
 			stagedUser: "user-two", stagedEmail: "two@example.com",
 			wantError: "different ChatGPT account",
 		},
 		{
-			name: "unknown account", target: "account-2",
+			name: "unknown account", target: "chatgpt:two@example.com",
 			stagedUser: "user-one", stagedEmail: "one@example.com",
-			wantError: "unknown account account-2",
+			wantError: "unknown account chatgpt:two@example.com",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -61,7 +63,7 @@ func TestPublishLoginRejectsInvalidNamedTargetsWithoutChangingCredentials(t *tes
 			staging := filepath.Join(root, ".login-staging")
 			added := writeAccountFixture(t, staging, test.stagedUser, test.stagedEmail, "new-access")
 
-			if _, err := publishLogin(root, staging, test.target, added); err == nil || !strings.Contains(err.Error(), test.wantError) {
+			if _, err := publishLogin(root, staging, store.AccountKey(test.target), added); err == nil || !strings.Contains(err.Error(), test.wantError) {
 				t.Fatalf("error = %v", err)
 			}
 			if got := accountAccessToken(t, filepath.Join(root, "account-1")); got != "old-access" {
@@ -89,7 +91,7 @@ func TestPublishLoginAddsSixthAndTwentiethAccounts(t *testing.T) {
 				t.Fatal(err)
 			}
 			wantName := fmt.Sprintf("account-%d", count)
-			if published.Name != wantName || published.Index != count {
+			if published.Folder != wantName || published.Index != count || published.Key != store.AccountKey(fmt.Sprintf("chatgpt:user-%d@example.com", count)) {
 				t.Fatalf("published = %#v", published)
 			}
 			if got := accountAccessToken(t, filepath.Join(root, wantName)); got != "new-access" {
@@ -99,6 +101,23 @@ func TestPublishLoginAddsSixthAndTwentiethAccounts(t *testing.T) {
 				t.Fatalf("staging directory remains: %v", err)
 			}
 		})
+	}
+}
+
+// The pool knows an account by its provider and email, so a second login that
+// resolves to an account already in the pool is refused.
+func TestPublishLoginRefusesAnAccountAlreadyInThePool(t *testing.T) {
+	root := t.TempDir()
+	writeAccountFixture(t, filepath.Join(root, "account-1"), "user-one", "one@example.com", "old-access")
+	staging := filepath.Join(root, ".login-staging")
+	added := writeAccountFixture(t, staging, "user-other", "One@Example.com", "new-access")
+
+	_, err := publishLogin(root, staging, "", added)
+	if err == nil || !strings.Contains(err.Error(), "already signed in as Codex 1") {
+		t.Fatalf("error = %v", err)
+	}
+	if entries, _ := filepath.Glob(filepath.Join(root, "account-*")); len(entries) != 1 {
+		t.Fatalf("pool folders = %v", entries)
 	}
 }
 

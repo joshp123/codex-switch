@@ -8,16 +8,16 @@ import (
 	"time"
 )
 
-func readWeeklyAllowanceBurnWithoutCache(database *StoreDatabase, accountNames []AccountName, now time.Time) (*float64, error) {
-	selectedAccounts := make(map[AccountName]bool, len(accountNames))
-	for _, accountName := range accountNames {
-		selectedAccounts[accountName] = true
+func readWeeklyAllowanceBurnWithoutCache(database *StoreDatabase, accountKeys []AccountKey, now time.Time) (*float64, error) {
+	selectedAccounts := make(map[AccountKey]bool, len(accountKeys))
+	for _, accountKey := range accountKeys {
+		selectedAccounts[accountKey] = true
 	}
 	rows, err := database.sqlDatabase.Query(`
-SELECT account_name, resets_at_unix, used_percent, observed_at_unix_nano
+SELECT account_key, resets_at_unix, used_percent, observed_at_unix_nano
 FROM weekly_allowance_readings
 WHERE observed_at_unix_nano >= ? AND observed_at_unix_nano <= ?
-ORDER BY account_name, observed_at_unix_nano`, now.Add(-8*24*time.Hour).UnixNano(), now.UnixNano())
+ORDER BY account_key, observed_at_unix_nano`, now.Add(-8*24*time.Hour).UnixNano(), now.UnixNano())
 	if err != nil {
 		return nil, fmt.Errorf("read weekly allowance burn: %w", err)
 	}
@@ -33,17 +33,17 @@ ORDER BY account_name, observed_at_unix_nano`, now.Add(-8*24*time.Hour).UnixNano
 	for rows.Next() {
 		var reading WeeklyAllowanceReading
 		var resetsAt, observedAt int64
-		if err := rows.Scan(&reading.AccountName, &resetsAt, &reading.UsedPercent, &observedAt); err != nil {
+		if err := rows.Scan(&reading.AccountKey, &resetsAt, &reading.UsedPercent, &observedAt); err != nil {
 			return nil, err
 		}
-		if !selectedAccounts[reading.AccountName] {
+		if !selectedAccounts[reading.AccountKey] {
 			continue
 		}
 		reading.ResetsAt, reading.ObservedAt = time.Unix(resetsAt, 0), time.Unix(0, observedAt)
 		if earliestObservation.IsZero() || reading.ObservedAt.Before(earliestObservation) {
 			earliestObservation = reading.ObservedAt
 		}
-		if previous.AccountName == reading.AccountName && !reading.ObservedAt.Before(now.Add(-allowanceWeek)) {
+		if previous.AccountKey == reading.AccountKey && !reading.ObservedAt.Before(now.Add(-allowanceWeek)) {
 			increase := reading.UsedPercent
 			// Providers report the same reset a second or a minute apart; only a
 			// reset that moves by more than that starts a new window.
@@ -52,7 +52,7 @@ ORDER BY account_name, observed_at_unix_nano`, now.Add(-8*24*time.Hour).UnixNano
 			}
 			usedPercent += math.Max(0, increase)
 		}
-		if previous.AccountName == reading.AccountName && sameAllowanceWindow(previous, reading) {
+		if previous.AccountKey == reading.AccountKey && sameAllowanceWindow(previous, reading) {
 			windowHigh = math.Max(windowHigh, reading.UsedPercent)
 		} else {
 			windowHigh = reading.UsedPercent
@@ -77,14 +77,15 @@ func TestWeeklyAllowanceBurnCacheWindowBoundaries(t *testing.T) {
 	}
 	defer database.CloseStoreDatabase()
 	start := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
-	names := []AccountName{"first", "second", "third"}
+	names := []AccountKey{"first", "second", "third"}
+	rememberTestAccounts(t, database, names...)
 	times := []time.Time{start}
 	for index := 0; index < 30; index++ {
 		for accountIndex, name := range names {
 			observed := start.Add(time.Duration(index)*9*time.Hour + time.Duration(accountIndex)*time.Minute + time.Duration(index)*time.Nanosecond)
 			reset := start.Add(time.Duration(index/19)*allowanceWeek + time.Duration(index%3)*time.Second)
 			used := float64((index*17+accountIndex*3)%101) / 3
-			if _, err := database.sqlDatabase.Exec(`INSERT INTO weekly_allowance_readings VALUES(?,?,?,?)`, name, reset.Unix(), used, observed.UnixNano()); err != nil {
+			if _, err := database.sqlDatabase.Exec(`INSERT INTO weekly_allowance_readings (account_name, account_key, resets_at_unix, used_percent, observed_at_unix_nano) VALUES(?,?,?,?,?)`, "account-"+string(name), name, reset.Unix(), used, observed.UnixNano()); err != nil {
 				t.Fatal(err)
 			}
 			for _, age := range []time.Duration{0, 24 * time.Hour, allowanceWeek, 8 * 24 * time.Hour} {
@@ -95,7 +96,7 @@ func TestWeeklyAllowanceBurnCacheWindowBoundaries(t *testing.T) {
 		}
 	}
 	slices.SortFunc(times, func(a, b time.Time) int { return a.Compare(b) })
-	selections := [][]AccountName{names, {"second"}, {"third", "first", "first"}, {"missing"}, nil}
+	selections := [][]AccountKey{names, {"second"}, {"third", "first", "first"}, {"missing"}, nil}
 	for _, now := range times {
 		for _, selection := range selections {
 			assertWeeklyBurnMatchesUncached(t, database, selection, now)
@@ -105,14 +106,14 @@ func TestWeeklyAllowanceBurnCacheWindowBoundaries(t *testing.T) {
 		}
 	}
 	now := times[len(times)-1]
-	if _, err := database.sqlDatabase.Exec(`INSERT INTO weekly_allowance_readings VALUES(?,?,?,?)`, "first", now.Add(allowanceWeek).Unix(), 92.25, now.UnixNano()); err != nil {
+	if _, err := database.sqlDatabase.Exec(`INSERT INTO weekly_allowance_readings (account_name, account_key, resets_at_unix, used_percent, observed_at_unix_nano) VALUES(?,?,?,?,?)`, "account-1", "first", now.Add(allowanceWeek).Unix(), 92.25, now.UnixNano()); err != nil {
 		t.Fatal(err)
 	}
 	assertWeeklyBurnMatchesUncached(t, database, names, now)
 	assertWeeklyBurnMatchesUncached(t, database, names, start.Add(2*24*time.Hour))
 }
 
-func assertWeeklyBurnMatchesUncached(t *testing.T, database *StoreDatabase, selection []AccountName, now time.Time) {
+func assertWeeklyBurnMatchesUncached(t *testing.T, database *StoreDatabase, selection []AccountKey, now time.Time) {
 	t.Helper()
 	want, err := readWeeklyAllowanceBurnWithoutCache(database, selection, now)
 	if err != nil {

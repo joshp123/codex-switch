@@ -94,7 +94,7 @@ func TestAccountRefreshDoesNotBlockOtherAccountsOrCachedReads(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, fact := range facts {
-			if fact.AccountName == "account-2" && fact.AccountState == AccountReady {
+			if fact.AccountKey == "chatgpt:account-2@example.test" && fact.AccountState == AccountReady {
 				return
 			}
 		}
@@ -125,7 +125,7 @@ func TestAllowanceIdentityRequiresPositiveUsageAndExplicitReset(t *testing.T) {
 			database := monitorTestDatabase(t)
 			origin, _ := url.Parse(server.URL)
 			monitor := NewMonitor(t.TempDir(), origin, "", server.Client(), database)
-			sample, err := monitor.readAllowanceSample(t.Context(), PoolAccount{Name: "account-1"}, Credentials{AccountID: "subscription-1"})
+			sample, err := monitor.readAllowanceSample(t.Context(), PoolAccount{Folder: "account-1"}, Credentials{AccountID: "subscription-1"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -197,13 +197,13 @@ func TestRevokedLoginIsUnavailableUntilSignInRepairsIt(t *testing.T) {
 				case <-time.After(time.Second):
 					t.Fatal("background allowance observation did not start")
 				}
-				_ = monitor.RefreshAccountCredentialsAfterUnauthorized("account-1", rejectedCredentials)
+				_ = monitor.RefreshAccountCredentialsAfterUnauthorized(account.Key, rejectedCredentials)
 				close(releaseAllowance)
 				<-allowanceReleased
 				<-read
 				holdAllowance = false
 			case "model request":
-				_ = monitor.RefreshAccountCredentialsAfterUnauthorized("account-1", rejectedCredentials)
+				_ = monitor.RefreshAccountCredentialsAfterUnauthorized(account.Key, rejectedCredentials)
 			default:
 				readAccountNow(t, monitor, account)
 			}
@@ -216,7 +216,7 @@ func TestRevokedLoginIsUnavailableUntilSignInRepairsIt(t *testing.T) {
 			}
 			staged := filepath.Join(t.TempDir(), "login")
 			repaired := writeAccountFixture(t, staged, "revoked-user", "revoked@example.test", repairedAccessToken)
-			if _, err := publishLogin(data, staged, account.Name, repaired); err != nil {
+			if _, err := publishLogin(data, staged, account.Key, repaired); err != nil {
 				t.Fatal(err)
 			}
 			allowanceUnavailable = false
@@ -237,7 +237,7 @@ func readAccountNow(t *testing.T, monitor *Monitor, account PoolAccount) Account
 
 func runScheduledRead(monitor *Monitor, account PoolAccount) {
 	monitor.mutex.Lock()
-	monitored := monitor.monitoredAccountLocked(store.AccountName(account.Name))
+	monitored := monitor.monitoredAccountLocked(account)
 	monitored.reading = true
 	scheduled := monitored.fact
 	monitor.mutex.Unlock()
@@ -312,7 +312,7 @@ func TestAccountMonitorWakesAtNextReadDeadline(t *testing.T) {
 	defer upstream.Close()
 	origin, _ := url.Parse(upstream.URL)
 	monitor := NewMonitor(data, origin, "", upstream.Client(), monitorTestDatabase(t))
-	monitored := monitor.monitoredAccountLocked(store.AccountName(account.Name))
+	monitored := monitor.monitoredAccountLocked(account)
 	monitored.lastReadStarted = time.Now().Add(-accountReadInterval + 100*time.Millisecond)
 	expectedDue := monitored.lastReadStarted.Add(accountReadInterval)
 	var pending sync.WaitGroup
@@ -363,7 +363,7 @@ func TestAccountMonitorWaitsWhileOverdueReadIsInFlight(t *testing.T) {
 	account := writeAccountFixture(t, filepath.Join(data, "account-1"), "inflight-user", "inflight@example.test", unexpiringAccessToken("inflight-user"))
 	origin, _ := url.Parse("http://127.0.0.1")
 	monitor := NewMonitor(data, origin, "", http.DefaultClient, monitorTestDatabase(t))
-	monitored := monitor.monitoredAccountLocked(store.AccountName(account.Name))
+	monitored := monitor.monitoredAccountLocked(account)
 	monitored.reading = true
 	monitored.lastReadStarted = time.Now().Add(-2 * accountReadInterval)
 	before := time.Now()

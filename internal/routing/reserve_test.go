@@ -17,11 +17,12 @@ func TestSoftReservePreservesPinsAndFallsBackWhileHardReserveMovesPins(t *testin
 				t.Fatal(err)
 			}
 			defer database.CloseStoreDatabase()
+			rememberTestAccounts(t, database, "account-1", "account-2")
 			now := time.Now()
 			facts := capacityWaitFacts{}
-			for index, name := range []store.AccountName{"account-1", "account-2"} {
+			for index, name := range []store.AccountKey{"account-1", "account-2"} {
 				facts = append(facts, accounts.AccountRoutingFact{
-					Provider: provider, AccountName: name, AccountState: accounts.AccountReady,
+					Provider: provider, AccountKey: name, AccountState: accounts.AccountReady,
 					Credentials: accounts.Credentials{AccountID: string(name), AccessToken: "test"}, SupportedModelSlugs: []string{"test-model"},
 					AllowanceSample: accounts.AllowanceSample{Allowed: true, ObservedAt: now, Windows: []accounts.ReportedWindow{
 						{DurationSeconds: 7 * 86400, UsedPercent: float64(20 + index*20), ResetsAt: now.Add(time.Hour)},
@@ -29,11 +30,11 @@ func TestSoftReservePreservesPinsAndFallsBackWhileHardReserveMovesPins(t *testin
 				})
 			}
 			router := CreateTaskRouter(database, facts)
-			route := func(task, parent store.TaskID, want store.AccountName) {
+			route := func(task, parent store.TaskID, want store.AccountKey) {
 				t.Helper()
 				decision, err := router.RouteForProviderTask(task, store.ModelTurnWorkKind, "test-model", provider, parent)
-				if err != nil || decision.AccountName != want {
-					t.Fatalf("route %s: account=%s error=%v; want %s", task, decision.AccountName, err, want)
+				if err != nil || decision.AccountKey != want {
+					t.Fatalf("route %s: account=%s error=%v; want %s", task, decision.AccountKey, err, want)
 				}
 			}
 			route("pinned", "", "account-1")

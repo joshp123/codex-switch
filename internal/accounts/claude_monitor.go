@@ -13,8 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"time"
-
-	"github.com/joshp123/codex-switch/internal/store"
 )
 
 const claudeUsageReadInterval = 5 * time.Minute
@@ -32,7 +30,7 @@ func (monitor *Monitor) observeClaudeAccount(parent context.Context, account Poo
 	if fact.Credentials.AccountID != account.AccountID {
 		fact = AccountRoutingFact{Credentials: Credentials{AccountID: account.AccountID}}
 	}
-	fact.AccountName, fact.Provider = store.AccountName(account.Name), ProviderClaude
+	fact.AccountKey, fact.Provider = account.Key, ProviderClaude
 	fact.AllowanceSample.AccountID, fact.AllowanceSample.Plan = account.AccountID, account.Plan
 	ctx, cancel := context.WithTimeout(parent, accountReadTimeout)
 	defer cancel()
@@ -49,7 +47,7 @@ func (monitor *Monitor) observeClaudeAccount(parent context.Context, account Poo
 	}
 	fact.Credentials, fact.AccountState = credentials, AccountReady
 	startedAt := time.Now()
-	cache, due, err := monitor.reserveClaudeUsageRead(account.Name, startedAt)
+	cache, due, err := monitor.reserveClaudeUsageRead(login.home, startedAt)
 	if err != nil {
 		fact.AccountStateCause = err
 		updateClaudeSharedState(&fact, time.Now())
@@ -80,7 +78,7 @@ func (monitor *Monitor) observeClaudeAccount(parent context.Context, account Poo
 			cache.ReadAfter = retryAt
 		}
 		cache.Sample, cache.Restrictions = fact.AllowanceSample, fact.ClaudeRestrictions
-		if saveErr := monitor.saveClaudeAllowanceCache(account.Name, cache); saveErr != nil {
+		if saveErr := monitor.saveClaudeAllowanceCache(login.home, cache); saveErr != nil {
 			log.Printf("%s: could not save Claude allowance: %v", account.DisplayName, saveErr)
 		}
 	}
@@ -129,7 +127,7 @@ func (monitor *Monitor) readClaudeAllowance(ctx context.Context, account PoolAcc
 	}
 	sample, err := usage.sample(account, time.Now())
 	if err == nil {
-		monitor.recordWeeklyAllowance(account.Name, sample)
+		monitor.recordWeeklyAllowance(account.Key, sample)
 	}
 	return sample, time.Time{}, err
 }
@@ -141,10 +139,10 @@ func setClaudeOAuthHeaders(request *http.Request, token string) {
 	request.Header.Set("Accept", "application/json")
 }
 
-func (monitor *Monitor) reserveClaudeUsageRead(name string, now time.Time) (claudeAllowanceCache, bool, error) {
+func (monitor *Monitor) reserveClaudeUsageRead(accountDirectory string, now time.Time) (claudeAllowanceCache, bool, error) {
 	var cache claudeAllowanceCache
 	var due bool
-	err := monitor.withClaudeAllowanceCache(name, func(existing claudeAllowanceCache) (claudeAllowanceCache, error) {
+	err := monitor.withClaudeAllowanceCache(accountDirectory, func(existing claudeAllowanceCache) (claudeAllowanceCache, error) {
 		cache = existing
 		if !now.Before(existing.ReadAfter) {
 			due = true
@@ -155,8 +153,8 @@ func (monitor *Monitor) reserveClaudeUsageRead(name string, now time.Time) (clau
 	return cache, due, err
 }
 
-func (monitor *Monitor) saveClaudeAllowanceCache(name string, incoming claudeAllowanceCache) error {
-	return monitor.withClaudeAllowanceCache(name, func(existing claudeAllowanceCache) (claudeAllowanceCache, error) {
+func (monitor *Monitor) saveClaudeAllowanceCache(accountDirectory string, incoming claudeAllowanceCache) error {
+	return monitor.withClaudeAllowanceCache(accountDirectory, func(existing claudeAllowanceCache) (claudeAllowanceCache, error) {
 		existing.Sample = mergeClaudeAllowance(existing.Sample, incoming.Sample)
 		existing.Restrictions = mergeClaudeRestrictions(existing.Restrictions, incoming.Restrictions)
 		if incoming.ReadAfter.After(existing.ReadAfter) {
@@ -166,8 +164,7 @@ func (monitor *Monitor) saveClaudeAllowanceCache(name string, incoming claudeAll
 	})
 }
 
-func (monitor *Monitor) withClaudeAllowanceCache(name string, operation func(claudeAllowanceCache) (claudeAllowanceCache, error)) error {
-	directory := filepath.Join(monitor.dataDirectory, name)
+func (monitor *Monitor) withClaudeAllowanceCache(directory string, operation func(claudeAllowanceCache) (claudeAllowanceCache, error)) error {
 	return withFileLock(filepath.Join(directory, "claude-allowance.lock"), func() error {
 		path := filepath.Join(directory, "claude-allowance.json")
 		var cache claudeAllowanceCache

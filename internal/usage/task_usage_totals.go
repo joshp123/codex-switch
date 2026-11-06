@@ -43,9 +43,9 @@ func reportUsagePeriods(today time.Time, pool []accounts.PoolAccount, cohorts it
 			if err != nil {
 				return nil, nil, err
 			}
-			amount := dailyUsage[accountDay{account.Name, date}]
+			amount := dailyUsage[accountDay{string(account.Key), date}]
 			cost := int64(amount.cost)
-			days = append(days, &menupb.AccountDay{AccountKey: account.Name, StartedAt: timestamppb.New(startedAt), Tokens: amount.tokens, CostNanoUsd: &cost})
+			days = append(days, &menupb.AccountDay{AccountKey: string(account.Key), StartedAt: timestamppb.New(startedAt), Tokens: amount.tokens, CostNanoUsd: &cost})
 		}
 	}
 	definitions := []struct {
@@ -72,12 +72,12 @@ func reportUsagePeriods(today time.Time, pool []accounts.PoolAccount, cohorts it
 		for _, account := range pool {
 			var total usageAmount
 			for _, date := range periodDates(today, definition.days) {
-				amount := dailyUsage[accountDay{account.Name, date}]
+				amount := dailyUsage[accountDay{string(account.Key), date}]
 				total.tokens += amount.tokens
 				total.cost += amount.cost
 			}
 			cost := int64(total.cost)
-			period.Accounts = append(period.Accounts, &menupb.AccountTotal{AccountKey: account.Name, Tokens: total.tokens, CostNanoUsd: &cost})
+			period.Accounts = append(period.Accounts, &menupb.AccountTotal{AccountKey: string(account.Key), Tokens: total.tokens, CostNanoUsd: &cost})
 		}
 		for _, total := range taskPeriods[index] {
 			period.TaskUsage.Tasks = append(period.TaskUsage.Tasks, completedTask(total))
@@ -108,8 +108,8 @@ func (ledger *UsageLedger) accountDailyUsageFromHistories(pool []accounts.PoolAc
 	daily := make(map[accountDay]usageAmount)
 	for _, account := range pool {
 		if account.Provider == accounts.ProviderClaude {
-			for date, amount := range local[account.Name] {
-				daily[accountDay{account.Name, date}] = amount
+			for date, amount := range local[string(account.Key)] {
+				daily[accountDay{string(account.Key), date}] = amount
 			}
 			continue
 		}
@@ -118,14 +118,14 @@ func (ledger *UsageLedger) accountDailyUsageFromHistories(pool []accounts.PoolAc
 			openAITokens[bucket.StartDate] = bucket.Tokens
 		}
 		accountCredits := credits[account.AccountID]
-		value, agreeing := dollarsPerPercent(accountCredits, localStandardCost[account.Name])
+		value, agreeing := dollarsPerPercent(accountCredits, localStandardCost[string(account.Key)])
 		if value > 0 {
-			ledger.logOnChange("value/"+account.Name, fmt.Sprintf("%s: OpenAI's busiest day in the last 30 days is worth $%.2f at API prices, agreed by %d model-days served only through this Mac", account.DisplayName, value/1e7, agreeing))
+			ledger.logOnChange("value/"+string(account.Key), fmt.Sprintf("%s: OpenAI's busiest day in the last 30 days is worth $%.2f at API prices, agreed by %d model-days served only through this Mac", account.DisplayName, value/1e7, agreeing))
 		} else if len(accountCredits) > 0 {
-			ledger.logOnChange("value/"+account.Name, fmt.Sprintf("%s: cannot price the use OpenAI reports from elsewhere: fewer than two model-days in the last 30 days were served only through this Mac", account.DisplayName))
+			ledger.logOnChange("value/"+string(account.Key), fmt.Sprintf("%s: cannot price the use OpenAI reports from elsewhere: fewer than two model-days in the last 30 days were served only through this Mac", account.DisplayName))
 		}
-		for date, amount := range accountDailyUsage(openAITokens, openAIDailyCost(accountCredits, value), local[account.Name]) {
-			daily[accountDay{account.Name, date}] = amount
+		for date, amount := range accountDailyUsage(openAITokens, openAIDailyCost(accountCredits, value), local[string(account.Key)]) {
+			daily[accountDay{string(account.Key), date}] = amount
 		}
 	}
 	return daily

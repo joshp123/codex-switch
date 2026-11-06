@@ -89,11 +89,11 @@ func TestNativePiUsageImportsOnceAndJoinsItsRoutedResponse(t *testing.T) {
 		t.Fatalf("a Pi response without a service tier is not priced at Standard: %+v", nativeOnly)
 	}
 	zero := int64(0)
-	joined, err := nativeCompletion(&observed, &store.CompletedResponseRecord{CompletedResponseID: "response", TaskID: store.TaskID(observed.TaskID), AccountName: "account-2", ModelSlug: "gpt-5.6-luna", HarnessMode: "standard", InputTokens: 5176, CachedInputTokens: 4608, CacheWriteInputTokens: &zero, OutputTokens: 73, ReasoningTokens: 22, CompletedAt: observed.At})
+	joined, err := nativeCompletion(&observed, &store.CompletedResponseRecord{CompletedResponseID: "response", TaskID: store.TaskID(observed.TaskID), AccountKey: "account-2", ModelSlug: "gpt-5.6-luna", HarnessMode: "standard", InputTokens: 5176, CachedInputTokens: 4608, CacheWriteInputTokens: &zero, OutputTokens: 73, ReasoningTokens: 22, CompletedAt: observed.At})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if joined.Tokens != 5249 || joined.AccountName != "account-2" || joined.Cost == nil || *joined.Cost != 293360 {
+	if joined.Tokens != 5249 || joined.AccountKey != "account-2" || joined.Cost == nil || *joined.Cost != 293360 {
 		t.Fatalf("joined response: %+v", joined)
 	}
 }
@@ -236,9 +236,19 @@ func openTestUsageLedger(t *testing.T) *UsageLedger {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { database.CloseStoreDatabase() })
+	rememberTestAccount(t, database)
 	ledger, err := OpenUsageLedger(database, t.TempDir(), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return ledger
+}
+
+// rememberTestAccount records the folder of the account these tests serve
+// responses from, as signing in does.
+func rememberTestAccount(t *testing.T, database *store.StoreDatabase) {
+	t.Helper()
+	if err := database.RememberAccountIdentity(store.AccountIdentity{AccountFolder: "account-1", AccountKey: "account", ProviderAccountID: "provider", Email: "account@example.test"}); err != nil {
+		t.Fatal(err)
+	}
 }

@@ -37,7 +37,7 @@ func (router *TaskRouter) accountUnavailableReason(fact accounts.AccountRoutingF
 	}
 	if fact.AccountState == accounts.AccountReady && fact.AllowanceSample.Allowed && !fact.AllowanceSample.LimitReached {
 		// A provider read begun before exhaustion cannot supersede that exhaustion.
-		cleared, err := router.storeDatabase.ClearAccountExhaustionBefore(fact.AccountName, fact.RefreshedAt)
+		cleared, err := router.storeDatabase.ClearAccountExhaustionBefore(fact.AccountKey, fact.RefreshedAt)
 		if err != nil {
 			return "", err
 		}
@@ -46,7 +46,7 @@ func (router *TaskRouter) accountUnavailableReason(fact accounts.AccountRoutingF
 				fact.DisplayName, fact.AllowanceSample.ObservedAt.Local().Format("15:04:05"))
 		}
 	}
-	resetsAt, exhausted, err := router.storeDatabase.ReadAccountReportedReset(fact.AccountName)
+	resetsAt, exhausted, err := router.storeDatabase.ReadAccountReportedReset(fact.AccountKey)
 	if err != nil {
 		return "", err
 	}
@@ -116,9 +116,9 @@ func accountSupportsModel(fact accounts.AccountRoutingFact, modelSlug string) bo
 	return modelSlug == "" || slices.Contains(fact.SupportedModelSlugs, modelSlug)
 }
 
-func factForAccount(facts []accounts.AccountRoutingFact, accountName store.AccountName) (accounts.AccountRoutingFact, bool) {
+func factForAccount(facts []accounts.AccountRoutingFact, accountKey store.AccountKey) (accounts.AccountRoutingFact, bool) {
 	for _, fact := range facts {
-		if fact.AccountName == accountName {
+		if fact.AccountKey == accountKey {
 			return fact, true
 		}
 	}

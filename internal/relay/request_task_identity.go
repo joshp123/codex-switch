@@ -56,13 +56,13 @@ func clientNameForRequest(request *http.Request) string {
 
 // describeModelRequest names a routed model request in log lines: its task, the
 // client that sent it and the account serving it.
-func describeModelRequest(taskID store.TaskID, client string, accountName string) string {
+func describeModelRequest(taskID store.TaskID, client string, accountDisplayName string) string {
 	work := "task " + string(taskID)
 	if taskID == "" {
 		work = "request without a task ID"
 	}
-	if accountName == "" {
+	if accountDisplayName == "" {
 		return fmt.Sprintf("%s from %s", work, client)
 	}
-	return fmt.Sprintf("%s from %s on %s", work, client, accountName)
+	return fmt.Sprintf("%s from %s on %s", work, client, accountDisplayName)
 }

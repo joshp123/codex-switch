@@ -17,10 +17,13 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/joshp123/codex-switch/internal/store"
 )
 
-// SignInClaude obtains an independent rotating login; it never borrows another client's refresh token.
-func SignInClaude(dataDirectory, accountName string) (PoolAccount, error) {
+// SignInClaude obtains an independent rotating login; it never borrows another
+// client's refresh token. With replacing set, it replaces that account's login.
+func SignInClaude(dataDirectory string, replacing store.AccountKey) (PoolAccount, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 	var randomBytes [32]byte
@@ -124,10 +127,10 @@ func SignInClaude(dataDirectory, accountName string) (PoolAccount, error) {
 	var published PoolAccount
 	err = withPoolLock(dataDirectory, func() error {
 		var publishErr error
-		published, publishErr = publishLogin(dataDirectory, staging, accountName, signedIn)
+		published, publishErr = publishLogin(dataDirectory, staging, replacing, signedIn)
 		return publishErr
 	})
-	if err != nil || accountName != "" {
+	if err != nil || replacing != "" {
 		_ = trash(staging)
 	}
 	return published, err

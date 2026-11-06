@@ -12,8 +12,8 @@ type allowanceIdentityKey struct{ seconds, reset int64 }
 // authenticated allowance windows covering the completion's timestamp.
 // attributeCompletion also notes in consulted every allowance window it
 // looked up, so a later change of that window's owner rebuilds the totals.
-func attributeCompletion(completion *reconciledCompletion, allowance *sessionAllowance, providerByName map[store.AccountName]store.ProviderAccountID, owners map[allowanceIdentityKey]store.ProviderAccountID, consulted map[allowanceIdentityKey]bool) {
-	completion.ProviderAccountID = providerByName[completion.AccountName]
+func attributeCompletion(completion *reconciledCompletion, allowance *sessionAllowance, providerByKey map[store.AccountKey]store.ProviderAccountID, owners map[allowanceIdentityKey]store.ProviderAccountID, consulted map[allowanceIdentityKey]bool) {
+	completion.ProviderAccountID = providerByKey[completion.AccountKey]
 	if completion.ProviderAccountID != "" {
 		return
 	}

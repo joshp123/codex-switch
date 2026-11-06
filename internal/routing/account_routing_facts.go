@@ -9,6 +9,6 @@ import (
 type AccountRoutingFactsSource interface {
 	ReadAccountRoutingFacts() ([]accounts.AccountRoutingFact, error)
 	RequestAccountRoutingFactsRefresh()
-	ExcludeUnsupportedAccountModel(accountName store.AccountName, modelSlug string)
-	RefreshAccountCredentialsAfterUnauthorized(accountName store.AccountName, rejected accounts.Credentials) error
+	ExcludeUnsupportedAccountModel(accountKey store.AccountKey, modelSlug string)
+	RefreshAccountCredentialsAfterUnauthorized(accountKey store.AccountKey, rejected accounts.Credentials) error
 }

@@ -33,7 +33,7 @@ func (exhausted *ClaudePoolExhaustedError) Unwrap() error { return ErrNoAvailabl
 
 // RouteDecision carries credentials with the account identity so the relay cannot mix accounts.
 type RouteDecision struct {
-	AccountName store.AccountName
+	AccountKey  store.AccountKey
 	DisplayName string
 	Credentials accounts.Credentials
 	// Assignment is empty when model work stays on its pinned account. Otherwise it
@@ -86,7 +86,7 @@ func (router *TaskRouter) RouteForProviderTask(taskID store.TaskID, workKind sto
 	}
 	pinnedAccountProblem := ""
 	if pinned {
-		fact, inPool := factForAccount(facts, pin.AccountName)
+		fact, inPool := factForAccount(facts, pin.AccountKey)
 		if !inPool {
 			pinnedAccountProblem = "no longer in the account pool"
 		} else if pinnedAccountProblem, err = router.accountUnavailableReason(fact, modelSlug); err != nil {
@@ -98,11 +98,11 @@ func (router *TaskRouter) RouteForProviderTask(taskID store.TaskID, workKind sto
 			if provider == accounts.ProviderClaude && workKind == store.ModelTurnWorkKind {
 				// The pin's time is the session's last model request, so it
 				// expires with the prompt cache.
-				if _, err := router.storeDatabase.CompareAndSwapTaskAccountPin(taskID, pin.AccountName, pin.AccountName, router.currentTime().UTC()); err != nil {
+				if _, err := router.storeDatabase.CompareAndSwapTaskAccountPin(taskID, pin.AccountKey, pin.AccountKey, router.currentTime().UTC()); err != nil {
 					return RouteDecision{}, err
 				}
 			}
-			return RouteDecision{AccountName: pin.AccountName, DisplayName: fact.DisplayName, Credentials: fact.Credentials}, nil
+			return RouteDecision{AccountKey: pin.AccountKey, DisplayName: fact.DisplayName, Credentials: fact.Credentials}, nil
 		}
 	}
 
@@ -112,18 +112,18 @@ func (router *TaskRouter) RouteForProviderTask(taskID store.TaskID, workKind sto
 			return RouteDecision{}, err
 		}
 		if parentPinned {
-			if parentFact, present := factForAccount(facts, parentPin.AccountName); present {
+			if parentFact, present := factForAccount(facts, parentPin.AccountKey); present {
 				problem, err := router.accountUnavailableReason(parentFact, modelSlug)
 				if err != nil {
 					return RouteDecision{}, err
 				}
 				if problem == "" && !accounts.SoftReserveReached(parentFact, router.currentTime().UTC()) {
-					winner, err := router.storeDatabase.PinTaskAccountIfAbsent(store.TaskAccountPin{TaskID: taskID, AccountName: parentPin.AccountName, PinnedAt: router.currentTime().UTC()})
+					winner, err := router.storeDatabase.PinTaskAccountIfAbsent(store.TaskAccountPin{TaskID: taskID, AccountKey: parentPin.AccountKey, PinnedAt: router.currentTime().UTC()})
 					if err != nil {
 						return RouteDecision{}, err
 					}
-					if winner.AccountName == parentPin.AccountName {
-						return RouteDecision{AccountName: parentPin.AccountName, DisplayName: parentFact.DisplayName, Credentials: parentFact.Credentials, Assignment: "fork keeps its parent's account " + parentFact.DisplayName}, nil
+					if winner.AccountKey == parentPin.AccountKey {
+						return RouteDecision{AccountKey: parentPin.AccountKey, DisplayName: parentFact.DisplayName, Credentials: parentFact.Credentials, Assignment: "fork keeps its parent's account " + parentFact.DisplayName}, nil
 					}
 					return router.RouteForProviderTask(taskID, workKind, modelSlug, provider, parentTaskID)
 				}
@@ -143,7 +143,7 @@ func (router *TaskRouter) RouteForProviderTask(taskID store.TaskID, workKind sto
 		return RouteDecision{}, fmt.Errorf("%w: %s", ErrNoAvailableAccount, router.describeUnavailableAccounts(facts, modelSlug))
 	}
 
-	decision := RouteDecision{AccountName: selected.AccountName, DisplayName: selected.DisplayName, Credentials: selected.Credentials}
+	decision := RouteDecision{AccountKey: selected.AccountKey, DisplayName: selected.DisplayName, Credentials: selected.Credentials}
 	if workKind != store.ModelTurnWorkKind {
 		return decision, nil
 	}
@@ -153,27 +153,27 @@ func (router *TaskRouter) RouteForProviderTask(taskID store.TaskID, workKind sto
 		decision.Assignment = "served by " + choice + "; not pinned to a task"
 		return decision, nil
 	case pinned:
-		moved, err := router.storeDatabase.CompareAndSwapTaskAccountPin(taskID, pin.AccountName, selected.AccountName, router.currentTime().UTC())
+		moved, err := router.storeDatabase.CompareAndSwapTaskAccountPin(taskID, pin.AccountKey, selected.AccountKey, router.currentTime().UTC())
 		if err != nil {
 			return RouteDecision{}, err
 		}
 		if !moved {
 			return router.RouteForProviderTask(taskID, workKind, modelSlug, provider, parentTaskID)
 		}
-		if selected.AccountName == pin.AccountName {
+		if selected.AccountKey == pin.AccountKey {
 			decision.Assignment = fmt.Sprintf("stays on %s (%s)", choice, pinnedAccountProblem)
 			return decision, nil
 		}
-		decision.Assignment = fmt.Sprintf("moved from %s (%s) to %s", router.accountDisplayName(pin.AccountName), pinnedAccountProblem, choice)
+		decision.Assignment = fmt.Sprintf("moved from %s (%s) to %s", router.accountDisplayName(pin.AccountKey), pinnedAccountProblem, choice)
 		return decision, nil
 	}
 	winner, err := router.storeDatabase.PinTaskAccountIfAbsent(store.TaskAccountPin{
-		TaskID: taskID, AccountName: selected.AccountName, PinnedAt: router.currentTime().UTC(),
+		TaskID: taskID, AccountKey: selected.AccountKey, PinnedAt: router.currentTime().UTC(),
 	})
 	if err != nil {
 		return RouteDecision{}, err
 	}
-	if winner.AccountName != selected.AccountName {
+	if winner.AccountKey != selected.AccountKey {
 		return router.RouteForProviderTask(taskID, workKind, modelSlug, provider, parentTaskID)
 	}
 	decision.Assignment = "new task assigned to " + choice
@@ -182,10 +182,10 @@ func (router *TaskRouter) RouteForProviderTask(taskID store.TaskID, workKind sto
 
 // ReportExhaustedTurn changes the account for the next client request; routing never resends work.
 // It returns what happened to the task, for the proxy log.
-func (router *TaskRouter) ReportExhaustedTurn(taskID store.TaskID, servedAccountName store.AccountName, resetsAt time.Time) string {
-	outcome, err := router.reportExhaustedTaskPin(taskID, servedAccountName, resetsAt)
+func (router *TaskRouter) ReportExhaustedTurn(taskID store.TaskID, servedAccountKey store.AccountKey, resetsAt time.Time) string {
+	outcome, err := router.reportExhaustedTaskPin(taskID, servedAccountKey, resetsAt)
 	if err != nil {
-		return fmt.Sprintf("%s hit its usage limit%s; could not move the task: %v", router.accountDisplayName(servedAccountName), resetSuffix(resetsAt), err)
+		return fmt.Sprintf("%s hit its usage limit%s; could not move the task: %v", router.accountDisplayName(servedAccountKey), resetSuffix(resetsAt), err)
 	}
 	return outcome
 }
@@ -213,25 +213,25 @@ func (router *TaskRouter) ClaudePoolCapacity(modelSlug string) (accountFree bool
 }
 
 // ReportUnauthorizedTurn refreshes rejected credentials for the client's next request without replaying the failed turn.
-func (router *TaskRouter) ReportUnauthorizedTurn(servedAccountName store.AccountName, rejectedCredentials accounts.Credentials) {
-	if err := router.accountFacts.RefreshAccountCredentialsAfterUnauthorized(servedAccountName, rejectedCredentials); err != nil {
-		log.Printf("%s: the provider rejected its login and refreshing it failed: %v", router.accountDisplayName(servedAccountName), err)
+func (router *TaskRouter) ReportUnauthorizedTurn(servedAccountKey store.AccountKey, rejectedCredentials accounts.Credentials) {
+	if err := router.accountFacts.RefreshAccountCredentialsAfterUnauthorized(servedAccountKey, rejectedCredentials); err != nil {
+		log.Printf("%s: the provider rejected its login and refreshing it failed: %v", router.accountDisplayName(servedAccountKey), err)
 	}
 }
 
-func (router *TaskRouter) reportExhaustedTaskPin(taskID store.TaskID, servedAccountName store.AccountName, resetsAt time.Time) (string, error) {
-	limitReached := fmt.Sprintf("%s hit its usage limit%s", router.accountDisplayName(servedAccountName), resetSuffix(resetsAt))
-	if err := router.storeDatabase.RecordAccountReportedReset(servedAccountName, resetsAt, router.currentTime().UTC()); err != nil {
+func (router *TaskRouter) reportExhaustedTaskPin(taskID store.TaskID, servedAccountKey store.AccountKey, resetsAt time.Time) (string, error) {
+	limitReached := fmt.Sprintf("%s hit its usage limit%s", router.accountDisplayName(servedAccountKey), resetSuffix(resetsAt))
+	if err := router.storeDatabase.RecordAccountReportedReset(servedAccountKey, resetsAt, router.currentTime().UTC()); err != nil {
 		return "", err
 	}
 	facts, err := router.accountFacts.ReadAccountRoutingFacts()
 	if err != nil {
 		return "", fmt.Errorf("read account routing facts: %w", err)
 	}
-	if served, found := factForAccount(facts, servedAccountName); found {
+	if served, found := factForAccount(facts, servedAccountKey); found {
 		facts = factsForProvider(facts, served.Provider)
 	}
-	selected, found, err := router.selectAccountForNewWork(facts, servedAccountName, "")
+	selected, found, err := router.selectAccountForNewWork(facts, servedAccountKey, "")
 	if err != nil {
 		return "", err
 	}
@@ -243,7 +243,7 @@ func (router *TaskRouter) reportExhaustedTaskPin(taskID store.TaskID, servedAcco
 		return limitReached + "; the next request goes to " + router.describeChoice(selected, ""), nil
 	}
 	moved, err := router.storeDatabase.CompareAndSwapTaskAccountPin(
-		taskID, servedAccountName, selected.AccountName, router.currentTime().UTC())
+		taskID, servedAccountKey, selected.AccountKey, router.currentTime().UTC())
 	if err != nil || !moved {
 		return limitReached, err
 	}
@@ -256,11 +256,11 @@ func (router *TaskRouter) reportExhaustedTaskPin(taskID store.TaskID, servedAcco
 // refills a week later. Then the weekly allowance that resets soonest, because
 // allowance left at a reset is lost and allowance that resets later keeps.
 // Equal resets go to the account with more left.
-func (router *TaskRouter) selectAccountForNewWork(facts []accounts.AccountRoutingFact, excludedAccountName store.AccountName, modelSlug string) (accounts.AccountRoutingFact, bool, error) {
+func (router *TaskRouter) selectAccountForNewWork(facts []accounts.AccountRoutingFact, excludedAccountKey store.AccountKey, modelSlug string) (accounts.AccountRoutingFact, bool, error) {
 	var selected accounts.AccountRoutingFact
 	var selectedRank newWorkRank
 	for _, fact := range facts {
-		if fact.AccountName == excludedAccountName {
+		if fact.AccountKey == excludedAccountKey {
 			continue
 		}
 		problem, err := router.accountUnavailableReason(fact, modelSlug)
@@ -272,11 +272,11 @@ func (router *TaskRouter) selectAccountForNewWork(facts []accounts.AccountRoutin
 		}
 		weekly, weeklyKnown := router.weeklyAllowance(fact, modelSlug)
 		rank := newWorkRank{softReserveReached: accounts.SoftReserveReached(fact, router.currentTime().UTC()), weekly: weekly, weeklyKnown: weeklyKnown}
-		if selected.AccountName == "" || rank.before(selectedRank) {
+		if selected.AccountKey == "" || rank.before(selectedRank) {
 			selected, selectedRank = fact, rank
 		}
 	}
-	return selected, selected.AccountName != "", nil
+	return selected, selected.AccountKey != "", nil
 }
 
 type newWorkRank struct {
@@ -327,17 +327,17 @@ func (router *TaskRouter) describeUnavailableAccounts(facts []accounts.AccountRo
 }
 
 // ReportUnsupportedModel prepares the next client request without resending rejected work.
-func (router *TaskRouter) ReportUnsupportedModel(taskID store.TaskID, accountName store.AccountName, modelSlug string) bool {
-	router.accountFacts.ExcludeUnsupportedAccountModel(accountName, modelSlug)
+func (router *TaskRouter) ReportUnsupportedModel(taskID store.TaskID, accountKey store.AccountKey, modelSlug string) bool {
+	router.accountFacts.ExcludeUnsupportedAccountModel(accountKey, modelSlug)
 	facts, err := router.accountFacts.ReadAccountRoutingFacts()
 	if err != nil {
 		log.Printf("read model routing facts: %v", err)
 		return false
 	}
-	if served, found := factForAccount(facts, accountName); found {
+	if served, found := factForAccount(facts, accountKey); found {
 		facts = factsForProvider(facts, served.Provider)
 	}
-	selected, found, err := router.selectAccountForNewWork(accountsWithKnownModels(facts), accountName, modelSlug)
+	selected, found, err := router.selectAccountForNewWork(accountsWithKnownModels(facts), accountKey, modelSlug)
 	if err != nil {
 		log.Printf("select supported model account: %v", err)
 		return false
@@ -348,7 +348,7 @@ func (router *TaskRouter) ReportUnsupportedModel(taskID store.TaskID, accountNam
 		rejectedAccountExcluded := false
 		supportedAccountExists := false
 		for _, fact := range facts {
-			if fact.AccountName == accountName {
+			if fact.AccountKey == accountKey {
 				rejectedAccountExcluded = fact.SupportedModelSlugs != nil && !accountSupportsModel(fact, modelSlug)
 			} else if accountCredentialsUsable(fact.Credentials) && fact.SupportedModelSlugs != nil && accountSupportsModel(fact, modelSlug) {
 				supportedAccountExists = true
@@ -356,7 +356,7 @@ func (router *TaskRouter) ReportUnsupportedModel(taskID store.TaskID, accountNam
 		}
 		return rejectedAccountExcluded && supportedAccountExists
 	}
-	moved, err := router.storeDatabase.CompareAndSwapTaskAccountPin(taskID, accountName, selected.AccountName, router.currentTime().UTC())
+	moved, err := router.storeDatabase.CompareAndSwapTaskAccountPin(taskID, accountKey, selected.AccountKey, router.currentTime().UTC())
 	if err != nil {
 		log.Printf("move unsupported model task pin: %v", err)
 		return false
@@ -395,19 +395,19 @@ func (router *TaskRouter) RouteForModelCatalogue() (RouteDecision, error) {
 		router.accountFacts.RequestAccountRoutingFactsRefresh()
 		return RouteDecision{}, ErrNoAvailableAccount
 	}
-	return RouteDecision{AccountName: selected.AccountName, DisplayName: selected.DisplayName, Credentials: selected.Credentials}, nil
+	return RouteDecision{AccountKey: selected.AccountKey, DisplayName: selected.DisplayName, Credentials: selected.Credentials}, nil
 }
 
 // ReadAccountAvailability uses the same rule as admission. An empty reason means
 // the account can take new work for modelSlug.
-func (router *TaskRouter) ReadAccountAvailability(modelSlug string) ([]accounts.AccountRoutingFact, map[store.AccountName]string, error) {
+func (router *TaskRouter) ReadAccountAvailability(modelSlug string) ([]accounts.AccountRoutingFact, map[store.AccountKey]string, error) {
 	facts, err := router.accountFacts.ReadAccountRoutingFacts()
 	if err != nil {
 		return nil, nil, err
 	}
-	unavailableReasons := make(map[store.AccountName]string, len(facts))
+	unavailableReasons := make(map[store.AccountKey]string, len(facts))
 	for _, fact := range facts {
-		if unavailableReasons[fact.AccountName], err = router.accountUnavailableReason(fact, availabilityModel(fact, modelSlug)); err != nil {
+		if unavailableReasons[fact.AccountKey], err = router.accountUnavailableReason(fact, availabilityModel(fact, modelSlug)); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -431,7 +431,7 @@ func availabilityModel(fact accounts.AccountRoutingFact, codexModel string) stri
 	return codexModel
 }
 
-func (router *TaskRouter) accountDisplayName(key store.AccountName) string {
+func (router *TaskRouter) accountDisplayName(key store.AccountKey) string {
 	facts, err := router.accountFacts.ReadAccountRoutingFacts()
 	if err != nil {
 		return "account"

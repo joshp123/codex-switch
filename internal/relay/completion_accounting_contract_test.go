@@ -21,6 +21,7 @@ func TestCompletionAccountingPreservesCacheWritesAndExcludesPrewarm(t *testing.T
 		t.Fatal(err)
 	}
 	defer ledger.CloseStoreDatabase()
+	rememberTestAccounts(t, ledger, "account")
 	observer := newTerminalResponseObserver("task", "test-client", "account", nil, ledger)
 	falseValue, trueValue := false, true
 	for _, test := range []struct {

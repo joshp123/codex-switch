@@ -17,7 +17,7 @@ type taskTotal struct {
 	Title           string
 	Tokens          int64
 	Cost            *nanoUSD
-	Accounts        []store.AccountName
+	Accounts        []store.AccountKey
 	LastCompletedAt time.Time
 }
 

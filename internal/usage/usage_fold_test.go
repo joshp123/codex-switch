@@ -226,7 +226,7 @@ func TestFutureAllowanceTriggersRefoldWhenItsTimestampArrives(t *testing.T) {
 
 func refreshTestFold(t *testing.T, ledger *UsageLedger, now time.Time) *usageFold {
 	t.Helper()
-	state, err := ledger.refreshUsageFold(context.Background(), now, []accounts.PoolAccount{{Name: "account", AccountID: "provider"}}, time.Time{})
+	state, err := ledger.refreshUsageFold(context.Background(), now, []accounts.PoolAccount{{Key: "account", AccountID: "provider"}}, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,7 +284,7 @@ func insertFoldNative(t *testing.T, ledger *UsageLedger, observation sessionUsag
 
 func recordFoldProxy(t *testing.T, ledger *UsageLedger, responseID, task string, at time.Time, input, output int64) {
 	t.Helper()
-	if err := ledger.database.RecordCompletedResponse(store.CompletedResponseRecord{CompletedResponseID: store.CompletedResponseID(responseID), TaskID: store.TaskID(task), AccountName: "account", ModelSlug: "gpt-5.6-luna", HarnessMode: "standard", InputTokens: input, OutputTokens: output, CompletedAt: at}); err != nil {
+	if err := ledger.database.RecordCompletedResponse(store.CompletedResponseRecord{CompletedResponseID: store.CompletedResponseID(responseID), TaskID: store.TaskID(task), AccountKey: "account", ModelSlug: "gpt-5.6-luna", HarnessMode: "standard", InputTokens: input, OutputTokens: output, CompletedAt: at}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -350,7 +350,7 @@ func TestLateProxyRetainsLegacyNativeOverlapError(t *testing.T) {
 	insertFoldNative(t, ledger, sessionUsageObservation{TaskID: "legacy", At: now.Add(-time.Second), Model: "gpt-5.6-luna", Usage: &tokenUsage{InputTokens: 10, OutputTokens: 2}})
 	refreshTestFold(t, ledger, now)
 	recordFoldProxy(t, ledger, "overlapping", "legacy", now.Add(-2*time.Second), 20, 3)
-	if _, err := ledger.refreshUsageFold(context.Background(), now, []accounts.PoolAccount{{Name: "account", AccountID: "provider"}}, time.Time{}); err == nil {
+	if _, err := ledger.refreshUsageFold(context.Background(), now, []accounts.PoolAccount{{Key: "account", AccountID: "provider"}}, time.Time{}); err == nil {
 		t.Fatal("late proxy silently counted overlapping legacy native usage")
 	}
 }

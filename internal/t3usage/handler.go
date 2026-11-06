@@ -47,7 +47,7 @@ func Handler(capability, directory string, monitor *accounts.Monitor, next http.
 				} else {
 					identity = &t3pb.AuthIdentity{ChatgptAccountId: account.AccountID}
 				}
-				result.Files = append(result.Files, &t3pb.AuthFile{Id: account.Name, AuthIndex: account.Name, Provider: provider, Email: account.Email, IdToken: identity})
+				result.Files = append(result.Files, &t3pb.AuthFile{Id: string(account.Key), AuthIndex: string(account.Key), Provider: provider, Email: account.Email, IdToken: identity})
 			}
 			write(w, result)
 		case r.Method == http.MethodPost && r.URL.Path == prefix+"api-call":
@@ -71,7 +71,7 @@ func Handler(capability, directory string, monitor *accounts.Monitor, next http.
 				return
 			}
 			for _, fact := range facts {
-				if string(fact.AccountName) != call.AuthIndex || (fact.Provider == accounts.ProviderClaude) != (call.Url == claudeUsageURL) {
+				if string(fact.AccountKey) != call.AuthIndex || (fact.Provider == accounts.ProviderClaude) != (call.Url == claudeUsageURL) {
 					continue
 				}
 				var message proto.Message

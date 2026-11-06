@@ -12,7 +12,7 @@ type reconciledCompletion struct {
 	TaskID            string
 	At                time.Time
 	LastCompletedAt   time.Time
-	AccountName       store.AccountName
+	AccountKey        store.AccountKey
 	ProviderAccountID store.ProviderAccountID
 	Model             string
 	Tokens            int64
@@ -33,7 +33,7 @@ func nativeCompletion(observation *sessionUsageObservation, proxy *store.Complet
 		if usage.InputTokens != proxy.InputTokens || usage.CachedInputTokens != proxy.CachedInputTokens || usage.OutputTokens != proxy.OutputTokens || usage.ReasoningOutputTokens != proxy.ReasoningTokens {
 			return reconciledCompletion{}, fmt.Errorf("token counts disagree for response %s", completion.ResponseID)
 		}
-		completion.AccountName = proxy.AccountName
+		completion.AccountKey = proxy.AccountKey
 		completion.Model = proxy.ModelSlug
 		// A task's latest completion uses the latest proxy or native response
 		// timestamp. Its usage date still comes from the native timestamp.
@@ -64,5 +64,5 @@ func proxyCompletion(response store.CompletedResponseRecord) reconciledCompletio
 		price := nanoUSD(*response.CostNanoUSD)
 		cost = &price
 	}
-	return reconciledCompletion{TaskID: string(response.TaskID), At: response.CompletedAt, LastCompletedAt: response.CompletedAt, AccountName: response.AccountName, Model: response.ModelSlug, Tokens: response.InputTokens + response.OutputTokens, Cost: cost, Fast: mode == harnessFast, ResponseID: response.CompletedResponseID}
+	return reconciledCompletion{TaskID: string(response.TaskID), At: response.CompletedAt, LastCompletedAt: response.CompletedAt, AccountKey: response.AccountKey, Model: response.ModelSlug, Tokens: response.InputTokens + response.OutputTokens, Cost: cost, Fast: mode == harnessFast, ResponseID: response.CompletedResponseID}
 }

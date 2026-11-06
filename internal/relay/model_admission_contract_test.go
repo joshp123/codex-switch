@@ -20,7 +20,7 @@ import (
 
 type modelAdmissionRouter struct {
 	TaskRouter
-	account            store.AccountName
+	account            store.AccountKey
 	model              string
 	unsupported        int
 	declineUnsupported bool
@@ -28,13 +28,13 @@ type modelAdmissionRouter struct {
 
 func (r *modelAdmissionRouter) RouteForTask(_ store.TaskID, _ store.WorkKind, model string) (routing.RouteDecision, error) {
 	r.model = model
-	return routing.RouteDecision{AccountName: r.account, Credentials: accounts.Credentials{AccessToken: "test", AccountID: "test"}}, nil
+	return routing.RouteDecision{AccountKey: r.account, Credentials: accounts.Credentials{AccessToken: "test", AccountID: "test"}}, nil
 }
-func (r *modelAdmissionRouter) ReportUnsupportedModel(_ store.TaskID, _ store.AccountName, _ string) bool {
+func (r *modelAdmissionRouter) ReportUnsupportedModel(_ store.TaskID, _ store.AccountKey, _ string) bool {
 	r.unsupported++
 	return !r.declineUnsupported
 }
-func (r *modelAdmissionRouter) ReportExhaustedTurn(_ store.TaskID, _ store.AccountName, _ time.Time) string {
+func (r *modelAdmissionRouter) ReportExhaustedTurn(_ store.TaskID, _ store.AccountKey, _ time.Time) string {
 	return ""
 }
 
@@ -252,7 +252,7 @@ func TestHTTPUnsupportedModelReconnectRequiresAlternative(t *testing.T) {
 }
 
 func (r *modelAdmissionRouter) RouteForModelCatalogue() (routing.RouteDecision, error) {
-	return routing.RouteDecision{AccountName: "catalogue-account", Credentials: accounts.Credentials{AccessToken: "catalogue-token", AccountID: "catalogue-id"}}, nil
+	return routing.RouteDecision{AccountKey: "catalogue-account", Credentials: accounts.Credentials{AccessToken: "catalogue-token", AccountID: "catalogue-id"}}, nil
 }
 
 func TestModelCatalogueUsesIndependentRouteAndPreservesProviderBytes(t *testing.T) {
@@ -328,7 +328,7 @@ func TestStreamingRequestAccountsForSSEWithMissingOrSynthesizedContentType(t *te
 				t.Fatalf("completion count = %d", len(ledger.records))
 			}
 			record := ledger.records[0]
-			if record.TaskID != "task-http" || record.AccountName != "account-1" || record.InputTokens != 13631 || record.CachedInputTokens != 9984 || record.CacheWriteInputTokens == nil || *record.CacheWriteInputTokens != 0 || record.OutputTokens != 5 {
+			if record.TaskID != "task-http" || record.AccountKey != "account-1" || record.InputTokens != 13631 || record.CachedInputTokens != 9984 || record.CacheWriteInputTokens == nil || *record.CacheWriteInputTokens != 0 || record.OutputTokens != 5 {
 				t.Fatalf("incorrect completion: %+v", record)
 			}
 		})

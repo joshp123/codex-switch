@@ -114,15 +114,15 @@ type httpRejectionRouter struct {
 	TaskRouter
 	reportCount int
 	task        store.TaskID
-	account     store.AccountName
+	account     store.AccountKey
 	resetsAt    time.Time
 }
 
 func (*httpRejectionRouter) RouteForTask(store.TaskID, store.WorkKind, string) (routing.RouteDecision, error) {
-	return routing.RouteDecision{AccountName: "account-1", Credentials: accounts.Credentials{AccessToken: "test-token", AccountID: "test-account"}}, nil
+	return routing.RouteDecision{AccountKey: "account-1", Credentials: accounts.Credentials{AccessToken: "test-token", AccountID: "test-account"}}, nil
 }
 
-func (router *httpRejectionRouter) ReportExhaustedTurn(task store.TaskID, account store.AccountName, resetsAt time.Time) string {
+func (router *httpRejectionRouter) ReportExhaustedTurn(task store.TaskID, account store.AccountKey, resetsAt time.Time) string {
 	router.reportCount++
 	router.task, router.account, router.resetsAt = task, account, resetsAt
 	return "moved"

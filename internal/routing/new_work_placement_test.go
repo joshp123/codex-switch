@@ -15,6 +15,7 @@ func TestNewWorkUsesTheAllowanceThatResetsFirstAndStartsIdleWeeks(t *testing.T) 
 		t.Fatal(err)
 	}
 	defer database.CloseStoreDatabase()
+	rememberTestAccounts(t, database, "account-1", "account-2")
 
 	now := time.Now()
 	week := 7 * 24 * time.Hour
@@ -24,18 +25,18 @@ func TestNewWorkUsesTheAllowanceThatResetsFirstAndStartsIdleWeeks(t *testing.T) 
 		}}
 	}
 	facts := capacityWaitFacts{}
-	for _, name := range []store.AccountName{"account-1", "account-2"} {
+	for _, name := range []store.AccountKey{"account-1", "account-2"} {
 		facts = append(facts, accounts.AccountRoutingFact{
-			AccountName: name, DisplayName: string(name), Credentials: accounts.Credentials{AccessToken: "test", AccountID: string(name)},
+			AccountKey: name, DisplayName: string(name), Credentials: accounts.Credentials{AccessToken: "test", AccountID: string(name)},
 			AccountState: accounts.AccountReady, SupportedModelSlugs: []string{"luna"}, RefreshedAt: now,
 		})
 	}
 	router := CreateTaskRouter(database, facts)
-	route := func(taskID store.TaskID, want store.AccountName) RouteDecision {
+	route := func(taskID store.TaskID, want store.AccountKey) RouteDecision {
 		t.Helper()
 		decision, err := router.RouteForTask(taskID, store.ModelTurnWorkKind, "luna")
-		if err != nil || decision.AccountName != want {
-			t.Fatalf("task %q went to %s (%v); want %s", taskID, decision.AccountName, err, want)
+		if err != nil || decision.AccountKey != want {
+			t.Fatalf("task %q went to %s (%v); want %s", taskID, decision.AccountKey, err, want)
 		}
 		return decision
 	}
