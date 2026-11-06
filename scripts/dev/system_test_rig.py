@@ -581,33 +581,30 @@ def account_key(folder):
     return 'chatgpt:' + claims['email'].lower()
 
 
-def account_folder(key):
-    """The folder of the signed-in account with this key; the fake providers and the test name accounts by folder."""
-    return next((folder.name for folder in (RUN / 'data').glob('account-*') if account_key(folder.name) == key), key)
-
-
 ACCOUNT_TABLES = ('task_account_pins', 'account_reported_resets', 'completed_responses', 'model_request_counts', 'weekly_allowance_readings')
 
 
 def account_records():
-    """Every record of an account in the proxy's database, as (table, rowid, folder, key). The key is None where the
-    record has none, and the whole column is absent in a database only the published release has written."""
+    """Every record of an account in the proxy's database, as {(table, primary key): row}, each row a dictionary of its
+    columns. A record's identity is its primary key, never its rowid: SQLite reuses the rowids of deleted rows. Its
+    account_key is None where the record has none, and absent where only the published release has written."""
     with sqlite3.connect(f'file:{RUN / "data/codex-switch.db"}?mode=ro', uri=True) as database:
-        records = []
+        database.row_factory = sqlite3.Row
+        records = {}
         for table in ACCOUNT_TABLES:
-            columns = {column[1] for column in database.execute(f'PRAGMA table_info({table})')}
-            key = 'account_key' if 'account_key' in columns else 'NULL'
-            records += [(table, *row) for row in database.execute(f'SELECT rowid, account_name, {key} FROM {table}')]
+            columns = database.execute(f'PRAGMA table_info({table})').fetchall()
+            primary_key = [column['name'] for column in sorted(columns, key=lambda column: column['pk']) if column['pk']]
+            for row in database.execute(f'SELECT * FROM {table}'):
+                records[(table, tuple(row[name] for name in primary_key))] = dict(row)
         return records
 
 
 def database_rows(task):
-    """Completed responses the proxy recorded for a task, oldest first, each with the folder of the account its key
-    names. A response the published release recorded has only its folder until a later build gives it its key."""
+    """Completed responses the proxy recorded for a task, oldest first, each with the folder of its account. The folder
+    decides a record's account: builds before account keys know only folders."""
     with sqlite3.connect(f'file:{RUN / "data/codex-switch.db"}?mode=ro', uri=True) as database:
-        rows = database.execute('SELECT account_key, account_name, input_tokens, cached_input_tokens, output_tokens, reasoning_tokens '
+        return database.execute('SELECT account_name, input_tokens, cached_input_tokens, output_tokens, reasoning_tokens '
                                 'FROM completed_responses WHERE codex_task_id = ? ORDER BY completed_at_unix_nano', (task,)).fetchall()
-    return [(account_folder(key) if key else folder, *tokens) for key, folder, *tokens in rows]
 
 
 def database_row_count():
@@ -616,13 +613,11 @@ def database_row_count():
 
 
 def pinned_account(task):
-    """The folder of the account the task is pinned to, by the key in its pin. A pin the published release wrote has
-    only its folder until a later build gives it its key."""
+    """The folder of the account the task is pinned to. The folder decides: the published release moves a pin by
+    changing its folder alone."""
     with sqlite3.connect(f'file:{RUN / "data/codex-switch.db"}?mode=ro', uri=True) as database:
-        row = database.execute('SELECT account_key, account_name FROM task_account_pins WHERE codex_task_id = ?', (task,)).fetchone()
-    if not row:
-        return None
-    return account_folder(row[0]) if row[0] else row[1]
+        row = database.execute('SELECT account_name FROM task_account_pins WHERE codex_task_id = ?', (task,)).fetchone()
+    return row[0] if row else None
 
 
 def fake_provider_events(event, **only):

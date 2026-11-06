@@ -722,26 +722,41 @@ def update_during_work_finishes_on_the_old_process(system):
             'A goal running a tool across the update finished with its effect run once. Nothing was replayed and Codex showed no error.')
 
 
+# Columns the published release changes in place while it drains: a day's request counts only grow.
+GROWING_COLUMNS = {'model_request_counts': ('requests', 'successful', 'failed', 'interrupted')}
+
+
 def update_gives_old_records_their_account_keys(system):
-    """Records the published release wrote by folder name take their account keys, and a task it pinned keeps its account"""
+    """Records the published release wrote by folder name keep their contents and take their account keys, and a task it pinned keeps its account"""
     before = system.records_before_update
-    if not before or any(key is not None for *_, key in before):
+    if not before or any(row.get('account_key') is not None for row in before.values()):
         raise Failure(f'Before the update, expected records with no account key from the published release; found {before}.')
     signed_in = lambda folder: rig.account_key(folder) is not None
-    rig.wait_for(lambda: all(key is not None for _, _, folder, key in rig.account_records() if signed_in(folder)),
+    rig.wait_for(lambda: all(row['account_key'] is not None for row in rig.account_records().values() if signed_in(row['account_name'])),
                  'the new proxy to record account keys on the published release\'s records', timeout=30)
-    after = {(table, rowid): (folder, key) for table, rowid, folder, key in rig.account_records()}
-    wrong = [f'{table} row {rowid}: {folder} has {key}' for (table, rowid), (folder, key) in after.items()
-             if signed_in(folder) and key != rig.account_key(folder)]
+    after = rig.account_records()
+    wrong = [f'{table} {identity}: {row["account_name"]} has {row["account_key"]}' for (table, identity), row in after.items()
+             if signed_in(row['account_name']) and row['account_key'] != rig.account_key(row['account_name'])]
     if wrong:
         raise Failure('Records with the wrong account key, or none: ' + '; '.join(wrong[:10]))
-    kept = [(table, rowid) for table, rowid, *_ in before if (table, rowid) in after]
+    changed = []
+    for (table, identity), original in before.items():
+        now = after.get((table, identity))
+        growing = GROWING_COLUMNS.get(table, ())
+        if now is None:
+            changed.append(f'{table} {identity} is gone')
+        elif any(now[column] != value for column, value in original.items() if column not in growing):
+            changed.append(f'{table} {identity} was {original}, is {now}')
+        elif any(now[column] < original[column] for column in growing):
+            changed.append(f'{table} {identity} counts fell from {original} to {now}')
+    if changed:
+        raise Failure(f'{len(changed)} of {len(before)} records the published release wrote were lost or changed: ' + '; '.join(changed[:10]))
     goal_accounts = {row[0] for row in rig.database_rows(system.goal_across_update)}
     if len(goal_accounts) != 1:
         raise Failure(f'The goal pinned by the published release was served by {sorted(goal_accounts)} across the update.')
-    tables = sorted({table for table, _ in kept})
-    return (f'{len(kept)} records the published release wrote by folder name ({", ".join(tables)}) took their accounts\'\n'
-            f'keys after the update, and still name their folders for that release. The goal it pinned stayed on {goal_accounts.pop()}.')
+    tables = sorted({table for table, _ in before})
+    return (f'All {len(before)} records the published release wrote by folder name ({", ".join(tables)}) kept their\n'
+            f'contents and folders and took their accounts\' keys after the update. The goal it pinned stayed on {goal_accounts.pop()}.')
 
 
 def rollback_keeps_tasks_on_their_accounts(system):
@@ -786,10 +801,48 @@ def rollback_keeps_tasks_on_their_accounts(system):
     if any(accounts != [leader] for accounts in served.values()) or new_work != runner_up or errors:
         raise Failure(f'Across the update and rollback, the tasks pinned to {leader} were served by {served} and new work went to '
                       f'{new_work}, not {runner_up}; Codex showed {describe_errors(errors)}.')
+    system.rolled_back_task, system.rolled_back_leader = during.thread, leader
     return (f'After build {updated["build"]} converted the records, deploy.sh back restored the published build {published_build}.\n'
             f'A task the published release started stayed on {served["published"][0]} through the update and back, and a task\n'
             f'the updated build started stayed on {served["updated"][0]}, while new work went to {system.describe(runner_up)}.\n'
             f'Nothing was replayed and Codex showed no error.')
+
+
+def update_after_rollback_keeps_a_task_the_published_release_moved(system):
+    """A task the rolled-back published release moves off an exhausted account stays where it moved when the next update switches"""
+    task, leader = system.rolled_back_task, system.rolled_back_leader
+    reads = len(rig.fake_provider_events('usage-read', account=leader))
+    system.limited.add(leader)
+    system.apply()
+    rig.wait_for(lambda: len(rig.fake_provider_events('usage-read', account=leader)) >= reads + 2, f'the published release to read {leader} exhausted')
+    already = len(rig.forwarded_requests(thread=task))
+    moved = rig.CodexTask('rollback-turn-exhausted', 'Reply with the word moved.', thread=task).finish()
+    moved_to = sorted({account for account, _ in rig.forwarded_requests(thread=task)[already:]})
+    if moved_to == [leader] or len(moved_to) != 1 or rig.pinned_account(task) != moved_to[0]:
+        raise Failure(f'With {leader} exhausted, the published release sent the task\'s turn to {moved_to} and pinned it to {rig.pinned_account(task)}.')
+    # The exhausted account recovers; only the pin the published release moved keeps the task off it.
+    reads = len(rig.fake_provider_events('usage-read', account=leader))
+    system.limited.discard(leader)
+    system.apply()
+    rig.wait_for(lambda: len(rig.fake_provider_events('usage-read', account=leader)) >= reads + 2, f'the published release to read {leader} available')
+    old = rig.deploy_status()['pid']
+    update = start_installer('candidate-2', 'update-after-rollback')
+    wait_for_candidate(old)
+    already = len(rig.forwarded_requests(thread=task))
+    after = rig.CodexTask('rollback-turn-after-update', 'Reply with the word stayed.', thread=task).finish()
+    if update.wait(timeout=120):
+        raise Failure(f'The update failed: {rig.read("logs/update-after-rollback.err")[-400:]}')
+    served = sorted({account for account, _ in rig.forwarded_requests(thread=task)[already:]})
+    require_no_replay('The moved task', rig.forwarded_requests(thread=task))
+    errors = moved.errors + after.errors
+    if served != moved_to or errors:
+        raise Failure(f'The published release moved the task to {moved_to[0]}; after the update its turn went to {served}'
+                      + (f', and Codex showed {describe_errors(errors)}.' if errors else '.'))
+    pin = next(row for (table, _), row in rig.account_records().items() if table == 'task_account_pins' and row['codex_task_id'] == task)
+    if pin['account_key'] != rig.account_key(pin['account_name']):
+        raise Failure(f'The moved pin names {pin["account_name"]} but stores the key {pin["account_key"]}.')
+    return (f'With {leader} exhausted, the rolled-back published release moved a task to {moved_to[0]}. {leader} recovered, and after\n'
+            f'the next update the task\'s turn still went to {moved_to[0]}, whose key its pin now stores. Codex showed no error.')
 
 
 def retiring_proxy_keeps_only_working_connections(system):
@@ -1107,7 +1160,7 @@ def stored_resets(system):
 # the published release; every other system starts on a build of this tree.
 GROUPS = [
     ('update', 'published-release', [update_waits_for_work, update_during_work_finishes_on_the_old_process, update_gives_old_records_their_account_keys]),
-    ('rollback', 'published-release', [rollback_keeps_tasks_on_their_accounts]),
+    ('rollback', 'published-release', [rollback_keeps_tasks_on_their_accounts, update_after_rollback_keeps_a_task_the_published_release_moved]),
     ('resets', 'cli', [stored_resets]),
     ('routing', 'cli', [t3_reads_the_account_pool, new_work_goes_to_the_allowance_that_resets_first, request_without_task_id_is_served]),
     ('exhaustion', 'cli', [exhausted_task_moves_on_its_next_turn]),
