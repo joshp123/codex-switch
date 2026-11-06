@@ -400,22 +400,15 @@ def post_without_task_id(base, prompt):
     return response.status, completed
 
 
-class Goal:
-    """One /goal in the official Codex app-server, started once and then left to run by itself."""
+class AppServer:
+    """The official Codex app-server over stdio, as the Codex app drives it."""
 
-    def __init__(self, name, objective):
+    def __init__(self, name):
         self.name, self.notifications, self.responses, self.next_id = name, [], queue.Queue(), 0
-        self.effect_file, self.result_file = RUN / f'work/{name}-effects.txt', RUN / f'work/{name}-result.txt'
         self.process = start_client([CODEX, 'app-server', '--stdio'], name, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         threading.Thread(target=self.read_messages, daemon=True).start()
         self.request('initialize', {'clientInfo': {'name': 'codex_switch_system_test', 'version': '1'}, 'capabilities': {'experimentalApi': True}})
         self.send({'method': 'initialized', 'params': {}})
-        self.thread = self.request('thread/start', {'cwd': str(RUN / 'work'), 'model': MODEL, 'sandbox': 'workspace-write',
-                                                    'approvalPolicy': 'never'})['thread']['id']
-        objective = objective.format(effect=self.effect_file.name, result=self.result_file.name, release=f'{name}-release')
-        self.request('thread/goal/set', {'threadId': self.thread, 'objective': objective, 'tokenBudget': 200000})
-        # The first turn is the person pressing send; every later turn belongs to the goal.
-        self.request('turn/start', {'threadId': self.thread, 'input': [{'type': 'text', 'text': 'Work on the active goal.'}]})
 
     def read_messages(self):
         with (RUN / f'logs/{self.name}.jsonl').open('w') as log:
@@ -439,6 +432,34 @@ class Goal:
                     raise Failure(f'{self.name}: app-server refused {method}: {message["error"]}')
                 return message['result']
 
+    def close(self):
+        self.process.stdin.close()
+        self.process.wait(timeout=30)
+
+
+def fork_codex_task(name, thread, prompt):
+    """Forks a Codex task and runs one turn in the fork, as the Codex app does after a task's turns. Returns the fork's thread ID."""
+    server = AppServer(name)
+    fork = server.request('thread/fork', {'threadId': thread})['thread']['id']
+    server.request('turn/start', {'threadId': fork, 'input': [{'type': 'text', 'text': prompt}]})
+    wait_for(lambda: any(message.get('method') == 'turn/completed' for message in server.notifications), f'the fork {name} to finish its turn', timeout=120)
+    server.close()
+    return fork
+
+
+class Goal(AppServer):
+    """One /goal in the official Codex app-server, started once and then left to run by itself."""
+
+    def __init__(self, name, objective):
+        super().__init__(name)
+        self.effect_file, self.result_file = RUN / f'work/{name}-effects.txt', RUN / f'work/{name}-result.txt'
+        self.thread = self.request('thread/start', {'cwd': str(RUN / 'work'), 'model': MODEL, 'sandbox': 'workspace-write',
+                                                    'approvalPolicy': 'never'})['thread']['id']
+        objective = objective.format(effect=self.effect_file.name, result=self.result_file.name, release=f'{name}-release')
+        self.request('thread/goal/set', {'threadId': self.thread, 'objective': objective, 'tokenBudget': 200000})
+        # The first turn is the person pressing send; every later turn belongs to the goal.
+        self.request('turn/start', {'threadId': self.thread, 'input': [{'type': 'text', 'text': 'Work on the active goal.'}]})
+
     def ended(self):
         """The goal's final status, once it has one and its last turn has finished."""
         status = self.request('thread/goal/get', {'threadId': self.thread}).get('goal', {}).get('status')
@@ -457,8 +478,7 @@ class Goal:
             raise Failure(f'Goal {self.name} ran its one-time tool effect {effects.count("START")} times.')
         if self.result_file.read_text().strip() != '16':
             raise Failure(f'Goal {self.name} wrote {self.result_file.read_text().strip()!r}, not the sum 16.')
-        self.process.stdin.close()
-        self.process.wait(timeout=30)
+        self.close()
         return [message for message in self.notifications if message.get('method') == 'error']
 
 

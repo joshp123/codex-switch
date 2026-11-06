@@ -176,6 +176,12 @@ func (handler *TrafficRelayHandler) serveAuthenticatedTraffic(response http.Resp
 		taskID = claudeSessionForRequest(request, nil)
 	}
 	var parentTaskID store.TaskID
+	if provider == accounts.ProviderChatGPT {
+		// The Codex app forks a task after its turns, sending the task's whole
+		// conversation under a new thread ID. The fork shares the task's cache
+		// only on the task's account.
+		parentTaskID = forkSourceTaskForRequest(request)
+	}
 	var cachePrefixes []string
 	workKind := workKindForRequest(request)
 	if workKind == store.ModelTurnWorkKind && handler.onModelRequest != nil {
@@ -308,7 +314,7 @@ func (handler *TrafficRelayHandler) serveAuthenticatedTraffic(response http.Resp
 		observer.modelSlug = modelSlug
 		observer.serviceTier = serviceTier
 		if provider == accounts.ProviderChatGPT {
-			observer.forkSourceTaskID = forkSourceTaskForRequest(request)
+			observer.forkSourceTaskID = parentTaskID
 		}
 		observer.requestCounters = handler.requestCounters
 		observer.onFailure = func() {

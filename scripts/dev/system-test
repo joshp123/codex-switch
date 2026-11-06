@@ -73,8 +73,11 @@ class System:
             return f'{account}, whose week had not started'
         return f'{account}, whose weekly allowance reset first ({100 - self.weekly[account]}% left)'
 
-    def record_codex_task(self, label, thread):
-        self.records.append((label, thread, lambda: rig.codex_client_usage(thread), lambda: rig.forwarded_requests(thread=thread)))
+    def record_codex_task(self, label, thread, forks=()):
+        """The proxy records a fork's responses under the task it was forked from."""
+        threads = [thread, *forks]
+        self.records.append((label, thread, lambda: [usage for each in threads for usage in rig.codex_client_usage(each)],
+                             lambda: [request for each in threads for request in rig.forwarded_requests(thread=each)]))
 
     def record_pi_session(self, label, session):
         self.records.append((label, rig.pi_task_id(session), lambda: rig.pi_client_usage(session),
@@ -262,7 +265,7 @@ def t3_reads_the_account_pool(system):
 
 
 def new_work_goes_to_the_allowance_that_resets_first(system):
-    """New work goes to an account whose week has not started, then to the allowance that resets first, and avoids soft reserves; pinned work stays until its account reaches its hard reserve"""
+    """New work goes to an account whose week has not started, then to the allowance that resets first, and avoids soft reserves; pinned work and its forks stay until the account reaches its hard reserve"""
     leader = system.best_account()
     leader_reason = system.describe(leader)
     task = rig.CodexTask('routing-task', 'Follow this script.\nRUN: ' + SUM.format(result='routing.txt') + '\nREPLY: 16').finish()
@@ -289,7 +292,13 @@ def new_work_goes_to_the_allowance_that_resets_first(system):
         system.record_pi_session('routing Pi session', session)
     new_task = rig.CodexTask('routing-new-task', 'Reply with the word fresh.').finish()
 
-    system.record_codex_task('routing Codex task', task.thread)
+    # The Codex app forks a task after its turns, sending the task's conversation under a new thread ID.
+    fork = rig.fork_codex_task('routing-fork', task.thread, 'Reply with the word forked.')
+    fork_accounts = {account for account, _ in rig.forwarded_requests(thread=fork)}
+    if fork_accounts != {leader}:
+        raise Failure(f'A fork of the Codex task pinned to {leader} was served by {sorted(fork_accounts)}, while new work went to {runner_up}.')
+
+    system.record_codex_task('routing Codex task', task.thread, forks=[fork])
     system.record_codex_task('second routing Codex task', new_task.thread)
     served = {name: {row[0] for row in rig.database_rows(task_id)} for name, task_id in tasks.items()}
     if any(accounts != {leader} for accounts in served.values()) or rig.pinned_account(new_task.thread) != runner_up:
@@ -344,6 +353,7 @@ def new_work_goes_to_the_allowance_that_resets_first(system):
         rig.proxy_command('reserve', runner_up, 'off')
     return (f'A {" and a ".join(tasks)} started on {leader_reason}.\n'
             f'Then {runner_up}\'s week had not started. Each took its second turn on {leader} again, and a new Codex task went to {runner_up}.\n'
+            f'A fork of the Codex task, made through the Codex app-server, was served by {leader} too.\n'
             f'At {account_name}\'s {reserve}% soft reserve, its pinned task stayed and new work went to {replacement}.\n'
             f'Setting its hard reserve to {reserve}% moved the pinned task on its next turn; new work still went to {replacement}.\n'
             'The proxy picked up the command without restart; no model request was replayed and Codex showed no error.')
