@@ -30,8 +30,6 @@ func main() {
 		reserveCommand(args)
 	case "reset":
 		resetCommand(args)
-	case "move-tasks":
-		moveTasksCommand(args)
 	case "serve":
 		serveCommand(args)
 	case "print-codex-config":
@@ -54,7 +52,7 @@ func selectCommand(args []string) (string, []string) {
 		return "status", args
 	}
 	switch args[0] {
-	case "login", "accounts", "remove", "reserve", "reset", "move-tasks", "serve", "status", "print-codex-config", "print-claude-config", "print-t3-config", "print-revision", "print-build":
+	case "login", "accounts", "remove", "reserve", "reset", "serve", "status", "print-codex-config", "print-claude-config", "print-t3-config", "print-revision", "print-build":
 		return args[0], args[1:]
 	default:
 		return "status", args

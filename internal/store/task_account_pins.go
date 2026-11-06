@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 )
 
@@ -69,25 +68,4 @@ WHERE codex_task_id = ? AND account_name = ?`,
 		return false, fmt.Errorf("read exhausted task pin move: %w", err)
 	}
 	return rowsAffected == 1, nil
-}
-
-// MoveTaskAccountPins moves every task pinned to one of fromAccountNames to
-// nextAccountName and returns how many moved.
-func (database *StoreDatabase) MoveTaskAccountPins(fromAccountNames []AccountName, nextAccountName AccountName, movedAt time.Time) (int64, error) {
-	if len(fromAccountNames) == 0 {
-		return 0, nil
-	}
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(fromAccountNames)), ",")
-	arguments := []any{nextAccountName, movedAt.UTC().UnixNano()}
-	for _, name := range fromAccountNames {
-		arguments = append(arguments, name)
-	}
-	result, err := database.sqlDatabase.Exec(`
-UPDATE task_account_pins
-SET account_name = ?, pinned_at_unix_nano = ?
-WHERE account_name IN (`+placeholders+`)`, arguments...)
-	if err != nil {
-		return 0, fmt.Errorf("move task pins: %w", err)
-	}
-	return result.RowsAffected()
 }

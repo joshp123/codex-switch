@@ -153,7 +153,7 @@ func serveRelay(tcpListenAddress string) {
 		log.Fatal(err)
 	}
 
-	forwardProxy, err := relay.CreateClaudeForwardProxy(dataDir(), capability, relayHandler, t3usage.Handler(capability, dataDir(), accountMonitor, snapshots.serveOrRelay(capability, profileOrRelay(capability, deployStatusOrRelay(capability, moveTasksOrRelay(capability, taskRouter, relayHandler), activity)))))
+	forwardProxy, err := relay.CreateClaudeForwardProxy(dataDir(), capability, relayHandler, t3usage.Handler(capability, dataDir(), accountMonitor, snapshots.serveOrRelay(capability, profileOrRelay(capability, deployStatusOrRelay(capability, relayHandler, activity)))))
 	if err != nil {
 		log.Fatal(err)
 	}

@@ -254,8 +254,7 @@ can serve the requested model, preserving the prompt cache.
 - OpenAI starts an account's week at its first request after a reset. An
   account whose week has not started takes the next new task, so its clock
   runs and it refills a week later.
-- When two accounts reset at the same time, new work goes to the one with
-  more left.
+- Accounts that reset at the same time share work by allowance left.
 - A task stays on its account until its provider says that account has run out.
   Its next request then goes to another account.
 - If a provider rejects a request before any work starts, the client retries
@@ -273,11 +272,6 @@ Keep allowance for an account you also use directly with
 At 10% or less, new work and the next turn of pinned tasks use another account.
 The reserves are off by default; use `codex-switch reserve "Claude 1" off` to
 clear both.
-
-Running tasks stay on their account to keep their prompt cache warm. To move
-them to the account new work goes to now, for example before a heavy few days,
-run `codex-switch move-tasks claude` or `codex-switch move-tasks codex`. Each
-moved task re-reads its conversation on that account at its next request.
 
 To use a stored Codex reset when the pool is exhausted, run
 `codex-switch reset codex`. It keeps the credit when an account can still work

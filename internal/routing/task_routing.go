@@ -180,35 +180,6 @@ func (router *TaskRouter) RouteForProviderTask(taskID store.TaskID, workKind sto
 	return decision, nil
 }
 
-// MoveTasksToNewWorkAccount moves every task of provider to the account new
-// work goes to now. Each moved task re-reads its conversation on that account
-// at its next request. It returns what happened, for the command and the log.
-func (router *TaskRouter) MoveTasksToNewWorkAccount(provider accounts.Provider) (string, error) {
-	facts, err := router.accountFacts.ReadAccountRoutingFacts()
-	if err != nil {
-		return "", fmt.Errorf("read account routing facts: %w", err)
-	}
-	facts = factsForProvider(facts, provider)
-	selected, found, err := router.selectAccountForNewWork(facts, "", "")
-	if err != nil {
-		return "", err
-	}
-	if !found {
-		return "", fmt.Errorf("%w: %s", ErrNoAvailableAccount, router.describeUnavailableAccounts(facts, ""))
-	}
-	var otherAccountNames []store.AccountName
-	for _, fact := range facts {
-		if fact.AccountName != selected.AccountName {
-			otherAccountNames = append(otherAccountNames, fact.AccountName)
-		}
-	}
-	moved, err := router.storeDatabase.MoveTaskAccountPins(otherAccountNames, selected.AccountName, router.currentTime().UTC())
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("moved %d tasks to %s", moved, router.describeChoice(selected, "")), nil
-}
-
 // ReportExhaustedTurn changes the account for the next client request; routing never resends work.
 // It returns what happened to the task, for the proxy log.
 func (router *TaskRouter) ReportExhaustedTurn(taskID store.TaskID, servedAccountName store.AccountName, resetsAt time.Time) string {

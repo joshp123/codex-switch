@@ -262,7 +262,7 @@ def t3_reads_the_account_pool(system):
 
 
 def new_work_goes_to_the_allowance_that_resets_first(system):
-    """New work goes to an account whose week has not started, then to the allowance that resets first, and avoids soft reserves; pinned work stays until its account reaches its hard reserve or a person moves it"""
+    """New work goes to an account whose week has not started, then to the allowance that resets first, and avoids soft reserves; pinned work stays until its account reaches its hard reserve"""
     leader = system.best_account()
     leader_reason = system.describe(leader)
     task = rig.CodexTask('routing-task', 'Follow this script.\nRUN: ' + SUM.format(result='routing.txt') + '\nREPLY: 16').finish()
@@ -296,12 +296,6 @@ def new_work_goes_to_the_allowance_that_resets_first(system):
         raise Failure(f'After {runner_up}\'s week went idle, '
                       + ', '.join(f'the {name} was served by {sorted(accounts)}' for name, accounts in served.items())
                       + f', and a new task went to {rig.pinned_account(new_task.thread)}.')
-
-    moved = rig.proxy_command('move-tasks', 'codex').strip()
-    rig.CodexTask('routing-task-moved', 'Follow this script.\nRUN: cat routing.txt\nREPLY: 16', thread=task.thread).finish()
-    after_move = [account for account, _ in rig.forwarded_requests(thread=task.thread)]
-    if after_move[-1] != runner_up or set(after_move[:-1]) != {leader}:
-        raise Failure(f'After codex-switch move-tasks said "{moved}", the Codex task\'s requests went to {after_move}.')
 
     replacement = system.best_account(excluding={runner_up})
     reserve = 100 - system.weekly[runner_up]
@@ -350,7 +344,6 @@ def new_work_goes_to_the_allowance_that_resets_first(system):
         rig.proxy_command('reserve', runner_up, 'off')
     return (f'A {" and a ".join(tasks)} started on {leader_reason}.\n'
             f'Then {runner_up}\'s week had not started. Each took its second turn on {leader} again, and a new Codex task went to {runner_up}.\n'
-            f'codex-switch move-tasks codex said "{moved}", and the first Codex task\'s next turn went to {runner_up}.\n'
             f'At {account_name}\'s {reserve}% soft reserve, its pinned task stayed and new work went to {replacement}.\n'
             f'Setting its hard reserve to {reserve}% moved the pinned task on its next turn; new work still went to {replacement}.\n'
             'The proxy picked up the command without restart; no model request was replayed and Codex showed no error.')
