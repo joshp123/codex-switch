@@ -586,6 +586,21 @@ def account_folder(key):
     return next((folder.name for folder in (RUN / 'data').glob('account-*') if account_key(folder.name) == key), key)
 
 
+ACCOUNT_TABLES = ('task_account_pins', 'account_reported_resets', 'completed_responses', 'model_request_counts', 'weekly_allowance_readings')
+
+
+def account_records():
+    """Every record of an account in the proxy's database, as (table, rowid, folder, key). The key is None where the
+    record has none, and the whole column is absent in a database only the published release has written."""
+    with sqlite3.connect(f'file:{RUN / "data/codex-switch.db"}?mode=ro', uri=True) as database:
+        records = []
+        for table in ACCOUNT_TABLES:
+            columns = {column[1] for column in database.execute(f'PRAGMA table_info({table})')}
+            key = 'account_key' if 'account_key' in columns else 'NULL'
+            records += [(table, *row) for row in database.execute(f'SELECT rowid, account_name, {key} FROM {table}')]
+        return records
+
+
 def database_rows(task):
     """Completed responses the proxy recorded for a task, oldest first, each with the folder of the account its key
     names. A response the published release recorded has only its folder until a later build gives it its key."""

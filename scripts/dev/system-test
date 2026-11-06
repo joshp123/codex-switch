@@ -196,11 +196,14 @@ def run_outcome(outcome, system):
     return {'outcome': outcome.__doc__.strip(), 'held': held, 'observed': observed, 'seconds': time.monotonic() - began}
 
 
+def installer_environment():
+    return dict(os.environ, HOME=str(rig.RUN / 'home'), CODEX_SWITCH_LAUNCHD_LABEL=rig.LABEL,
+                CODEX_SWITCH_LISTEN=rig.listen_address(), CODEX_SWITCH_PROVING_SECONDS=str(PROVING_SECONDS),
+                CODEX_SWITCH_SWITCH_LIMIT_SECONDS=str(SWITCH_LIMIT_SECONDS))
+
+
 def start_installer(candidate, name):
-    environment = dict(os.environ, HOME=str(rig.RUN / 'home'), CODEX_SWITCH_LAUNCHD_LABEL=rig.LABEL,
-                       CODEX_SWITCH_LISTEN=rig.listen_address(), CODEX_SWITCH_PROVING_SECONDS=str(PROVING_SECONDS),
-                       CODEX_SWITCH_SWITCH_LIMIT_SECONDS=str(SWITCH_LIMIT_SECONDS))
-    return rig.start_client([str(rig.REPO / 'deploy/install-proxy.sh'), str(rig.RUN / candidate)], name, env=environment)
+    return rig.start_client([str(rig.REPO / 'deploy/install-proxy.sh'), str(rig.RUN / candidate)], name, env=installer_environment())
 
 
 def wait_for_candidate(old):
@@ -656,6 +659,8 @@ def update_during_work_finishes_on_the_old_process(system):
     token_parts[1] = rig.base64.urlsafe_b64encode(rig.json.dumps(claims).encode()).decode().rstrip('=')
     auth['tokens']['id_token'] = '.'.join(token_parts)
     (signed_out / 'auth.json').write_text(rig.json.dumps(auth))
+    # The published release names accounts only by folder; what it wrote must take its account keys after the update.
+    system.records_before_update = rig.account_records()
     update_started = time.monotonic()
     update = start_installer('candidate', 'update')
     new = wait_for_candidate(old)
@@ -681,6 +686,7 @@ def update_during_work_finishes_on_the_old_process(system):
         system.record_codex_task(task.name, task.thread)
     errors = goal.finish() + websocket_task.errors + http_task.errors + new_task.errors
     system.record_codex_task('goal across the update', goal.thread)
+    system.goal_across_update = goal.thread
     rig.wait_for(lambda: not rig.process_alive(old), 'the old process to retire', timeout=120)
     try:
         exit_code = update.wait(timeout=120)
@@ -714,6 +720,76 @@ def update_during_work_finishes_on_the_old_process(system):
             'went to the new slot despite an account needing sign-in; both responses finished on the old process, which then retired.\n'
             'Only the new slot remained loaded.\n'
             'A goal running a tool across the update finished with its effect run once. Nothing was replayed and Codex showed no error.')
+
+
+def update_gives_old_records_their_account_keys(system):
+    """Records the published release wrote by folder name take their account keys, and a task it pinned keeps its account"""
+    before = system.records_before_update
+    if not before or any(key is not None for *_, key in before):
+        raise Failure(f'Before the update, expected records with no account key from the published release; found {before}.')
+    signed_in = lambda folder: rig.account_key(folder) is not None
+    rig.wait_for(lambda: all(key is not None for _, _, folder, key in rig.account_records() if signed_in(folder)),
+                 'the new proxy to record account keys on the published release\'s records', timeout=30)
+    after = {(table, rowid): (folder, key) for table, rowid, folder, key in rig.account_records()}
+    wrong = [f'{table} row {rowid}: {folder} has {key}' for (table, rowid), (folder, key) in after.items()
+             if signed_in(folder) and key != rig.account_key(folder)]
+    if wrong:
+        raise Failure('Records with the wrong account key, or none: ' + '; '.join(wrong[:10]))
+    kept = [(table, rowid) for table, rowid, *_ in before if (table, rowid) in after]
+    goal_accounts = {row[0] for row in rig.database_rows(system.goal_across_update)}
+    if len(goal_accounts) != 1:
+        raise Failure(f'The goal pinned by the published release was served by {sorted(goal_accounts)} across the update.')
+    tables = sorted({table for table, _ in kept})
+    return (f'{len(kept)} records the published release wrote by folder name ({", ".join(tables)}) took their accounts\'\n'
+            f'keys after the update, and still name their folders for that release. The goal it pinned stayed on {goal_accounts.pop()}.')
+
+
+def rollback_keeps_tasks_on_their_accounts(system):
+    """Rolling back to the published release after an update keeps each task on its account while new work goes elsewhere"""
+    leader = system.best_account()
+    published_build = int(rig.subprocess.check_output([str(rig.RUN / 'codex-switch'), 'print-build'], text=True))
+    before = rig.CodexTask('rollback-before-update', 'Reply with the word before.').finish()
+    old = rig.deploy_status()['pid']
+    update = start_installer('candidate', 'rollback-update')
+    wait_for_candidate(old)
+    # The candidate proves itself on a turn of the published release's task, and on a task of its own.
+    rig.CodexTask('rollback-turn-on-update', 'Reply with the word updated.', thread=before.thread).finish()
+    during = rig.CodexTask('rollback-task-on-update', 'Reply with the word during.').finish()
+    if update.wait(timeout=120):
+        raise Failure(f'The update failed: {rig.read("logs/rollback-update.err")[-400:]}')
+    updated = rig.deploy_status()
+    # Another account's week resets and nothing uses it, so new work goes there: only a pin keeps a task on its account.
+    runner_up = system.best_account(excluding={leader})
+    system.idle.add(runner_up)
+    system.weekly[runner_up] = 0
+    system.apply()
+    rig.wait_for(lambda: rig.usage_reads(runner_up, 0) >= 2, 'the proxy to read the idle week')
+    rollback = rig.start_client([str(rig.REPO / 'deploy/deploy.sh'), 'back'], 'rollback', env=installer_environment())
+    if rollback.wait(timeout=120):
+        raise Failure(f'deploy.sh back failed: {rig.read("logs/rollback.err")[-400:]}')
+    serving = rig.deploy_status()
+    if int(serving['build']) != published_build or serving['pid'] == updated['pid']:
+        raise Failure(f'After deploy.sh back, build {serving["build"]} serves; expected the published build {published_build}.')
+    turns = [rig.CodexTask('rollback-turn-after', 'Reply with the word after.', thread=before.thread).finish(),
+             rig.CodexTask('rollback-task-after', 'Reply with the word again.', thread=during.thread).finish(),
+             rig.CodexTask('rollback-new-task', 'Reply with the word fresh.').finish()]
+    system.record_codex_task('new task after the rollback', turns[2].thread)
+    new_work = rig.pinned_account(turns[2].thread)
+    served = {}
+    for started_by, task in (('published', before), ('updated', during)):
+        label = f'task the {started_by} build started, across the update and rollback'
+        system.record_codex_task(label, task.thread)
+        forwarded = rig.forwarded_requests(thread=task.thread)
+        require_no_replay(label, forwarded)
+        served[started_by] = sorted({account for account, _ in forwarded})
+    errors = [error for turn in turns for error in turn.errors]
+    if any(accounts != [leader] for accounts in served.values()) or new_work != runner_up or errors:
+        raise Failure(f'Across the update and rollback, the tasks pinned to {leader} were served by {served} and new work went to '
+                      f'{new_work}, not {runner_up}; Codex showed {describe_errors(errors)}.')
+    return (f'After build {updated["build"]} converted the records, deploy.sh back restored the published build {published_build}.\n'
+            f'A task the published release started stayed on {served["published"][0]} through the update and back, and a task\n'
+            f'the updated build started stayed on {served["updated"][0]}, while new work went to {system.describe(runner_up)}.\n'
+            f'Nothing was replayed and Codex showed no error.')
 
 
 def retiring_proxy_keeps_only_working_connections(system):
@@ -1030,7 +1106,8 @@ def stored_resets(system):
 # Each group shares one isolated system and runs at once with every other group. Only the first update starts from
 # the published release; every other system starts on a build of this tree.
 GROUPS = [
-    ('update', 'published-release', [update_waits_for_work, update_during_work_finishes_on_the_old_process]),
+    ('update', 'published-release', [update_waits_for_work, update_during_work_finishes_on_the_old_process, update_gives_old_records_their_account_keys]),
+    ('rollback', 'published-release', [rollback_keeps_tasks_on_their_accounts]),
     ('resets', 'cli', [stored_resets]),
     ('routing', 'cli', [t3_reads_the_account_pool, new_work_goes_to_the_allowance_that_resets_first, request_without_task_id_is_served]),
     ('exhaustion', 'cli', [exhausted_task_moves_on_its_next_turn]),

@@ -28,6 +28,8 @@ Before a release, also run the smoke test (see below).
 | --- | --- |
 | update | An update waits for model work before it switches. |
 | update | An update adopts the published release's single job during work. Responses in flight over WebSocket and HTTP finish on the old process, while new work starts on the new one and proves it. A goal's tool call spans the update and runs once. |
+| update | Records the published release wrote by folder name, including those it writes while it drains, take their account keys, and a task it pinned keeps its account. |
+| rollback | After an update, `deploy/deploy.sh back` restores the published release. Tasks pinned by either build stay on their accounts while new work goes to the account the rule picks. |
 | resets | Claude grants appear in status; the reset command checks pool availability and the next reset, chooses the earliest credit and retries a lost response with the same request ID. |
 | routing | New Codex tasks and Pi sessions go to an account whose week has not started, then to the weekly allowance that resets first. They and their Codex forks stay on their account when another account becomes first, and move for a hard reserve. |
 | routing | A request without a task ID is served. |
