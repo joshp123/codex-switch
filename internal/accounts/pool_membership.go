@@ -223,10 +223,11 @@ func rememberPoolAccount(database *store.StoreDatabase, account PoolAccount) err
 }
 
 // RecordAccountKeys records which folder holds which account, gives accounts
-// recorded by earlier builds their key, and fills the key into records that
-// earlier builds wrote with only a folder name. It returns how many records it
-// filled. The proxy runs it whenever it reads the pool: an earlier build may
-// write records while an update switches proxies, or after a rollback.
+// recorded by earlier builds their key, and sets each record's key to the key
+// of its folder: earlier builds write records with only a folder name, and move
+// a task's pin to another folder without changing its key. It returns how many
+// records it changed. The proxy runs it whenever it reads the pool: an earlier
+// build may write while an update switches proxies, or after a rollback.
 func RecordAccountKeys(dataDirectory string, database *store.StoreDatabase) (int64, error) {
 	pool, err := ReadPool(dataDirectory)
 	if err != nil {
@@ -263,7 +264,7 @@ func recordAccountKeys(pool []PoolAccount, database *store.StoreDatabase) (int64
 			return 0, err
 		}
 	}
-	return database.FillAccountKeys()
+	return database.SyncAccountKeys()
 }
 
 func restoreAccountAfterFailedRemoval(removedPath, activePath string) error {

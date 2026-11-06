@@ -58,12 +58,16 @@ WHERE account_identities.provider_account_id = excluded.provider_account_id`,
 	return nil
 }
 
-// StoredAccountKey is the SQL for the account key of a row of table. A row
-// written by a build before account keys has only its folder name; it takes the
-// key recorded for that folder. A folder with no recorded key keeps its name,
-// which matches no signed-in account.
+// StoredAccountKey is the SQL for the account key of a row of table: the key
+// recorded for the row's folder. The folder decides, because builds before
+// account keys know an account only by its folder and may still write: while
+// an update switches proxies, or after deploy.sh back. Such a build moves a
+// task's pin by changing its folder and leaves the row's key as it was. The
+// row's own key counts only where its folder has no recorded key, as in a row
+// copied from another Mac; a row with neither keeps its folder name, which
+// matches no signed-in account.
 func StoredAccountKey(table string) string {
-	return `COALESCE(` + table + `.account_key, (SELECT account_identities.account_key FROM account_identities WHERE account_identities.account_name = ` + table + `.account_name), ` + table + `.account_name)`
+	return `COALESCE((SELECT account_identities.account_key FROM account_identities WHERE account_identities.account_name = ` + table + `.account_name), ` + table + `.account_key, ` + table + `.account_name)`
 }
 
 // accountFolder is the folder that holds the account now. Folder numbers are
@@ -86,33 +90,35 @@ ORDER BY CAST(SUBSTR(account_name, LENGTH('account-') + 1) AS INTEGER) DESC LIMI
 // accountKeyTables are the tables with a row per account or per account event.
 var accountKeyTables = []string{"task_account_pins", "account_reported_resets", "completed_responses", "model_request_counts", "weekly_allowance_readings"}
 
-// FillAccountKeys stores the account key on rows that builds before account
-// keys wrote with only a folder name, using the key recorded for the folder. It
+// SyncAccountKeys sets the account key on each row to the key recorded for its
+// folder, so the column agrees with StoredAccountKey for anyone who reads the
+// table directly or combines it with another Mac's. A build before account keys
+// writes rows without a key, and moves pins without changing theirs. It
 // returns how many rows it changed.
-func (database *StoreDatabase) FillAccountKeys() (int64, error) {
+func (database *StoreDatabase) SyncAccountKeys() (int64, error) {
 	transaction, err := database.sqlDatabase.Begin()
 	if err != nil {
-		return 0, fmt.Errorf("begin filling account keys: %w", err)
+		return 0, fmt.Errorf("begin syncing account keys: %w", err)
 	}
 	defer transaction.Rollback()
-	var filled int64
+	var changed int64
 	for _, table := range accountKeyTables {
-		result, err := transaction.Exec(`UPDATE ` + table + ` SET account_key = (
-    SELECT account_identities.account_key FROM account_identities WHERE account_identities.account_name = ` + table + `.account_name)
-WHERE account_key IS NULL AND account_name IN (SELECT account_name FROM account_identities WHERE account_key IS NOT NULL)`)
+		folderKey := `(SELECT account_identities.account_key FROM account_identities WHERE account_identities.account_name = ` + table + `.account_name)`
+		result, err := transaction.Exec(`UPDATE ` + table + ` SET account_key = ` + folderKey + `
+WHERE account_key IS NOT ` + folderKey + ` AND ` + folderKey + ` IS NOT NULL`)
 		if err != nil {
-			return 0, fmt.Errorf("fill account keys in %s: %w", table, err)
+			return 0, fmt.Errorf("sync account keys in %s: %w", table, err)
 		}
-		changed, err := result.RowsAffected()
+		rows, err := result.RowsAffected()
 		if err != nil {
 			return 0, err
 		}
-		filled += changed
+		changed += rows
 	}
 	if err := transaction.Commit(); err != nil {
 		return 0, fmt.Errorf("commit account keys: %w", err)
 	}
-	return filled, nil
+	return changed, nil
 }
 
 // NextAccountNumber is called under the pool mutation lock, after remembering existing accounts.

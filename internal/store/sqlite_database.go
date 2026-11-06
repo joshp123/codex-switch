@@ -97,7 +97,7 @@ func (database *StoreDatabase) CloseStoreDatabase() error {
 // its folder in the data directory, such as account-3, in account_name. Builds
 // before account keys know an account only by its folder; they may run on this
 // database while an update switches proxies, or after a rollback, and they leave
-// account_key empty. See FillAccountKeys.
+// account_key empty. See StoredAccountKey.
 const storeDatabaseSchema = `
 CREATE TABLE IF NOT EXISTS prompt_cache_affinity (
     prefix_hash TEXT PRIMARY KEY,

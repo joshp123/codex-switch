@@ -109,6 +109,22 @@ func TestRecordAccountKeysConvertsRecordsWrittenByFolderName(t *testing.T) {
 	if err := database.SQLDatabase().QueryRow(`SELECT account_name FROM task_account_pins WHERE codex_task_id = 'draining-task'`).Scan(&folder); err != nil || folder != "account-1" {
 		t.Fatalf("moved pin keeps folder %q for the released proxy: %v", folder, err)
 	}
+	// The released proxy moves an exhausted task's pin by folder name alone,
+	// leaving the key the pin had; the folder decides.
+	if _, err := database.SQLDatabase().Exec(`UPDATE task_account_pins SET account_name = 'account-4', pinned_at_unix_nano = 8
+WHERE codex_task_id = 'draining-task' AND account_name = 'account-1'`); err != nil {
+		t.Fatal(err)
+	}
+	if pin, _, err := database.ReadTaskAccountPin("draining-task"); err != nil || pin.AccountKey != "claude:one@example.com" {
+		t.Fatalf("pin the released proxy moved = %+v, %v", pin, err)
+	}
+	if synced, err := RecordAccountKeys(data, database); err != nil || synced != 1 {
+		t.Fatalf("syncing the moved pin's key changed %d records: %v", synced, err)
+	}
+	var key string
+	if err := database.SQLDatabase().QueryRow(`SELECT account_key FROM task_account_pins WHERE codex_task_id = 'draining-task'`).Scan(&key); err != nil || key != "claude:one@example.com" {
+		t.Fatalf("moved pin stores key %q: %v", key, err)
+	}
 	if _, found, err := database.ReadAccountReportedReset("chatgpt:one@example.com"); err != nil || !found {
 		t.Fatalf("reported reset: %v, %v", found, err)
 	}

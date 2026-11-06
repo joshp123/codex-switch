@@ -140,10 +140,10 @@ func (monitor *Monitor) startDueReads(ctx context.Context, reads *sync.WaitGroup
 		log.Printf("could not read the account pool: %v", err)
 		return now.Add(monitor.readInterval)
 	}
-	if filled, err := recordAccountKeys(pool, monitor.storeDatabase); err != nil {
+	if synced, err := recordAccountKeys(pool, monitor.storeDatabase); err != nil {
 		log.Printf("could not record account keys: %v", err)
-	} else if filled > 0 {
-		log.Printf("recorded account keys on %d records an earlier build wrote", filled)
+	} else if synced > 0 {
+		log.Printf("set the account key on %d records an earlier build wrote or moved", synced)
 	}
 	interval := monitor.readInterval
 	if readRequested {

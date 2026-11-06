@@ -95,10 +95,10 @@ func serveRelay(tcpListenAddress string) {
 	// An earlier build records an account by its folder alone. Its records take
 	// the account's key before this process serves, and the account monitor
 	// does the same for records the previous proxy writes while it drains.
-	if filled, err := accountapi.RecordAccountKeys(dataDir(), storeDatabase); err != nil {
+	if synced, err := accountapi.RecordAccountKeys(dataDir(), storeDatabase); err != nil {
 		log.Printf("could not record account keys: %v", err)
-	} else if filled > 0 {
-		log.Printf("recorded account keys on %d records an earlier build wrote", filled)
+	} else if synced > 0 {
+		log.Printf("set the account key on %d records an earlier build wrote or moved", synced)
 	}
 
 	upstreamTransport := relay.NewUpstreamTransport()
