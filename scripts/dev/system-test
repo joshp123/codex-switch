@@ -226,27 +226,17 @@ def update_waits_for_work(system):
 
 def t3_reads_the_account_pool(system):
     """T3 can read each account's allowance and credits but cannot redeem or relay arbitrary requests"""
-    capability = rig.read('data/client-capability').strip()
-    base = f'http://{rig.listen_address()}/v0/management/'
-
-    def request(path, payload=None, key=capability):
-        body = None if payload is None else json.dumps(payload).encode()
-        headers = {'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json'}
-        with urllib.request.urlopen(urllib.request.Request(base + path, body, headers), timeout=5) as response:
-            return json.load(response)
-
-    files = request('auth-files')['files']
-    if len(files) != 6 or {f['provider'] for f in files} != {'codex', 'claude'} or {f['auth_index'] for f in files} != {rig.account_key(account) for account in (*rig.CODEX_ACCOUNTS, *rig.CLAUDE_ACCOUNTS)}:
-        raise Failure(f'Expected six Codex and Claude accounts, each named by its account key, got {files!r}')
-    def call(account, url, method='GET'):
-        return request('api-call', {'auth_index': account, 'method': method, 'url': url, 'header': {'Authorization': 'Bearer $TOKEN$'}})
+    files = rig.t3_request('auth-files')['files']
+    folders = {*rig.CODEX_ACCOUNTS, *rig.CLAUDE_ACCOUNTS}
+    if len(files) != 6 or {f['provider'] for f in files} != {'codex', 'claude'} or {f['auth_index'] for f in files} != folders:
+        raise Failure(f'Expected six Codex and Claude accounts, each indexed by its folder, got {files!r}')
     # A stopped provider cannot answer: these calls must use the monitor's readings.
     provider = rig.started_processes[0]
     os.kill(provider.pid, signal.SIGSTOP)
     try:
-        codex = call(rig.account_key('account-1'), 'https://chatgpt.com/backend-api/wham/usage')
-        credits = call(rig.account_key('account-1'), 'https://chatgpt.com/backend-api/wham/rate-limit-reset-credits')
-        claude = call(rig.account_key('account-4'), 'https://api.anthropic.com/api/oauth/usage')
+        codex = rig.t3_call('account-1', 'https://chatgpt.com/backend-api/wham/usage')
+        credits = rig.t3_call('account-1', 'https://chatgpt.com/backend-api/wham/rate-limit-reset-credits')
+        claude = rig.t3_call('account-4', 'https://api.anthropic.com/api/oauth/usage')
     finally:
         os.kill(provider.pid, signal.SIGCONT)
     if codex['status_code'] != 200 or not json.loads(codex['body'])['rate_limit']:
@@ -256,10 +246,10 @@ def t3_reads_the_account_pool(system):
     if claude['status_code'] != 200 or not json.loads(claude['body'])['five_hour']:
         raise Failure('Claude allowance was not returned.')
     for url, method in [('https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume', 'POST'), ('https://example.com/', 'GET')]:
-        if call(rig.account_key('account-1'), url, method)['status_code'] != 403:
+        if rig.t3_call('account-1', url, method)['status_code'] != 403:
             raise Failure('The proxy accepted a forbidden call.')
     try:
-        request('auth-files', key='wrong')
+        rig.t3_request('auth-files', key='wrong')
         raise Failure('The proxy accepted the wrong management key.')
     except urllib.error.HTTPError as error:
         if error.code != 401:
@@ -760,10 +750,12 @@ def update_gives_old_records_their_account_keys(system):
 
 
 def rollback_keeps_tasks_on_their_accounts(system):
-    """Rolling back to the published release after an update keeps each task on its account while new work goes elsewhere"""
+    """Rolling back to the published release after an update keeps each task on its account while new work goes elsewhere, and T3's account indexes work on either build"""
     leader = system.best_account()
     published_build = int(rig.subprocess.check_output([str(rig.RUN / 'codex-switch'), 'print-build'], text=True))
     before = rig.CodexTask('rollback-before-update', 'Reply with the word before.').finish()
+    # T3 takes each account's index from whichever build serves, then reads usage with it, perhaps from the next build.
+    published_indexes = rig.t3_account_indexes()
     old = rig.deploy_status()['pid']
     update = start_installer('candidate', 'rollback-update')
     wait_for_candidate(old)
@@ -773,6 +765,9 @@ def rollback_keeps_tasks_on_their_accounts(system):
     if update.wait(timeout=120):
         raise Failure(f'The update failed: {rig.read("logs/rollback-update.err")[-400:]}')
     updated = rig.deploy_status()
+    if refused := rig.t3_usage_failures(published_indexes):
+        raise Failure(f'After the update, the new build refused usage reads by the indexes the published release gave T3: {refused}')
+    updated_indexes = rig.t3_account_indexes()
     # Another account's week resets and nothing uses it, so new work goes there: only a pin keeps a task on its account.
     runner_up = system.best_account(excluding={leader})
     system.idle.add(runner_up)
@@ -785,6 +780,8 @@ def rollback_keeps_tasks_on_their_accounts(system):
     serving = rig.deploy_status()
     if int(serving['build']) != published_build or serving['pid'] == updated['pid']:
         raise Failure(f'After deploy.sh back, build {serving["build"]} serves; expected the published build {published_build}.')
+    if refused := rig.t3_usage_failures(updated_indexes):
+        raise Failure(f'After the rollback, the published release refused usage reads by the indexes the updated build gave T3: {refused}')
     turns = [rig.CodexTask('rollback-turn-after', 'Reply with the word after.', thread=before.thread).finish(),
              rig.CodexTask('rollback-task-after', 'Reply with the word again.', thread=during.thread).finish(),
              rig.CodexTask('rollback-new-task', 'Reply with the word fresh.').finish()]
@@ -805,6 +802,7 @@ def rollback_keeps_tasks_on_their_accounts(system):
     return (f'After build {updated["build"]} converted the records, deploy.sh back restored the published build {published_build}.\n'
             f'A task the published release started stayed on {served["published"][0]} through the update and back, and a task\n'
             f'the updated build started stayed on {served["updated"][0]}, while new work went to {system.describe(runner_up)}.\n'
+            f'T3 read all {len(published_indexes)} accounts\' usage by the indexes each build gave it, from the other build.\n'
             f'Nothing was replayed and Codex showed no error.')
 
 

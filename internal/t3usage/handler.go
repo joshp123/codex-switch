@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/joshp123/codex-switch/internal/accounts"
+	"github.com/joshp123/codex-switch/internal/store"
 	"github.com/joshp123/codex-switch/internal/t3pb"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
@@ -47,7 +48,10 @@ func Handler(capability, directory string, monitor *accounts.Monitor, next http.
 				} else {
 					identity = &t3pb.AuthIdentity{ChatgptAccountId: account.AccountID}
 				}
-				result.Files = append(result.Files, &t3pb.AuthFile{Id: string(account.Key), AuthIndex: string(account.Key), Provider: provider, Email: account.Email, IdToken: identity})
+				// T3 may take an index from one build and use it with the next,
+				// across a blue-green update or a rollback. Every build hands out
+				// the folder name, and updates and rollbacks leave folders in place.
+				result.Files = append(result.Files, &t3pb.AuthFile{Id: account.Folder, AuthIndex: account.Folder, Provider: provider, Email: account.Email, IdToken: identity})
 			}
 			write(w, result)
 		case r.Method == http.MethodPost && r.URL.Path == prefix+"api-call":
@@ -65,13 +69,24 @@ func Handler(capability, directory string, monitor *accounts.Monitor, next http.
 				write(w, &t3pb.ApiResponse{StatusCode: 403, Body: "Only usage reads are supported; reset credits cannot be redeemed here."})
 				return
 			}
+			pool, err := accounts.ReadPool(directory)
+			if err != nil {
+				http.Error(w, "cannot read accounts", 500)
+				return
+			}
+			var key store.AccountKey
+			for _, account := range pool {
+				if account.Folder == call.AuthIndex {
+					key = account.Key
+				}
+			}
 			facts, err := monitor.ReadAccountRoutingFacts()
 			if err != nil {
 				http.Error(w, "cannot read accounts", 500)
 				return
 			}
 			for _, fact := range facts {
-				if string(fact.AccountKey) != call.AuthIndex || (fact.Provider == accounts.ProviderClaude) != (call.Url == claudeUsageURL) {
+				if key == "" || fact.AccountKey != key || (fact.Provider == accounts.ProviderClaude) != (call.Url == claudeUsageURL) {
 					continue
 				}
 				var message proto.Message

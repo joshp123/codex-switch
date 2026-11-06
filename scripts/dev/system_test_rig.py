@@ -582,6 +582,38 @@ def account_key(folder):
     return 'chatgpt:' + claims['email'].lower()
 
 
+T3_USAGE_URLS = {'codex': 'https://chatgpt.com/backend-api/wham/usage', 'claude': 'https://api.anthropic.com/api/oauth/usage'}
+
+
+def t3_request(path, payload=None, key=None):
+    """A request to the serving proxy's management API, as T3 makes it."""
+    key = key or read('data/client-capability').strip()
+    body = None if payload is None else json.dumps(payload).encode()
+    headers = {'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json'}
+    request = urllib.request.Request(f'http://{listen_address()}/v0/management/{path}', body, headers)
+    with urllib.request.urlopen(request, timeout=5) as response:
+        return json.load(response)
+
+
+def t3_account_indexes():
+    """The index T3 is handed for each account, with its provider: {auth_index: provider}."""
+    return {file['auth_index']: file['provider'] for file in t3_request('auth-files')['files']}
+
+
+def t3_call(auth_index, url, method='GET'):
+    return t3_request('api-call', {'auth_index': auth_index, 'method': method, 'url': url, 'header': {'Authorization': 'Bearer $TOKEN$'}})
+
+
+def t3_usage_failures(indexes):
+    """Reads each account's usage by an index T3 holds, as T3 does; returns the indexes the serving proxy refused."""
+    failures = {}
+    for index, provider in indexes.items():
+        response = t3_call(index, T3_USAGE_URLS[provider])
+        if response['status_code'] != 200:
+            failures[index] = f'{response["status_code"]} {response["body"]}'
+    return failures
+
+
 ACCOUNT_TABLES = ('task_account_pins', 'account_reported_resets', 'completed_responses', 'model_request_counts', 'weekly_allowance_readings')
 
 
