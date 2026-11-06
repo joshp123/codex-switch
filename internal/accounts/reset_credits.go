@@ -14,8 +14,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-
-	"github.com/joshp123/codex-switch/internal/store"
 )
 
 // ResetDecision reports the result of an explicit reset request.
@@ -26,10 +24,15 @@ type ResetCredit struct {
 	ResetType string    `json:"reset_type"`
 	ExpiresAt time.Time `json:"expires_at"`
 }
+
+// pendingReset is a reset whose reply was lost, kept in this Mac's data
+// directory until a retry learns its outcome, so the folder names its login.
+// Every build reads and writes it under these JSON names, so a build after an
+// update or a rollback finishes a reset another build began.
 type pendingReset struct {
-	AccountKey store.AccountKey
-	AccountID  string
-	CreditID   string
+	Folder    string `json:"AccountName"`
+	AccountID string
+	CreditID  string
 }
 
 var resetNamespace = uuid.MustParse("6f1c2a9e-2d4b-4c1e-9a7f-3b8d5e0c1a42")
@@ -137,7 +140,7 @@ func ResetCodexPool(ctx context.Context, directory string, origin *url.URL, clie
 		}
 		sort.Slice(candidates, func(i, j int) bool { return candidates[i].credit.ExpiresAt.Before(candidates[j].credit.ExpiresAt) })
 		chosen := candidates[0]
-		pending := pendingReset{chosen.account.Key, chosen.account.AccountID, chosen.credit.ID}
+		pending := pendingReset{chosen.account.Folder, chosen.account.AccountID, chosen.credit.ID}
 		data, err := json.Marshal(pending)
 		if err != nil {
 			return err
@@ -156,7 +159,7 @@ func pendingResetAccount(ctx context.Context, directory string, client *http.Cli
 		return PoolAccount{}, Credentials{}, err
 	}
 	for _, account := range pool {
-		if account.Key == pending.AccountKey && account.AccountID == pending.AccountID && account.Provider == ProviderCodex {
+		if account.Folder == pending.Folder && account.AccountID == pending.AccountID && account.Provider == ProviderCodex {
 			credentials, err := newSavedLogin(filepath.Join(directory, account.Folder), client).Credentials(ctx)
 			return account, credentials, err
 		}

@@ -31,7 +31,8 @@ Before a release, also run the smoke test (see below).
 | update | Records the published release wrote by folder name, including those it writes while it drains, keep their contents and take their account keys, and a task it pinned keeps its account. |
 | rollback | After an update, `deploy/deploy.sh back` restores the published release. Tasks pinned by either build stay on their accounts while new work goes to the account the rule picks. |
 | rollback | A task the rolled-back published release moves off an exhausted account stays where it moved after the next update, although the first account has recovered. |
-| resets | Claude grants appear in status; the reset command checks pool availability and the next reset, chooses the earliest credit and retries a lost response with the same request ID. |
+| resets | Claude grants appear in status; the reset command checks pool availability and the next reset, chooses the earliest credit, and retries a response the published release lost with the same request ID, as after an update. |
+| reset-rollback | A reset this build leaves pending when the provider drops its reply completes with the published release, as after a rollback. |
 | routing | New Codex tasks and Pi sessions go to an account whose week has not started, then to the weekly allowance that resets first. They and their Codex forks stay on their account when another account becomes first, and move for a hard reserve. |
 | routing | A request without a task ID is served. |
 | exhaustion | When a task's account runs out, its next turn moves to another account. No model work is replayed, no tool effect repeats, and Codex shows no error. |

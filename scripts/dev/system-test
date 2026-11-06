@@ -1097,11 +1097,38 @@ def format_duration(seconds):
     return f'{minutes}m {seconds:02d}s'
 
 
+BUILD_DESCRIPTIONS = {'cli': 'This build', 'published-release': 'The published release'}
+
+
+def reset_command(build, *args):
+    """Runs the CLI of build ('cli' for this tree's build, or the published release's proxy) against the fake providers."""
+    executable = rig.PUBLISHED_RELEASE_PROXY if build == 'published-release' else rig.RUN / build
+    return subprocess.run([str(executable), *args], env=dict(os.environ, **rig.proxy_environment()), capture_output=True, text=True, timeout=15)
+
+
+def lose_a_reset_and_retry(system, lost_by, retried_by):
+    """Exhausts the pool, lets lost_by spend the earliest credit while the provider drops its reply, then retries with
+    retried_by. Returns the claims the provider saw, which must be the same credit and request ID twice."""
+    system.limited = set(system.accounts)
+    system.extra = ['reset-test', 'reset-drop']
+    system.apply()
+    lost = reset_command(lost_by, 'reset', 'codex')
+    if lost.returncode == 0 or 'outcome unknown' not in lost.stderr:
+        raise Failure(f'{BUILD_DESCRIPTIONS[lost_by]} losing a reset reply: {lost.stdout} {lost.stderr}')
+    retry = reset_command(retried_by, 'reset', 'codex')
+    if retry.returncode or 'already redeemed' not in retry.stdout:
+        raise Failure(f'{BUILD_DESCRIPTIONS[retried_by]} retrying the reset {BUILD_DESCRIPTIONS[lost_by].lower()} left pending: {retry.stdout} {retry.stderr}')
+    claims = re.findall(r'event=reset-claim account=(\S+) credit=(\S+) request=(\S+)', rig.read('logs/fake-providers.log'))
+    if len(claims) != 2 or claims[0] != claims[1] or claims[0][:2] != ('account-2', 'credit-account-2'):
+        raise Failure(f'Expected two identical claims for the earliest credit; got {claims}')
+    return claims
+
+
 def stored_resets(system):
-    """An agent spends a reset only when the pool is exhausted, choosing the first expiry and safely retrying a lost response"""
-    env = dict(os.environ, **rig.proxy_environment())
+    """An agent spends a reset only when the pool is exhausted, choosing the first expiry and safely retrying a response
+    lost by the published release, as after an update"""
     def command(*args):
-        return subprocess.run([str(rig.RUN / 'cli'), *args], env=env, capture_output=True, text=True, timeout=15)
+        return reset_command('cli', *args)
     status = command('status')
     if status.returncode or 'reset credits: 2' not in status.stdout:
         raise Failure(f'Claude grants missing from status: {status.stdout} {status.stderr}')
@@ -1135,25 +1162,20 @@ def stored_resets(system):
         raise Failure(f'Retry after capacity returned: {recovered.stdout} {recovered.stderr}')
     if 'event=reset-claim' in rig.read('logs/fake-providers.log'):
         raise Failure('A retry spent a credit after another account could work again.')
-    system.limited = set(system.accounts)
-    system.extra = ['reset-test', 'reset-drop']
-    system.apply()
     reads_before_reset = rig.usage_reads('account-2', system.weekly['account-2'])
-    lost = command('reset', 'codex')
-    if lost.returncode == 0 or 'outcome unknown' not in lost.stderr:
-        raise Failure(f'Lost response: {lost.stdout} {lost.stderr}')
-    retry = command('reset', 'codex')
-    if retry.returncode or 'already redeemed' not in retry.stdout:
-        raise Failure(f'Retry: {retry.stdout} {retry.stderr}')
-    claims = re.findall(r'event=reset-claim account=(\S+) credit=(\S+) request=(\S+)', rig.read('logs/fake-providers.log'))
-    if len(claims) != 2 or claims[0] != claims[1] or claims[0][:2] != ('account-2', 'credit-account-2'):
-        raise Failure(f'Expected two identical claims for the earliest credit; got {claims}')
+    lose_a_reset_and_retry(system, lost_by='published-release', retried_by='cli')
     rig.wait_for(lambda: rig.usage_reads('account-2', system.weekly['account-2']) > reads_before_reset, 'the proxy to observe the reset account')
     task = rig.CodexTask('reset-resumed-work', 'Reply with the word resumed.').finish()
     system.record_codex_task('work after reset', task.thread)
     if rig.pinned_account(task.thread) != 'account-2':
         raise Failure(f'Work after the reset used {rig.pinned_account(task.thread)}, not the reset account.')
-    return 'Status showed 2 Claude resets; available and near-reset pools spent none. A refused redemption spent nothing once another account could work. The exhausted pool chose the earliest credit, retried its lost response with the same request ID, and resumed work on that account.'
+    return 'Status showed 2 Claude resets; available and near-reset pools spent none. A refused redemption spent nothing once another account could work. The exhausted pool chose the earliest credit; this build retried the response the published release lost with the same request ID, and work resumed on that account.'
+
+
+def reset_left_pending_completes_after_rollback(system):
+    """A reset this build leaves pending when the provider drops its reply completes with the published release, as after a rollback"""
+    lose_a_reset_and_retry(system, lost_by='cli', retried_by='published-release')
+    return 'This build spent the earliest credit and the provider dropped its reply; the published release retried it with the same request ID and finished it.'
 
 
 # Each group shares one isolated system and runs at once with every other group. Only the first update starts from
@@ -1162,6 +1184,7 @@ GROUPS = [
     ('update', 'published-release', [update_waits_for_work, update_during_work_finishes_on_the_old_process, update_gives_old_records_their_account_keys]),
     ('rollback', 'published-release', [rollback_keeps_tasks_on_their_accounts, update_after_rollback_keeps_a_task_the_published_release_moved]),
     ('resets', 'cli', [stored_resets]),
+    ('reset-rollback', 'cli', [reset_left_pending_completes_after_rollback]),
     ('routing', 'cli', [t3_reads_the_account_pool, new_work_goes_to_the_allowance_that_resets_first, request_without_task_id_is_served]),
     ('exhaustion', 'cli', [exhausted_task_moves_on_its_next_turn]),
     ('outage-goal', 'cli', [goal_continues_when_an_account_returns]),

@@ -33,6 +33,7 @@ REAL_SERVICES = os.environ.get('CODEX_SWITCH_REAL_SERVICES') == '1'
 LIVE_DATA = Path.home() / 'Library/Application Support/codex-switch'
 # The newest published release, kept between runs by its tag.
 RELEASES = REPO / '.project-private/system-test-releases'
+PUBLISHED_RELEASE_PROXY = BUILDS / 'published-release/CodexSwitchMenu.app/Contents/Helpers/codex-switch'
 # The Codex client the proxy itself reads: the one inside the desktop app, else `codex` on PATH.
 DESKTOP_CODEX = Path('/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex')
 CODEX = str(DESKTOP_CODEX) if DESKTOP_CODEX.exists() else shutil.which('codex')
@@ -100,7 +101,7 @@ def prepare(first_proxy):
         (RUN / part).mkdir(parents=True)
     for name in (*BUILD_NAMES, 'fake-providers'):
         os.link(BUILDS / name, RUN / name)
-    first = BUILDS / 'published-release/CodexSwitchMenu.app/Contents/Helpers/codex-switch' if first_proxy == 'published-release' else BUILDS / 'cli'
+    first = PUBLISHED_RELEASE_PROXY if first_proxy == 'published-release' else BUILDS / 'cli'
     shutil.copy2(first, RUN / 'codex-switch')
     for number, account in enumerate(CODEX_ACCOUNTS, 1):
         (RUN / 'data' / account).mkdir()
