@@ -23,6 +23,31 @@ func TestAnalyseUsesTheExactProviderWindow(t *testing.T) {
 	}
 }
 
+// OpenAI starts a window at the account's first request after a reset. Until
+// then it reports nothing used and a reset a full window from the reading, a
+// little over when its clock runs ahead.
+func TestAnalyseRecognisesAWindowThatHasNotStarted(t *testing.T) {
+	start := time.Date(2026, 11, 4, 8, 0, 0, 0, time.UTC)
+	week := 7 * 24 * time.Hour
+	for _, test := range []struct {
+		name       string
+		window     ReportedWindow
+		notStarted bool
+	}{
+		{"idle", ReportedWindow{UsedPercent: 0, DurationSeconds: 604800, ResetsAt: start.Add(week)}, true},
+		{"idle, OpenAI's clock ahead", ReportedWindow{UsedPercent: 0, DurationSeconds: 604800, ResetsAt: start.Add(week + time.Second)}, true},
+		{"started, nothing used yet", ReportedWindow{UsedPercent: 0, DurationSeconds: 604800, ResetsAt: start.Add(week - time.Hour)}, false},
+		{"used", ReportedWindow{UsedPercent: 1, DurationSeconds: 604800, ResetsAt: start.Add(week)}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, known := analyse(sample(start, test.window), AccountReady, Weekly)
+			if !known || got.NotStarted != test.notStarted {
+				t.Fatalf("weekly window = %#v, %v; want not started = %v", got, known, test.notStarted)
+			}
+		})
+	}
+}
+
 func TestAnalyseRejectsMissingResetAndInvalidWindows(t *testing.T) {
 	start := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
 	for _, test := range []struct {

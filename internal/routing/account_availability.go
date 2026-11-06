@@ -99,14 +99,13 @@ func (router *TaskRouter) claudePoolAvailableAgain(facts []accounts.AccountRouti
 	return earliest, earliestClaim
 }
 
-// weeklyAllowanceLeft is the free share of the weekly allowance, which ranks
-// accounts for new work. An account that reports no weekly window ranks last.
-func (router *TaskRouter) weeklyAllowanceLeft(fact accounts.AccountRoutingFact, modelSlug string) (float64, bool) {
+// weeklyAllowance is the weekly window that ranks accounts for new work. An
+// account that reports no weekly window ranks last.
+func (router *TaskRouter) weeklyAllowance(fact accounts.AccountRoutingFact, modelSlug string) (accounts.AllowanceWindow, bool) {
 	if fact.Provider == accounts.ProviderClaude {
-		return accounts.ClaudeWeeklyAllowanceLeft(fact, modelSlug, router.currentTime().UTC())
+		return accounts.ClaudeWeeklyAllowance(fact, modelSlug, router.currentTime().UTC())
 	}
-	weekly, known := accounts.AnalyseAllowance(fact.AllowanceSample, fact.AccountState, router.currentTime().UTC(), accounts.Weekly)
-	return weekly.FreePercent, known
+	return accounts.AnalyseAllowance(fact.AllowanceSample, fact.AccountState, router.currentTime().UTC(), accounts.Weekly)
 }
 
 func accountCredentialsUsable(credentials accounts.Credentials) bool {

@@ -48,7 +48,8 @@ It is macOS only, and so far it has one user: me.
 - Codex (the app, the CLI and sub-agents) and [Pi](https://github.com/badlogic/pi-mono)
   all point at one local URL.
 - The Claude app's Code tab, Claude Code and Pi use the same pool for Claude subscriptions.
-- A new task goes to whichever account has the most weekly allowance left.
+- A new task goes to whichever account's weekly allowance resets first, so
+  allowance that would expire unused is spent before allowance that keeps.
 - A task stays on its account, so its prompt cache stays warm.
 - When an account runs out, the task moves to another account on its next turn.
   Nothing is replayed and the agent just carries on.
@@ -247,8 +248,13 @@ can serve the requested model, preserving the prompt cache.
 
 ## How routing works
 
-- New tasks go to the account with the most weekly allowance left. Every
+- New tasks go to the account whose weekly allowance resets first: allowance
+  left at a reset is lost, and allowance that resets later keeps. Every
   sub-agent counts as its own task.
+- OpenAI starts an account's week at its first request after a reset. An
+  account whose week has not started takes the next new task, so its clock
+  runs and it refills a week later.
+- Accounts that reset at the same time share work by allowance left.
 - A task stays on its account until its provider says that account has run out.
   Its next request then goes to another account.
 - If a provider rejects a request before any work starts, the client retries

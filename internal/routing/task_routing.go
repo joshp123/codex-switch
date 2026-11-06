@@ -1,8 +1,6 @@
 package routing
 
 import (
-	"bytes"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log"
@@ -57,7 +55,7 @@ func CreateTaskRouter(storeDatabase *store.StoreDatabase, accountFacts AccountRo
 }
 
 // RouteForTask keeps model work on its task's account while that account is
-// available and gives new work the account with the most weekly allowance left.
+// available and gives new work the account selectAccountForNewWork ranks first.
 // Work without a task ID gets the same choice as a new task but is never pinned.
 // Metadata requests never create or move a pin.
 func (router *TaskRouter) RouteForTask(taskID store.TaskID, workKind store.WorkKind, modelSlug string) (RouteDecision, error) {
@@ -132,7 +130,7 @@ func (router *TaskRouter) RouteForProviderTask(taskID store.TaskID, workKind sto
 			}
 		}
 	}
-	selected, found, err := router.selectAccountWithMostWeeklyCapacity(facts, taskID, "", modelSlug)
+	selected, found, err := router.selectAccountForNewWork(facts, "", modelSlug)
 	if err != nil {
 		return RouteDecision{}, err
 	}
@@ -233,7 +231,7 @@ func (router *TaskRouter) reportExhaustedTaskPin(taskID store.TaskID, servedAcco
 	if served, found := factForAccount(facts, servedAccountName); found {
 		facts = factsForProvider(facts, served.Provider)
 	}
-	selected, found, err := router.selectAccountWithMostWeeklyCapacity(facts, taskID, servedAccountName, "")
+	selected, found, err := router.selectAccountForNewWork(facts, servedAccountName, "")
 	if err != nil {
 		return "", err
 	}
@@ -252,10 +250,15 @@ func (router *TaskRouter) reportExhaustedTaskPin(taskID store.TaskID, servedAcco
 	return limitReached + "; task moved to " + router.describeChoice(selected, "") + " for its next request", nil
 }
 
-func (router *TaskRouter) selectAccountWithMostWeeklyCapacity(facts []accounts.AccountRoutingFact, taskID store.TaskID, excludedAccountName store.AccountName, modelSlug string) (accounts.AccountRoutingFact, bool, error) {
+// selectAccountForNewWork ranks the accounts that can take new work. Accounts
+// that have not reached their soft reserve come first. Then an OpenAI account
+// whose week has not started, so that its weekly clock runs and its allowance
+// refills a week later. Then the weekly allowance that resets soonest, because
+// allowance left at a reset is lost and allowance that resets later keeps.
+// Equal resets go to the account with more left.
+func (router *TaskRouter) selectAccountForNewWork(facts []accounts.AccountRoutingFact, excludedAccountName store.AccountName, modelSlug string) (accounts.AccountRoutingFact, bool, error) {
 	var selected accounts.AccountRoutingFact
-	selectedCapacity := -1.0
-	selectedSoftReserveReached := false
+	var selectedRank newWorkRank
 	for _, fact := range facts {
 		if fact.AccountName == excludedAccountName {
 			continue
@@ -267,28 +270,45 @@ func (router *TaskRouter) selectAccountWithMostWeeklyCapacity(facts []accounts.A
 		if problem != "" {
 			continue
 		}
-		capacity, known := router.weeklyAllowanceLeft(fact, modelSlug)
-		if !known {
-			capacity = -0.5
-		}
-		softReserveReached := accounts.SoftReserveReached(fact, router.currentTime().UTC())
-		moreCapacity := selectedCapacity < capacity || (selectedCapacity == capacity && taskID != "" && accountWinsEqualCapacityTie(taskID, fact.AccountName, selected.AccountName))
-		if selected.AccountName == "" || (selectedSoftReserveReached && !softReserveReached) || (selectedSoftReserveReached == softReserveReached && moreCapacity) {
-			selected = fact
-			selectedCapacity = capacity
-			selectedSoftReserveReached = softReserveReached
+		weekly, weeklyKnown := router.weeklyAllowance(fact, modelSlug)
+		rank := newWorkRank{softReserveReached: accounts.SoftReserveReached(fact, router.currentTime().UTC()), weekly: weekly, weeklyKnown: weeklyKnown}
+		if selected.AccountName == "" || rank.before(selectedRank) {
+			selected, selectedRank = fact, rank
 		}
 	}
 	return selected, selected.AccountName != "", nil
 }
 
+type newWorkRank struct {
+	softReserveReached bool
+	weekly             accounts.AllowanceWindow
+	weeklyKnown        bool
+}
+
+func (rank newWorkRank) before(other newWorkRank) bool {
+	switch {
+	case rank.softReserveReached != other.softReserveReached:
+		return other.softReserveReached
+	case rank.weeklyKnown != other.weeklyKnown:
+		return rank.weeklyKnown
+	case rank.weekly.NotStarted != other.weekly.NotStarted:
+		return rank.weekly.NotStarted
+	case !rank.weekly.ResetsAt.Equal(other.weekly.ResetsAt):
+		return rank.weekly.ResetsAt.Before(other.weekly.ResetsAt)
+	}
+	return rank.weekly.FreePercent > other.weekly.FreePercent
+}
+
 // describeChoice names the selected account and its reported weekly allowance.
 func (router *TaskRouter) describeChoice(selected accounts.AccountRoutingFact, modelSlug string) string {
-	weeklyFreePercent, reported := router.weeklyAllowanceLeft(selected, modelSlug)
-	if !reported {
+	weekly, reported := router.weeklyAllowance(selected, modelSlug)
+	switch {
+	case !reported:
 		return fmt.Sprintf("%s, which reports no weekly allowance", selected.DisplayName)
+	case weekly.NotStarted:
+		return fmt.Sprintf("%s, whose weekly allowance has not started", selected.DisplayName)
 	}
-	return fmt.Sprintf("%s, with %.1f%% weekly allowance left", selected.DisplayName, weeklyFreePercent)
+	return fmt.Sprintf("%s, with %.1f%% weekly allowance left%s", selected.DisplayName, weekly.FreePercent, resetSuffix(weekly.ResetsAt))
 }
 
 func (router *TaskRouter) describeUnavailableAccounts(facts []accounts.AccountRoutingFact, modelSlug string) string {
@@ -306,12 +326,6 @@ func (router *TaskRouter) describeUnavailableAccounts(facts []accounts.AccountRo
 	return strings.Join(problems, "; ")
 }
 
-func accountWinsEqualCapacityTie(taskID store.TaskID, candidateAccountName, selectedAccountName store.AccountName) bool {
-	candidateRank := sha256.Sum256([]byte(string(taskID) + "\x00" + string(candidateAccountName)))
-	selectedRank := sha256.Sum256([]byte(string(taskID) + "\x00" + string(selectedAccountName)))
-	return bytes.Compare(candidateRank[:], selectedRank[:]) > 0
-}
-
 // ReportUnsupportedModel prepares the next client request without resending rejected work.
 func (router *TaskRouter) ReportUnsupportedModel(taskID store.TaskID, accountName store.AccountName, modelSlug string) bool {
 	router.accountFacts.ExcludeUnsupportedAccountModel(accountName, modelSlug)
@@ -323,7 +337,7 @@ func (router *TaskRouter) ReportUnsupportedModel(taskID store.TaskID, accountNam
 	if served, found := factForAccount(facts, accountName); found {
 		facts = factsForProvider(facts, served.Provider)
 	}
-	selected, found, err := router.selectAccountWithMostWeeklyCapacity(accountsWithKnownModels(facts), taskID, accountName, modelSlug)
+	selected, found, err := router.selectAccountForNewWork(accountsWithKnownModels(facts), accountName, modelSlug)
 	if err != nil {
 		log.Printf("select supported model account: %v", err)
 		return false

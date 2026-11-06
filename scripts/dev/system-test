@@ -46,22 +46,32 @@ class System:
 
     def __init__(self, accounts):
         self.accounts, self.base = accounts, None
-        # Distinct weekly levels, so exactly one account has the most allowance left.
+        # Distinct weekly resets, so exactly one account's allowance resets first. It is
+        # also the account with the least left, which the rule must not prefer.
         self.weekly = {account: max(5, 90 - 10 * number) for number, account in enumerate(accounts, 1)}
-        self.limited, self.extra, self.records, self.taskless_usage = set(), [], [], []
+        self.resets = {account: int(time.time()) + number * 86400 for number, account in enumerate(accounts, 1)}
+        self.limited, self.idle, self.extra, self.records, self.taskless_usage = set(), set(), [], [], []
         self.records.append(('requests without a task ID', '', lambda: self.taskless_usage,
                              lambda: rig.forwarded_requests(thread='', session='', client='')))
 
     def apply(self):
         rig.control(*[f'weekly-used {account} {used}' for account, used in self.weekly.items()],
+                    *[f'weekly-resets {account} {at}' for account, at in self.resets.items()],
+                    *[f'weekly-idle {account}' for account in sorted(self.idle)],
                     *[f'limited {account}' for account in sorted(self.limited)], *self.extra)
 
     def best_account(self, excluding=()):
-        """The rule under test: the most weekly allowance left, at the levels the fake providers report."""
+        """The rule under test: an account whose week has not started, then the weekly allowance that resets first."""
         candidates = [account for account in self.accounts if account not in self.limited | set(excluding)]
         if not candidates:
             raise Failure('No account with a weekly allowance is available.')
-        return min(candidates, key=self.weekly.get)
+        return min(candidates, key=lambda account: (account not in self.idle, self.resets[account]))
+
+    def describe(self, account):
+        """Why the rule picks the account, in the words of an outcome."""
+        if account in self.idle:
+            return f'{account}, whose week had not started'
+        return f'{account}, whose weekly allowance reset first ({100 - self.weekly[account]}% left)'
 
     def record_codex_task(self, label, thread):
         self.records.append((label, thread, lambda: rig.codex_client_usage(thread), lambda: rig.forwarded_requests(thread=thread)))
@@ -251,10 +261,10 @@ def t3_reads_the_account_pool(system):
     return 'Six accounts, allowances and a reset credit were visible with the provider paused; redemption, arbitrary calls and a wrong key were rejected.'
 
 
-def new_work_goes_to_the_most_allowance_left(system):
-    """New work avoids soft reserves; pinned work stays until its account reaches its hard reserve"""
+def new_work_goes_to_the_allowance_that_resets_first(system):
+    """New work goes to an account whose week has not started, then to the allowance that resets first, and avoids soft reserves; pinned work stays until its account reaches its hard reserve"""
     leader = system.best_account()
-    leader_left = 100 - system.weekly[leader]
+    leader_reason = system.describe(leader)
     task = rig.CodexTask('routing-task', 'Follow this script.\nRUN: ' + SUM.format(result='routing.txt') + '\nREPLY: 16').finish()
     tasks = {'Codex task': task.thread}
     if rig.PI:
@@ -263,14 +273,16 @@ def new_work_goes_to_the_most_allowance_left(system):
         tasks['Pi session'] = rig.pi_task_id(session)
     started = {name: rig.pinned_account(task_id) for name, task_id in tasks.items()}
     if set(started.values()) != {leader}:
-        raise Failure(f'{leader} had the most weekly allowance left ({leader_left}%), but '
+        raise Failure(f'The rule picks {leader_reason}, but '
                       + ' and '.join(f'the {name} went to {account}' for name, account in started.items()) + '.')
 
+    # The runner-up's allowance resets and nothing uses it, so its week has not started.
     runner_up = system.best_account(excluding={leader})
-    system.weekly[leader], system.weekly[runner_up] = 95, 20
+    system.idle.add(runner_up)
+    system.weekly[runner_up] = 0
     system.apply()
-    # Two reads at the new levels: the proxy has applied at least the first.
-    rig.wait_for(lambda: rig.usage_reads(leader, 95) >= 2 and rig.usage_reads(runner_up, 20) >= 2, 'the proxy to read the new allowance levels')
+    # Two reads at the new level: the proxy has applied at least the first.
+    rig.wait_for(lambda: rig.usage_reads(runner_up, 0) >= 2, 'the proxy to read the idle week')
     rig.CodexTask('routing-task-again', 'Follow this script.\nRUN: cat routing.txt\nREPLY: 16', thread=task.thread).finish()
     if rig.PI:
         rig.run_pi('routing-pi-second', 'Reply with the word two.', session)
@@ -281,7 +293,7 @@ def new_work_goes_to_the_most_allowance_left(system):
     system.record_codex_task('second routing Codex task', new_task.thread)
     served = {name: {row[0] for row in rig.database_rows(task_id)} for name, task_id in tasks.items()}
     if any(accounts != {leader} for accounts in served.values()) or rig.pinned_account(new_task.thread) != runner_up:
-        raise Failure(f'After {runner_up} took the lead, '
+        raise Failure(f'After {runner_up}\'s week went idle, '
                       + ', '.join(f'the {name} was served by {sorted(accounts)}' for name, accounts in served.items())
                       + f', and a new task went to {rig.pinned_account(new_task.thread)}.')
 
@@ -330,8 +342,8 @@ def new_work_goes_to_the_most_allowance_left(system):
             raise Failure(f'Codex showed {describe_errors(continued.errors + fresh.errors)} while an account was held in reserve.')
     finally:
         rig.proxy_command('reserve', runner_up, 'off')
-    return (f'A {" and a ".join(tasks)} started on {leader}, which had the most weekly allowance left ({leader_left}%).\n'
-            f'Then {runner_up} took the lead with 80% left. Each took its second turn on {leader} again, and a new Codex task went to {runner_up}.\n'
+    return (f'A {" and a ".join(tasks)} started on {leader_reason}.\n'
+            f'Then {runner_up}\'s week had not started. Each took its second turn on {leader} again, and a new Codex task went to {runner_up}.\n'
             f'At {account_name}\'s {reserve}% soft reserve, its pinned task stayed and new work went to {replacement}.\n'
             f'Setting its hard reserve to {reserve}% moved the pinned task on its next turn; new work still went to {replacement}.\n'
             'The proxy picked up the command without restart; no model request was replayed and Codex showed no error.')
@@ -347,9 +359,9 @@ def request_without_task_id_is_served(system):
     if rig.pinned_account(''):
         raise Failure('The request was served, but the proxy pinned the empty task ID to an account.')
     if rows[-1][0] != best:
-        raise Failure(f'The request was served by {rows[-1][0]}, but {best} had the most weekly allowance left.')
+        raise Failure(f'The request was served by {rows[-1][0]}, but the rule picks {system.describe(best)}.')
     record_taskless_usage(system, completed)
-    return f'A streamed request with no task ID got a complete answer from {best}, which had the most weekly allowance left. No task was pinned.'
+    return f'A streamed request with no task ID got a complete answer from {system.describe(best)}. No task was pinned.'
 
 
 def record_taskless_usage(system, completed):
@@ -540,7 +552,7 @@ def exhausted_task_moves_on_its_next_turn(system):
     if errors:
         raise Failure(f'The goal finished, but Codex showed {describe_errors(errors)}.')
     return (f'A goal started on {start}. Its second model request found {start} out of allowance; the proxy kept the limit from\n'
-            f'Codex, and Codex\'s retry went to {expected}, which had the most weekly allowance left. The goal finished by itself.\n'
+            f'Codex, and Codex\'s retry went to {system.describe(expected)}. The goal finished by itself.\n'
             f'None of its {len(forwarded)} model requests reached OpenAI twice, its tool effect ran once, and Codex showed no error.')
 
 
@@ -1009,7 +1021,7 @@ def stored_resets(system):
 GROUPS = [
     ('update', 'published-release', [update_waits_for_work, update_during_work_finishes_on_the_old_process]),
     ('resets', 'cli', [stored_resets]),
-    ('routing', 'cli', [t3_reads_the_account_pool, new_work_goes_to_the_most_allowance_left, request_without_task_id_is_served]),
+    ('routing', 'cli', [t3_reads_the_account_pool, new_work_goes_to_the_allowance_that_resets_first, request_without_task_id_is_served]),
     ('exhaustion', 'cli', [exhausted_task_moves_on_its_next_turn]),
     ('outage-goal', 'cli', [goal_continues_when_an_account_returns]),
     ('websocket-age-limit', 'cli', [websocket_age_limit_does_not_interrupt_work]),

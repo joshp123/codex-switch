@@ -332,15 +332,22 @@ func claudeLimitClaimEndingAt(fact AccountRoutingFact, model string, reset time.
 	return ""
 }
 
-func ClaudeWeeklyAllowanceLeft(fact AccountRoutingFact, model string, now time.Time) (float64, bool) {
-	free, known := 100.0, false
+// ClaudeWeeklyAllowance is the free share of the tightest weekly window that
+// applies to model, and the earliest reset among those windows. Anthropic's
+// weekly windows reset at fixed times, so they always count as started.
+func ClaudeWeeklyAllowance(fact AccountRoutingFact, model string, now time.Time) (AllowanceWindow, bool) {
+	weekly, known := AllowanceWindow{FreePercent: 100}, false
 	for _, window := range fact.AllowanceSample.Windows {
 		if window.DurationSeconds != 7*86400 || !window.ResetsAt.After(now) || !claudeWindowMatchesModel(window, model) {
 			continue
 		}
-		free, known = math.Min(free, math.Max(0, 100-window.UsedPercent)), true
+		weekly.FreePercent = math.Min(weekly.FreePercent, math.Max(0, 100-window.UsedPercent))
+		if !known || window.ResetsAt.Before(weekly.ResetsAt) {
+			weekly.ResetsAt = window.ResetsAt
+		}
+		known = true
 	}
-	return free, known
+	return weekly, known
 }
 
 func updateClaudeSharedState(fact *AccountRoutingFact, now time.Time) {

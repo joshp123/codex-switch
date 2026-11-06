@@ -158,6 +158,8 @@ type providers struct {
 // controls is one reading of the simulation file:
 //
 //	weekly-used account-N PERCENT   usage reads report PERCENT of the weekly window used
+//	weekly-resets account-N UNIX    the weekly window resets at UNIX seconds
+//	weekly-idle account-N           the weekly window has not started: nothing used, a reset a full week from each read
 //	limited account-N               the account's allowance has run out
 //	exhaust-after account-N COUNT   each WebSocket gets COUNT model requests, then the allowance runs out
 //	http-only                       WebSocket upgrades are refused, so clients use HTTP
@@ -172,6 +174,8 @@ type providers struct {
 // Fast-mode Claude requests are always refused, as for an account without usage credits.
 type controls struct {
 	weeklyUsed        map[string]float64
+	weeklyResets      map[string]int64
+	weeklyIdle        map[string]bool
 	limited           map[string]bool
 	httpOnly          bool
 	holdResponses     map[string]bool
@@ -195,7 +199,7 @@ func (providers *providers) readControls() (controls, error) {
 	if err != nil {
 		return controls{}, errors.New("cannot read simulation control file")
 	}
-	parsed := controls{weeklyUsed: map[string]float64{}, limited: map[string]bool{}, holdResponses: map[string]bool{}, claudeLimited: map[string]bool{}}
+	parsed := controls{weeklyUsed: map[string]float64{}, weeklyResets: map[string]int64{}, weeklyIdle: map[string]bool{}, limited: map[string]bool{}, holdResponses: map[string]bool{}, claudeLimited: map[string]bool{}}
 	scanner := bufio.NewScanner(strings.NewReader(string(data)))
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
@@ -221,6 +225,14 @@ func (providers *providers) readControls() (controls, error) {
 			parsed.usageError = true
 		case len(fields) == 2 && fields[0] == "hold-responses":
 			parsed.holdResponses[fields[1]] = true
+		case len(fields) == 2 && fields[0] == "weekly-idle" && providers.knownAlias(fields[1]):
+			parsed.weeklyIdle[fields[1]] = true
+		case len(fields) == 3 && fields[0] == "weekly-resets" && providers.knownAlias(fields[1]):
+			resetAt, err := strconv.ParseInt(fields[2], 10, 64)
+			if err != nil || resetAt <= 0 {
+				return controls{}, fmt.Errorf("invalid control line %q", scanner.Text())
+			}
+			parsed.weeklyResets[fields[1]] = resetAt
 		case len(fields) == 2 && fields[0] == "limited" && providers.knownAlias(fields[1]):
 			parsed.limited[fields[1]] = true
 		case len(fields) == 2 && fields[0] == "claude-limited" && providers.knownAlias(fields[1]):
@@ -375,15 +387,22 @@ func openAIUsage(controls controls, alias string) (float64, []byte) {
 	if limited {
 		used = 100
 	}
-	resetAfter := int64(3600)
+	now := time.Now().Unix()
+	resetAt := now + 3600
 	if controls.resetSoon && alias == "account-2" {
-		resetAfter = 300
+		resetAt = now + 300
 	}
 	if !limited {
-		resetAfter = 4 * 86400
+		resetAt = now + 4*86400
+		if at, set := controls.weeklyResets[alias]; set {
+			resetAt = at
+		}
+		if controls.weeklyIdle[alias] {
+			used, resetAt = 0, now+604800
+		}
 	}
 	return used, fmt.Appendf(nil, `{"plan_type":"pro","rate_limit":{"allowed":%t,"limit_reached":%t,"primary_window":{"used_percent":%g,"limit_window_seconds":604800,"reset_after_seconds":%d,"reset_at":%d}}}`,
-		!limited, limited, used, resetAfter, time.Now().Unix()+resetAfter)
+		!limited, limited, used, resetAt-now, resetAt)
 }
 
 // accountsCheck is the account Codex asks about, as ChatGPT describes a

@@ -29,7 +29,7 @@ Before a release, also run the smoke test (see below).
 | update | An update waits for model work before it switches. |
 | update | An update adopts the published release's single job during work. Responses in flight over WebSocket and HTTP finish on the old process, while new work starts on the new one and proves it. A goal's tool call spans the update and runs once. |
 | resets | Claude grants appear in status; the reset command checks pool availability and the next reset, chooses the earliest credit and retries a lost response with the same request ID. |
-| routing | New Codex tasks and Pi sessions go to the account with the most weekly allowance left, stay there when another account takes the lead, and move for a hard reserve. |
+| routing | New Codex tasks and Pi sessions go to an account whose week has not started, then to the weekly allowance that resets first. They stay on their account when another account becomes first, and move for a hard reserve. |
 | routing | A request without a task ID is served. |
 | exhaustion | When a task's account runs out, its next turn moves to another account. No model work is replayed, no tool effect repeats, and Codex shows no error. |
 | outage-goal | With every account out of allowance, a running goal continues by itself when one account comes back. |
