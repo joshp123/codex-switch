@@ -1,8 +1,16 @@
 package accounts
 
 import (
+	"context"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -101,5 +109,60 @@ func TestExpiringCreditsAreSpentEarliestFirst(t *testing.T) {
 			t.Fatalf("chose %q; want the credit that expires first", choice.credit.ID)
 		}
 		slices.Reverse(readings)
+	}
+}
+
+// Another Mac spends the credit of the account that refills last while this
+// Mac is reading that account. This Mac must see the spend as an account that
+// can take work and spend nothing, never as a missing credit beside an account
+// still at its limit, which would lead it to spend a second credit.
+func TestAnotherMacsSpendDuringTheReadsMakesThisMacBackOff(t *testing.T) {
+	data := t.TempDir()
+	late := writeAccountFixture(t, filepath.Join(data, "account-1"), "late", "late@example.test", unexpiringAccessToken("late"))
+	writeAccountFixture(t, filepath.Join(data, "account-2"), "early", "early@example.test", unexpiringAccessToken("early"))
+	now := time.Now()
+	var mutex sync.Mutex
+	otherMacSpent := false
+	var spendRequests []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mutex.Lock()
+		defer mutex.Unlock()
+		isLate := r.Header.Get("ChatGPT-Account-ID") == late.AccountID
+		refillsAt, credit, status := now.Add(24*time.Hour), "early-credit", "available"
+		if isLate {
+			refillsAt, credit = now.Add(72*time.Hour), "late-credit"
+		}
+		spent := isLate && otherMacSpent
+		if spent {
+			status = "redeemed"
+		}
+		switch r.URL.Path {
+		case "/backend-api/wham/rate-limit-reset-credits":
+			fmt.Fprintf(w, `{"credits":[{"id":%q,"status":%q,"reset_type":"codex_rate_limits","expires_at":%q}]}`, credit, status, now.Add(10*24*time.Hour).Format(time.RFC3339))
+		case "/backend-api/wham/usage":
+			used, resetAt := 100, refillsAt
+			if spent {
+				used, resetAt = 0, now.Add(week)
+			}
+			fmt.Fprintf(w, `{"plan_type":"pro","rate_limit":{"allowed":%t,"limit_reached":%t,"primary_window":{"used_percent":%d,"limit_window_seconds":604800,"reset_at":%d}}}`,
+				used < 100, used >= 100, used, resetAt.Unix())
+		case "/backend-api/wham/rate-limit-reset-credits/consume":
+			body, _ := io.ReadAll(r.Body)
+			spendRequests = append(spendRequests, string(body))
+			_, _ = w.Write([]byte(`{"code":"reset"}`))
+		default:
+			http.NotFound(w, r)
+		}
+		// The other Mac's spend lands right after this Mac's first read of the account.
+		otherMacSpent = otherMacSpent || isLate
+	}))
+	defer upstream.Close()
+	origin, _ := url.Parse(upstream.URL)
+	decision, err := spendResetCredit(context.Background(), data, origin, upstream.Client(), resetRules{whenPoolOut: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(spendRequests) != 0 || !strings.Contains(decision.Message, "can take work") {
+		t.Fatalf("spent %v (%q); want no spend, because the account the other Mac reset can take work", spendRequests, decision.Message)
 	}
 }
