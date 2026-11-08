@@ -172,6 +172,7 @@ type providers struct {
 //	break-responses                 model requests receive a malformed HTTP response
 //	provider-error                  model requests receive a provider HTTP error
 //	usage-error                     usage reads receive a provider HTTP error
+//	hold-usage-reads                usage reads wait, unanswered
 //	claude-throttle COUNT           the next COUNT Claude model requests receive a 429 that names no usage limit
 //	claude-limited account-N        the Claude account's five-hour allowance has run out
 //	websocket-age-limit SECONDS     a WebSocket opened now gets OpenAI's one-hour limit error after SECONDS, then closes
@@ -200,6 +201,7 @@ type controls struct {
 	breakResponses    bool
 	providerError     bool
 	usageError        bool
+	holdUsageReads    bool
 	claudeThrottle    bool
 	claudeLimited     map[string]bool
 	credits           map[string][]fakeCredit
@@ -253,6 +255,8 @@ func (providers *providers) readControls() (controls, error) {
 			parsed.providerError = true
 		case len(fields) == 1 && fields[0] == "usage-error":
 			parsed.usageError = true
+		case len(fields) == 1 && fields[0] == "hold-usage-reads":
+			parsed.holdUsageReads = true
 		case len(fields) == 2 && fields[0] == "hold-responses":
 			parsed.holdResponses[fields[1]] = true
 		case len(fields) == 2 && fields[0] == "weekly-idle" && providers.knownAlias(fields[1]):
@@ -332,6 +336,17 @@ func (providers *providers) ServeHTTP(writer http.ResponseWriter, request *http.
 		providers.logRequest("usage-error", request, http.StatusServiceUnavailable)
 		http.Error(writer, "provider unavailable (simulation)", http.StatusServiceUnavailable)
 	case request.URL.Path == usagePath:
+		for controls.holdUsageReads {
+			select {
+			case <-request.Context().Done():
+				return
+			case <-time.After(20 * time.Millisecond):
+			}
+			if controls, err = providers.readControls(); err != nil {
+				http.Error(writer, err.Error(), http.StatusServiceUnavailable)
+				return
+			}
+		}
 		used, body := openAIUsage(controls, alias, providers.accountReset(alias), providers.availableCredits(controls, alias))
 		log.Printf("event=usage-read account=%s used=%g", alias, used)
 		writeJSON(writer, http.StatusOK, body)
