@@ -81,7 +81,9 @@ number of requests, refused WebSockets, held or malformed responses, provider
 and usage-read errors, a Claude throttle with a one-second Retry-After as
 Anthropic sent on 31 October 2026, and a Claude five-hour limit. It refuses
 every fast-mode Claude request as Anthropic does for an account without usage
-credits. It logs every model request with a fingerprint of its bytes, so the
+credits. It holds reset credits and spends them as OpenAI does: once per
+request ID, `nothing_to_reset` for an account under 20% used, and `no_credit`
+for a credit spent by another request, expired or never held. It logs every model request with a fingerprint of its bytes, so the
 test can see that none was sent twice, and every usage read with the level it
 reported, so the test can wait until the proxy has read a level.
 

@@ -39,6 +39,7 @@ SLEEPING_GOAL = ('Follow this script.\nRUN: printf \'START\\n\' >> {effect} && w
 # The real installer with shorter timers. Macs prove a build for five minutes
 # and finish a switch within 30.
 PROVING_SECONDS, SWITCH_LIMIT_SECONDS = 1, 6
+DAY = 86400
 
 
 class System:
@@ -51,6 +52,7 @@ class System:
         self.weekly = {account: max(5, 90 - 10 * number) for number, account in enumerate(accounts, 1)}
         self.resets = {account: int(time.time()) + number * 86400 for number, account in enumerate(accounts, 1)}
         self.limited, self.idle, self.extra, self.records, self.taskless_usage = set(), set(), [], [], []
+        self.credits = []  # reset credits, as `credit account-N ID UNIX` lines
         self.records.append(('requests without a task ID', '', lambda: self.taskless_usage,
                              lambda: rig.forwarded_requests(thread='', session='', client='')))
 
@@ -58,7 +60,7 @@ class System:
         rig.control(*[f'weekly-used {account} {used}' for account, used in self.weekly.items()],
                     *[f'weekly-resets {account} {at}' for account, at in self.resets.items()],
                     *[f'weekly-idle {account}' for account in sorted(self.idle)],
-                    *[f'limited {account}' for account in sorted(self.limited)], *self.extra)
+                    *[f'limited {account}' for account in sorted(self.limited)], *self.credits, *self.extra)
 
     def best_account(self, excluding=()):
         """The rule under test: an account whose week has not started, then the weekly allowance that resets first."""
@@ -162,6 +164,11 @@ def run_group(name):
         system = System(rig.prepare(first_proxy))
         if name == "resets":
             system.extra = ["claude-grant"]
+        # The proxy reads credits every five minutes, so the credits these groups test are there from the start.
+        if name in ("resets", "reset-rollback"):
+            system.credits = reset_credits()
+        if name == "routing":
+            system.credits = [f'credit account-1 routing-credit {int(time.time()) + 20 * DAY}']
         system.apply()  # before the proxy's first allowance read
         rig.start_fake_providers()
         system.base = rig.start_proxy()
@@ -1160,11 +1167,22 @@ def reset_command(build, *args):
     return subprocess.run([str(executable), *args], env=dict(os.environ, **rig.proxy_environment()), capture_output=True, text=True, timeout=15)
 
 
+def reset_credits():
+    """One credit on each Codex account; account-2's expires first."""
+    now = int(time.time())
+    return [f'credit account-1 credit-account-1 {now + 3 * DAY}', f'credit account-2 credit-account-2 {now + 2 * DAY}',
+            f'credit account-3 credit-account-3 {now + 4 * DAY}']
+
+
+# The credit each build spends from reset_credits when every account is out.
+CHOSEN_CREDIT = {'cli': ('account-2', 'credit-account-2'), 'published-release': ('account-2', 'credit-account-2')}
+
+
 def lose_a_reset_and_retry(system, lost_by, retried_by):
-    """Exhausts the pool, lets lost_by spend the earliest credit while the provider drops its reply, then retries with
+    """Exhausts the pool, lets lost_by spend the credit it chooses while the provider drops its reply, then retries with
     retried_by. Returns the claims the provider saw, which must be the same credit and request ID twice."""
     system.limited = set(system.accounts)
-    system.extra = ['reset-test', 'reset-drop']
+    system.extra = ['reset-drop']
     system.apply()
     lost = reset_command(lost_by, 'reset', 'codex')
     if lost.returncode == 0 or 'outcome unknown' not in lost.stderr:
@@ -1173,8 +1191,8 @@ def lose_a_reset_and_retry(system, lost_by, retried_by):
     if retry.returncode or 'already redeemed' not in retry.stdout:
         raise Failure(f'{BUILD_DESCRIPTIONS[retried_by]} retrying the reset {BUILD_DESCRIPTIONS[lost_by].lower()} left pending: {retry.stdout} {retry.stderr}')
     claims = re.findall(r'event=reset-claim account=(\S+) credit=(\S+) request=(\S+)', rig.read('logs/fake-providers.log'))
-    if len(claims) != 2 or claims[0] != claims[1] or claims[0][:2] != ('account-2', 'credit-account-2'):
-        raise Failure(f'Expected two identical claims for the earliest credit; got {claims}')
+    if len(claims) != 2 or claims[0] != claims[1] or claims[0][:2] != CHOSEN_CREDIT[lost_by]:
+        raise Failure(f'Expected two identical claims for {CHOSEN_CREDIT[lost_by][1]}; got {claims}')
     return claims
 
 
@@ -1190,35 +1208,33 @@ def stored_resets(system):
     claude = command('reset', 'claude')
     if claude.returncode or 'not supported yet' not in claude.stdout:
         raise Failure(f'Claude reset: {claude.stdout} {claude.stderr}')
-    system.extra = ['reset-test']
-    system.apply()
     available = command('reset', 'codex')
     if available.returncode or 'can continue working' not in available.stdout:
         raise Failure(f'Available pool: {available.stdout} {available.stderr}')
     system.limited = set(system.accounts)
-    system.extra = ['reset-test', 'reset-soon']
+    system.extra = ['reset-soon']
     system.apply()
     soon = command('reset', 'codex')
     if soon.returncode or 'within 30 minutes' not in soon.stdout:
         raise Failure(f'Near reset: {soon.stdout} {soon.stderr}')
     if 'event=reset-claim' in rig.read('logs/fake-providers.log'):
         raise Failure('A credit was spent while an account was available or returning soon.')
-    system.extra = ['reset-test', 'reset-refuse']
+    system.extra = ['reset-refuse']
     system.apply()
     refused = command('reset', 'codex')
     if refused.returncode == 0 or 'outcome unknown' not in refused.stderr:
         raise Failure(f'Refused redemption: {refused.stdout} {refused.stderr}')
     system.limited = set(system.accounts) - {'account-1'}
-    system.extra = ['reset-test']
+    system.extra = []
     system.apply()
     recovered = command('reset', 'codex')
     if recovered.returncode or 'can continue working' not in recovered.stdout:
         raise Failure(f'Retry after capacity returned: {recovered.stdout} {recovered.stderr}')
     if 'event=reset-claim' in rig.read('logs/fake-providers.log'):
         raise Failure('A retry spent a credit after another account could work again.')
-    reads_before_reset = rig.usage_reads('account-2', system.weekly['account-2'])
     lose_a_reset_and_retry(system, lost_by='published-release', retried_by='cli')
-    rig.wait_for(lambda: rig.usage_reads('account-2', system.weekly['account-2']) > reads_before_reset, 'the proxy to observe the reset account')
+    # A reset account has used nothing.
+    rig.wait_for(lambda: rig.usage_reads('account-2', 0), 'the proxy to observe the reset account')
     task = rig.CodexTask('reset-resumed-work', 'Reply with the word resumed.').finish()
     system.record_codex_task('work after reset', task.thread)
     if rig.pinned_account(task.thread) != 'account-2':

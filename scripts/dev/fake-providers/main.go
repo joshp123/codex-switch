@@ -75,7 +75,8 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	providers := &providers{controlPath: *controlPath, aliases: aliases, requestsDirectory: *requestsDirectory}
+	providers := &providers{controlPath: *controlPath, aliases: aliases, requestsDirectory: *requestsDirectory,
+		redeemedBy: map[string]string{}, resetAccounts: map[string]bool{}}
 	if _, err := providers.readControls(); err != nil {
 		log.Fatal(err)
 	}
@@ -152,8 +153,11 @@ type providers struct {
 	// conversations holds where each response left its conversation, by
 	// response ID: Codex sends only the new items with previous_response_id.
 	conversations sync.Map
-	resetClaims   sync.Map
-	resetAccounts sync.Map
+	// Reset credits, as OpenAI keeps them: the request that redeemed each
+	// credit, and each account a credit has reset.
+	resetMu       sync.Mutex
+	redeemedBy    map[string]string
+	resetAccounts map[string]bool
 }
 
 // controls is one reading of the simulation file:
@@ -171,6 +175,17 @@ type providers struct {
 //	claude-throttle COUNT           the next COUNT Claude model requests receive a 429 that names no usage limit
 //	claude-limited account-N        the Claude account's five-hour allowance has run out
 //	websocket-age-limit SECONDS     a WebSocket opened now gets OpenAI's one-hour limit error after SECONDS, then closes
+//	credit account-N ID UNIX        the account holds reset credit ID, which expires at UNIX seconds
+//	reset-soon                      a limited account-2 refills five minutes from each read
+//	reset-drop                      the first request to spend a credit spends it, but its reply is lost
+//	reset-refuse                    requests to spend a credit receive a provider HTTP error
+//	claude-grant                    Claude usage reads report reset grants
+//
+// A credit is spent as OpenAI spends one: once, for one redeem_request_id; a
+// repeat of that request is already_redeemed, and any other request for it, or
+// for a credit expired or never held, is no_credit. An account that has used
+// under 20% of its week has nothing_to_reset and keeps the credit. A spent
+// credit resets its account: nothing used, and a week that has not started.
 //
 // Fast-mode Claude requests are always refused, as for an account without usage credits.
 // Claude login refreshes are always refused, as for a refresh token Anthropic has retired.
@@ -186,12 +201,17 @@ type controls struct {
 	usageError        bool
 	claudeThrottle    bool
 	claudeLimited     map[string]bool
-	resetTest         bool
+	credits           map[string][]fakeCredit
 	resetSoon         bool
 	resetDrop         bool
 	resetRefuse       bool
 	claudeGrant       bool
 	webSocketAgeLimit time.Duration
+}
+
+type fakeCredit struct {
+	id        string
+	expiresAt time.Time
 }
 
 func (providers *providers) readControls() (controls, error) {
@@ -201,14 +221,18 @@ func (providers *providers) readControls() (controls, error) {
 	if err != nil {
 		return controls{}, errors.New("cannot read simulation control file")
 	}
-	parsed := controls{weeklyUsed: map[string]float64{}, weeklyResets: map[string]int64{}, weeklyIdle: map[string]bool{}, limited: map[string]bool{}, holdResponses: map[string]bool{}, claudeLimited: map[string]bool{}}
+	parsed := controls{weeklyUsed: map[string]float64{}, weeklyResets: map[string]int64{}, weeklyIdle: map[string]bool{}, limited: map[string]bool{}, holdResponses: map[string]bool{}, claudeLimited: map[string]bool{}, credits: map[string][]fakeCredit{}}
 	scanner := bufio.NewScanner(strings.NewReader(string(data)))
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
 		switch {
 		case len(fields) == 0:
-		case len(fields) == 1 && fields[0] == "reset-test":
-			parsed.resetTest = true
+		case len(fields) == 4 && fields[0] == "credit" && providers.knownAlias(fields[1]):
+			expiresAt, err := strconv.ParseInt(fields[3], 10, 64)
+			if err != nil || expiresAt <= 0 {
+				return controls{}, fmt.Errorf("invalid control line %q", scanner.Text())
+			}
+			parsed.credits[fields[1]] = append(parsed.credits[fields[1]], fakeCredit{fields[2], time.Unix(expiresAt, 0)})
 		case len(fields) == 1 && fields[0] == "reset-soon":
 			parsed.resetSoon = true
 		case len(fields) == 1 && fields[0] == "reset-drop":
@@ -296,52 +320,15 @@ func (providers *providers) ServeHTTP(writer http.ResponseWriter, request *http.
 		writeJSON(writer, http.StatusOK, codexModels)
 	case request.URL.Path == accountsCheckPath:
 		writeJSON(writer, http.StatusOK, accountsCheck(request.Header.Get("ChatGPT-Account-ID")))
-	case request.URL.Path == "/backend-api/wham/rate-limit-reset-credits" && controls.resetTest:
-		expiry := 7200
-		if alias == "account-2" {
-			expiry = 3600
-		}
-		status := "available"
-		if _, redeemed := providers.resetAccounts.Load(alias); redeemed {
-			status = "redeemed"
-		}
-		body := fmt.Appendf(nil, `{"credits":[{"id":%q,"status":%q,"reset_type":"codex_rate_limits","expires_at":%q}]}`, "credit-"+alias, status, time.Now().Add(time.Duration(expiry)*time.Second).Format(time.RFC3339))
-		writeJSON(writer, http.StatusOK, body)
-	case request.URL.Path == "/backend-api/wham/rate-limit-reset-credits/consume" && controls.resetTest:
-		var claim struct {
-			CreditID  string `json:"credit_id"`
-			RequestID string `json:"redeem_request_id"`
-		}
-		_ = json.NewDecoder(request.Body).Decode(&claim)
-		if controls.resetRefuse {
-			log.Printf("event=reset-refused account=%s credit=%s", alias, claim.CreditID)
-			http.Error(writer, "provider unavailable (simulation)", http.StatusServiceUnavailable)
-			return
-		}
-		log.Printf("event=reset-claim account=%s credit=%s request=%s", alias, claim.CreditID, claim.RequestID)
-		_, already := providers.resetClaims.LoadOrStore(claim.RequestID, true)
-		providers.resetAccounts.Store(alias, true)
-		if controls.resetDrop && !already {
-			if connection, _, err := writer.(http.Hijacker).Hijack(); err == nil {
-				_ = connection.Close()
-			}
-			return
-		}
-		if already {
-			writeJSON(writer, http.StatusOK, []byte(`{"code":"already_redeemed"}`))
-		} else {
-			writeJSON(writer, http.StatusOK, []byte(`{"code":"reset"}`))
-		}
+	case request.URL.Path == "/backend-api/wham/rate-limit-reset-credits":
+		writeJSON(writer, http.StatusOK, providers.resetCredits(controls, alias))
+	case request.URL.Path == "/backend-api/wham/rate-limit-reset-credits/consume":
+		providers.spendResetCredit(writer, request, controls, alias)
 	case request.URL.Path == usagePath && controls.usageError:
 		providers.logRequest("usage-error", request, http.StatusServiceUnavailable)
 		http.Error(writer, "provider unavailable (simulation)", http.StatusServiceUnavailable)
-	case request.URL.Path == "/backend-api/wham/rate-limit-reset-credits":
-		writeJSON(writer, http.StatusOK, []byte(`{"credits":[{"id":"test-credit","status":"available","reset_type":"codex_rate_limits","expires_at":"2099-01-01T00:00:00Z"}]}`))
 	case request.URL.Path == usagePath:
-		if _, reset := providers.resetAccounts.Load(alias); reset {
-			delete(controls.limited, alias)
-		}
-		used, body := openAIUsage(controls, alias)
+		used, body := openAIUsage(controls, alias, providers.accountReset(alias), providers.availableCredits(controls, alias))
 		log.Printf("event=usage-read account=%s used=%g", alias, used)
 		writeJSON(writer, http.StatusOK, body)
 	case request.URL.Path != responsesPath:
@@ -370,8 +357,87 @@ func (providers *providers) ServeHTTP(writer http.ResponseWriter, request *http.
 }
 
 func (providers *providers) accountReset(alias string) bool {
-	_, reset := providers.resetAccounts.Load(alias)
-	return reset
+	providers.resetMu.Lock()
+	defer providers.resetMu.Unlock()
+	return providers.resetAccounts[alias]
+}
+
+// creditStatus is a credit's status as OpenAI lists it. Hold resetMu.
+func (providers *providers) creditStatus(credit fakeCredit) string {
+	switch {
+	case providers.redeemedBy[credit.id] != "":
+		return "redeemed"
+	case !credit.expiresAt.After(time.Now()):
+		return "expired"
+	}
+	return "available"
+}
+
+func (providers *providers) resetCredits(controls controls, alias string) []byte {
+	providers.resetMu.Lock()
+	defer providers.resetMu.Unlock()
+	listed := []map[string]string{}
+	for _, credit := range controls.credits[alias] {
+		listed = append(listed, map[string]string{"id": credit.id, "status": providers.creditStatus(credit),
+			"reset_type": "codex_rate_limits", "expires_at": credit.expiresAt.UTC().Format(time.RFC3339)})
+	}
+	body, _ := json.Marshal(map[string]any{"credits": listed})
+	return body
+}
+
+func (providers *providers) availableCredits(controls controls, alias string) int {
+	providers.resetMu.Lock()
+	defer providers.resetMu.Unlock()
+	count := 0
+	for _, credit := range controls.credits[alias] {
+		if providers.creditStatus(credit) == "available" {
+			count++
+		}
+	}
+	return count
+}
+
+// spendResetCredit answers a request to spend a credit as OpenAI does; see controls.
+func (providers *providers) spendResetCredit(writer http.ResponseWriter, request *http.Request, controls controls, alias string) {
+	var claim struct {
+		CreditID  string `json:"credit_id"`
+		RequestID string `json:"redeem_request_id"`
+	}
+	_ = json.NewDecoder(request.Body).Decode(&claim)
+	if controls.resetRefuse {
+		log.Printf("event=reset-refused account=%s credit=%s", alias, claim.CreditID)
+		http.Error(writer, "provider unavailable (simulation)", http.StatusServiceUnavailable)
+		return
+	}
+	log.Printf("event=reset-claim account=%s credit=%s request=%s", alias, claim.CreditID, claim.RequestID)
+	used, _ := openAIUsage(controls, alias, providers.accountReset(alias), 0)
+	providers.resetMu.Lock()
+	code := "no_credit"
+	for _, credit := range controls.credits[alias] {
+		if credit.id != claim.CreditID || claim.RequestID == "" {
+			continue
+		}
+		switch status := providers.creditStatus(credit); {
+		case status == "redeemed" && providers.redeemedBy[credit.id] == claim.RequestID:
+			code = "already_redeemed"
+		case status != "available":
+		case used < 20:
+			code = "nothing_to_reset"
+		default:
+			providers.redeemedBy[credit.id] = claim.RequestID
+			providers.resetAccounts[alias] = true
+			code = "reset"
+		}
+	}
+	providers.resetMu.Unlock()
+	log.Printf("event=reset-%s account=%s credit=%s request=%s", strings.ReplaceAll(code, "_", "-"), alias, claim.CreditID, claim.RequestID)
+	if code == "reset" && controls.resetDrop {
+		if connection, _, err := writer.(http.Hijacker).Hijack(); err == nil {
+			_ = connection.Close()
+		}
+		return
+	}
+	writeJSON(writer, http.StatusOK, fmt.Appendf(nil, `{"code":%q}`, code))
 }
 
 func writeJSON(writer http.ResponseWriter, status int, body []byte) {
@@ -381,8 +447,11 @@ func writeJSON(writer http.ResponseWriter, status int, body []byte) {
 	_, _ = writer.Write(body)
 }
 
-func openAIUsage(controls controls, alias string) (float64, []byte) {
-	used, limited := 10.0, controls.limited[alias]
+// openAIUsage is an account's weekly allowance as wham/usage reports it. A
+// limited week still resets when the week ends. An account a credit reset has
+// used nothing, and its week starts at its first request.
+func openAIUsage(controls controls, alias string, reset bool, availableCredits int) (float64, []byte) {
+	used, limited := 10.0, controls.limited[alias] && !reset
 	if level, set := controls.weeklyUsed[alias]; set {
 		used = level
 	}
@@ -390,21 +459,21 @@ func openAIUsage(controls controls, alias string) (float64, []byte) {
 		used = 100
 	}
 	now := time.Now().Unix()
-	resetAt := now + 3600
-	if controls.resetSoon && alias == "account-2" {
+	resetAt := now + 4*86400
+	if limited {
+		resetAt = now + 3600
+	}
+	if at, set := controls.weeklyResets[alias]; set {
+		resetAt = at
+	}
+	if limited && controls.resetSoon && alias == "account-2" {
 		resetAt = now + 300
 	}
-	if !limited {
-		resetAt = now + 4*86400
-		if at, set := controls.weeklyResets[alias]; set {
-			resetAt = at
-		}
-		if controls.weeklyIdle[alias] {
-			used, resetAt = 0, now+604800
-		}
+	if !limited && (controls.weeklyIdle[alias] || reset) {
+		used, resetAt = 0, now+604800
 	}
-	return used, fmt.Appendf(nil, `{"plan_type":"pro","rate_limit":{"allowed":%t,"limit_reached":%t,"primary_window":{"used_percent":%g,"limit_window_seconds":604800,"reset_after_seconds":%d,"reset_at":%d}}}`,
-		!limited, limited, used, resetAt-now, resetAt)
+	return used, fmt.Appendf(nil, `{"plan_type":"pro","rate_limit":{"allowed":%t,"limit_reached":%t,"primary_window":{"used_percent":%g,"limit_window_seconds":604800,"reset_after_seconds":%d,"reset_at":%d}},"rate_limit_reset_credits":{"available_count":%d}}`,
+		!limited, limited, used, resetAt-now, resetAt, availableCredits)
 }
 
 // accountsCheck is the account Codex asks about, as ChatGPT describes a
@@ -497,7 +566,7 @@ func (providers *providers) takeCountedControl(name, alias string, forwarded int
 		fields := strings.Fields(line)
 		switch {
 		case name == "exhaust-after" && len(fields) == 2 && fields[0] == "limited" && fields[1] == alias:
-			return true
+			return !providers.accountReset(alias)
 		case name == "exhaust-after" && len(fields) == 3 && fields[0] == name && fields[1] == alias:
 			if count, err := strconv.Atoi(fields[2]); err == nil && forwarded >= count {
 				lines[index] = "limited " + alias
