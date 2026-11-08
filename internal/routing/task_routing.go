@@ -87,14 +87,15 @@ func (router *TaskRouter) RouteForProviderTask(taskID store.TaskID, workKind sto
 	pinnedAccountProblem := ""
 	if pinned {
 		fact, inPool := factForAccount(facts, pin.AccountKey)
+		var unavailability AccountUnavailability
 		if !inPool {
 			pinnedAccountProblem = "no longer in the account pool"
-		} else if pinnedAccountProblem, err = router.accountUnavailableReason(fact, modelSlug); err != nil {
+		} else if unavailability, err = router.accountUnavailability(fact, modelSlug); err != nil {
 			return RouteDecision{}, err
 		} else if provider == accounts.ProviderClaude && workKind == store.ModelTurnWorkKind &&
 			router.currentTime().Sub(pin.PinnedAt) > claudePromptCacheLifetime {
 			pinnedAccountProblem = "its prompt cache expired after an hour without requests"
-		} else if pinnedAccountProblem == "" {
+		} else if pinnedAccountProblem = unavailability.LogText(); pinnedAccountProblem == "" {
 			if provider == accounts.ProviderClaude && workKind == store.ModelTurnWorkKind {
 				// The pin's time is the session's last model request, so it
 				// expires with the prompt cache.
@@ -113,11 +114,11 @@ func (router *TaskRouter) RouteForProviderTask(taskID store.TaskID, workKind sto
 		}
 		if parentPinned {
 			if parentFact, present := factForAccount(facts, parentPin.AccountKey); present {
-				problem, err := router.accountUnavailableReason(parentFact, modelSlug)
+				problem, err := router.accountUnavailability(parentFact, modelSlug)
 				if err != nil {
 					return RouteDecision{}, err
 				}
-				if problem == "" && !accounts.SoftReserveReached(parentFact, router.currentTime().UTC()) {
+				if problem.Reason == "" && !accounts.SoftReserveReached(parentFact, router.currentTime().UTC()) {
 					winner, err := router.storeDatabase.PinTaskAccountIfAbsent(store.TaskAccountPin{TaskID: taskID, AccountKey: parentPin.AccountKey, PinnedAt: router.currentTime().UTC()})
 					if err != nil {
 						return RouteDecision{}, err
@@ -200,11 +201,11 @@ func (router *TaskRouter) ClaudePoolCapacity(modelSlug string) (accountFree bool
 	}
 	facts = factsForProvider(facts, accounts.ProviderClaude)
 	for _, fact := range facts {
-		reason, err := router.accountUnavailableReason(fact, modelSlug)
+		unavailability, err := router.accountUnavailability(fact, modelSlug)
 		if err != nil {
 			return false, time.Time{}, "", err
 		}
-		if reason == "" {
+		if unavailability.Reason == "" {
 			return true, time.Time{}, "", nil
 		}
 	}
@@ -263,11 +264,11 @@ func (router *TaskRouter) selectAccountForNewWork(facts []accounts.AccountRoutin
 		if fact.AccountKey == excludedAccountKey {
 			continue
 		}
-		problem, err := router.accountUnavailableReason(fact, modelSlug)
+		problem, err := router.accountUnavailability(fact, modelSlug)
 		if err != nil {
 			return accounts.AccountRoutingFact{}, false, err
 		}
-		if problem != "" {
+		if problem.Reason != "" {
 			continue
 		}
 		weekly, weeklyKnown := router.weeklyAllowance(fact, modelSlug)
@@ -317,7 +318,8 @@ func (router *TaskRouter) describeUnavailableAccounts(facts []accounts.AccountRo
 	}
 	problems := make([]string, 0, len(facts))
 	for _, fact := range facts {
-		problem, err := router.accountUnavailableReason(fact, modelSlug)
+		unavailability, err := router.accountUnavailability(fact, modelSlug)
+		problem := unavailability.LogText()
 		if err != nil {
 			problem = err.Error()
 		}
@@ -398,20 +400,19 @@ func (router *TaskRouter) RouteForModelCatalogue() (RouteDecision, error) {
 	return RouteDecision{AccountKey: selected.AccountKey, DisplayName: selected.DisplayName, Credentials: selected.Credentials}, nil
 }
 
-// ReadAccountAvailability uses the same rule as admission. An empty reason means
-// the account can take new work for modelSlug.
-func (router *TaskRouter) ReadAccountAvailability(modelSlug string) ([]accounts.AccountRoutingFact, map[store.AccountKey]string, error) {
+// ReadAccountAvailability uses the same rule as admission.
+func (router *TaskRouter) ReadAccountAvailability(modelSlug string) ([]accounts.AccountRoutingFact, map[store.AccountKey]AccountUnavailability, error) {
 	facts, err := router.accountFacts.ReadAccountRoutingFacts()
 	if err != nil {
 		return nil, nil, err
 	}
-	unavailableReasons := make(map[store.AccountKey]string, len(facts))
+	unavailability := make(map[store.AccountKey]AccountUnavailability, len(facts))
 	for _, fact := range facts {
-		if unavailableReasons[fact.AccountKey], err = router.accountUnavailableReason(fact, availabilityModel(fact, modelSlug)); err != nil {
+		if unavailability[fact.AccountKey], err = router.accountUnavailability(fact, availabilityModel(fact, modelSlug)); err != nil {
 			return nil, nil, err
 		}
 	}
-	return facts, unavailableReasons, nil
+	return facts, unavailability, nil
 }
 
 func factsForProvider(facts []accounts.AccountRoutingFact, provider accounts.Provider) []accounts.AccountRoutingFact {

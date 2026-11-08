@@ -91,9 +91,12 @@ private struct AccountIdentities: View {
     }
 
     /// "no new work · 15% reserve", "held back · 10% reserve", or a limit, in
-    /// the proxy's words.
+    /// the proxy's words, with when the limit ends in the Mac's time zone.
     private func state(_ account: CSSwitch_Account) -> String? {
-        let state = account.usable ? account.reserveStatus : account.offersConfiguredModel ? account.unavailableReason : ""
+        var state = account.usable ? account.reserveStatus : account.offersConfiguredModel ? account.unavailableReason : ""
+        if !account.usable, account.offersConfiguredModel, account.hasUnavailableUntil {
+            state += " until " + UsageFormatting.dayAndClock(account.unavailableUntil.date)
+        }
         return state.isEmpty ? nil : state
     }
 }

@@ -384,7 +384,7 @@ func writeMenuSnapshotURL(dataDirectory, snapshotURL string) error {
 // readServingMenuSnapshot reports every installed account: its allowance,
 // whether it can take new work for modelSlug and why not.
 func readServingMenuSnapshot(dataDirectory string, router *routing.TaskRouter, modelSlug string) (*menupb.MenuSnapshot, error) {
-	facts, unavailableReasons, err := router.ReadAccountAvailability(modelSlug)
+	facts, unavailability, err := router.ReadAccountAvailability(modelSlug)
 	if err != nil {
 		return nil, err
 	}
@@ -403,7 +403,10 @@ func readServingMenuSnapshot(dataDirectory string, router *routing.TaskRouter, m
 	for _, fact := range facts {
 		identity := identities[fact.AccountKey]
 		sample := fact.AllowanceSample
-		account := &menupb.Account{Key: string(fact.AccountKey), AccountNumber: uint32(identity.ProviderNumber), Email: identity.Email, Plan: sample.Plan, State: menuAccountState(fact.AccountState), Usable: unavailableReasons[fact.AccountKey] == "", UnavailableReason: unavailableReasons[fact.AccountKey], OffersConfiguredModel: modelSlug == "" || slices.Contains(fact.SupportedModelSlugs, modelSlug)}
+		account := &menupb.Account{Key: string(fact.AccountKey), AccountNumber: uint32(identity.ProviderNumber), Email: identity.Email, Plan: sample.Plan, State: menuAccountState(fact.AccountState), Usable: unavailability[fact.AccountKey].Reason == "", UnavailableReason: unavailability[fact.AccountKey].Reason, OffersConfiguredModel: modelSlug == "" || slices.Contains(fact.SupportedModelSlugs, modelSlug)}
+		if until := unavailability[fact.AccountKey].Until; !account.Usable && !until.IsZero() {
+			account.UnavailableUntil = timestamppb.New(until)
+		}
 		if account.Usable {
 			account.ReserveStatus = accountapi.ReserveStatus(fact, snapshot.GeneratedAt.AsTime())
 		}

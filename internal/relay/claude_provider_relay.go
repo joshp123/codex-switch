@@ -14,6 +14,8 @@ import (
 
 	"github.com/joshp123/codex-switch/internal/routing"
 	"github.com/joshp123/codex-switch/internal/store"
+
+	"github.com/joshp123/codex-switch/internal/logtime"
 )
 
 type ClaudeAccountObserver interface {
@@ -111,10 +113,10 @@ func answerClaudeRejection(response *http.Response, router TaskRouter, modelSlug
 		if accountFree {
 			log.Printf("%s; the client's retry goes to another account", limited)
 		} else {
-			log.Printf("%s; the client's retry waits for a throttle to end at %s", limited, availableAgainAt.Local().Format("15:04:05"))
+			log.Printf("%s; the client's retry waits for a throttle to end at %s", limited, logtime.Format(availableAgainAt))
 		}
 	case !availableAgainAt.IsZero():
-		availableAgain := availableAgainAt.Local().Format("Mon 2 Jan 15:04")
+		availableAgain := logtime.Format(availableAgainAt)
 		response.Header.Set("Anthropic-Ratelimit-Unified-Status", "rejected")
 		response.Header.Set("Anthropic-Ratelimit-Unified-Reset", strconv.FormatInt(availableAgainAt.Unix(), 10))
 		response.Header.Set("Anthropic-Ratelimit-Unified-Representative-Claim", limitClaim)
@@ -194,7 +196,7 @@ func answerExhaustedClaudePool(response http.ResponseWriter, exhaustion error, w
 		response.Header().Set("Content-Type", "application/json")
 		response.Header().Set("Anthropic-Ratelimit-Unified-Status", "rejected")
 		response.Header().Set("Anthropic-Ratelimit-Unified-Reset", strconv.FormatInt(exhausted.AvailableAgainAt.Unix(), 10))
-		availableAgain := exhausted.AvailableAgainAt.Local().Format("Mon 2 Jan 15:04")
+		availableAgain := logtime.Format(exhausted.AvailableAgainAt)
 		told := "Anthropic throttles every account until " + availableAgain
 		if exhausted.LimitClaim != "" {
 			// Without a claim Claude Code treats the 429 as a throttle and retries.

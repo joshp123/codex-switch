@@ -8,78 +8,90 @@ import (
 	"time"
 
 	"github.com/joshp123/codex-switch/internal/accounts"
+	"github.com/joshp123/codex-switch/internal/logtime"
 	"github.com/joshp123/codex-switch/internal/store"
 )
 
-// accountUnavailableReason is the one rule for whether an account may take new
-// model work. It returns "" when the account can serve modelSlug, otherwise the
-// reason in the words the status command and the proxy log show.
-func (router *TaskRouter) accountUnavailableReason(fact accounts.AccountRoutingFact, modelSlug string) (string, error) {
-	if problem := accountAccessProblem(fact); problem != "" {
+// AccountUnavailability is why an account cannot take new model work, and when
+// that ends if a reset is known. Reason holds no time, so each reader writes
+// Until in its own time zone: the proxy log in UTC, status and the menu in the
+// Mac's current zone. An empty Reason means the account can take the work.
+type AccountUnavailability struct {
+	Reason string
+	Until  time.Time
+}
+
+// LogText is the reason as the proxy log writes it.
+func (unavailability AccountUnavailability) LogText() string {
+	return unavailability.Reason + resetSuffix(unavailability.Until)
+}
+
+// accountUnavailability is the one rule for whether an account may take new
+// model work for modelSlug.
+func (router *TaskRouter) accountUnavailability(fact accounts.AccountRoutingFact, modelSlug string) (AccountUnavailability, error) {
+	if problem := accountAccessProblem(fact); problem.Reason != "" {
 		return problem, nil
 	}
 	now := router.currentTime().UTC()
 	if reason := accounts.ReserveUnavailableReason(fact, now); reason != "" {
-		return reason, nil
+		return AccountUnavailability{Reason: reason}, nil
 	}
 	if fact.Provider == accounts.ProviderClaude {
 		reason, resetsAt := accounts.ClaudeUnavailableReason(fact, modelSlug, now)
-		if reason != "" {
-			reason += resetSuffix(resetsAt)
-		}
-		return reason, nil
+		return AccountUnavailability{Reason: reason, Until: resetsAt}, nil
 	}
 	for _, kind := range []accounts.AllowanceWindowKind{accounts.FiveHours, accounts.Weekly} {
 		window, known := accounts.AnalyseAllowance(fact.AllowanceSample, fact.AccountState, now, kind)
 		if known && window.FreePercent <= 0 {
-			return fmt.Sprintf("%s allowance used up%s", kind, resetSuffix(window.ResetsAt)), nil
+			return AccountUnavailability{Reason: fmt.Sprintf("%s allowance used up", kind), Until: window.ResetsAt}, nil
 		}
 	}
 	if fact.AccountState == accounts.AccountReady && fact.AllowanceSample.Allowed && !fact.AllowanceSample.LimitReached {
 		// A provider read begun before exhaustion cannot supersede that exhaustion.
 		cleared, err := router.storeDatabase.ClearAccountExhaustionBefore(fact.AccountKey, fact.RefreshedAt)
 		if err != nil {
-			return "", err
+			return AccountUnavailability{}, err
 		}
 		if cleared {
 			log.Printf("%s can take new work again: OpenAI's allowance reading at %s shows it is no longer limited",
-				fact.DisplayName, fact.AllowanceSample.ObservedAt.Local().Format("15:04:05"))
+				fact.DisplayName, logtime.Format(fact.AllowanceSample.ObservedAt))
 		}
 	}
 	resetsAt, exhausted, err := router.storeDatabase.ReadAccountReportedReset(fact.AccountKey)
 	if err != nil {
-		return "", err
+		return AccountUnavailability{}, err
 	}
 	if exhausted {
-		return "hit its usage limit" + resetSuffix(resetsAt), nil
+		return AccountUnavailability{Reason: "hit its usage limit", Until: resetsAt}, nil
 	}
 	if modelSlug != "" && fact.SupportedModelSlugs == nil {
-		return "its model list has not been read yet", nil
+		return AccountUnavailability{Reason: "its model list has not been read yet"}, nil
 	}
 	if !accountSupportsModel(fact, modelSlug) {
-		return "does not offer " + modelSlug, nil
+		return AccountUnavailability{Reason: "does not offer " + modelSlug}, nil
 	}
-	return "", nil
+	return AccountUnavailability{}, nil
 }
 
 // accountAccessProblem covers what no allowance reset fixes, and the OpenAI
-// limit state. It returns "" when only allowance and reserve remain to check.
-func accountAccessProblem(fact accounts.AccountRoutingFact) string {
+// limit state. Its Reason is empty when only allowance and reserve remain to
+// check.
+func accountAccessProblem(fact accounts.AccountRoutingFact) AccountUnavailability {
 	switch {
 	case fact.AccountState == accounts.AccountSignInRequired:
 		command := "codex-switch login "
 		if fact.Provider == accounts.ProviderClaude {
 			command += "--claude "
 		}
-		return "signed out; run: " + command + fmt.Sprintf("%q", fact.DisplayName)
+		return AccountUnavailability{Reason: "signed out; run: " + command + fmt.Sprintf("%q", fact.DisplayName)}
 	case !accountCredentialsUsable(fact.Credentials) || fact.AccountState == accounts.AccountCredentialsUnavailable:
-		return withCause("cannot read its saved login", fact.AccountStateCause)
+		return AccountUnavailability{Reason: withCause("cannot read its saved login", fact.AccountStateCause)}
 	case fact.Provider != accounts.ProviderClaude && fact.AccountState == accounts.AccountLimited:
-		return "OpenAI reports its usage limit reached" + resetSuffix(latestReset(fact.AllowanceSample))
+		return AccountUnavailability{Reason: "OpenAI reports its usage limit reached", Until: latestReset(fact.AllowanceSample)}
 	case !fact.AccountState.Eligible() && !(fact.Provider == accounts.ProviderClaude && fact.AccountState == accounts.AccountLimited):
-		return "account state " + string(fact.AccountState)
+		return AccountUnavailability{Reason: "account state " + string(fact.AccountState)}
 	}
-	return ""
+	return AccountUnavailability{}
 }
 
 // claudePoolAvailableAgain is the earliest time a Claude account that can be
@@ -88,7 +100,7 @@ func (router *TaskRouter) claudePoolAvailableAgain(facts []accounts.AccountRouti
 	var earliest time.Time
 	earliestClaim := ""
 	for _, fact := range facts {
-		if accountAccessProblem(fact) != "" {
+		if accountAccessProblem(fact).Reason != "" {
 			continue
 		}
 		availableAt, claim, found := accounts.ClaudeAvailableAgain(fact, modelSlug, router.currentTime().UTC())
@@ -139,7 +151,7 @@ func resetSuffix(resetsAt time.Time) string {
 	if resetsAt.IsZero() {
 		return ""
 	}
-	return " until " + resetsAt.Local().Format("Mon 2 Jan 15:04")
+	return " until " + logtime.Format(resetsAt)
 }
 
 func withCause(summary string, cause error) string {

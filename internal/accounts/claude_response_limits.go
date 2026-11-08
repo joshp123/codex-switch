@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/joshp123/codex-switch/internal/store"
+
+	"github.com/joshp123/codex-switch/internal/logtime"
 )
 
 // ObserveClaudeResponse retains all reported windows, including a model bucket
@@ -123,7 +125,7 @@ func restrictClaudeAccountAfterRejection(fact *AccountRoutingFact, model string,
 			retryAt = now.Add(claudeThrottleHold)
 		}
 		fact.ClaudeRestrictions[canonicalClaudeModelID(model)] = ClaudeRestriction{ResetsAt: retryAt, ObservedAt: now, Throttle: true}
-		log.Printf("%s: Anthropic throttled %s without naming a usage limit; trying the account again after %s", fact.DisplayName, model, retryAt.Local().Format("15:04:05"))
+		log.Printf("%s: Anthropic throttled %s without naming a usage limit; trying the account again after %s", fact.DisplayName, model, logtime.Format(retryAt))
 		return
 	}
 	latestReset := retryAt
@@ -136,7 +138,7 @@ func restrictClaudeAccountAfterRejection(fact *AccountRoutingFact, model string,
 			latestReset = reset
 		}
 	}
-	log.Printf("%s: Claude limit for %s; available after %s", fact.DisplayName, model, latestReset.Local().Format("Mon 2 Jan 15:04"))
+	log.Printf("%s: Claude limit for %s; available after %s", fact.DisplayName, model, logtime.Format(latestReset))
 }
 
 // ClaudeRejectionNamesUsageLimit is whether a 429 names a usage limit, by the

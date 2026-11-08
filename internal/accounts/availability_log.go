@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/joshp123/codex-switch/internal/logtime"
 )
 
 // describeAccountAvailabilityChange returns the proxy log line for an account
@@ -61,7 +63,7 @@ func describeAccountAvailabilityChange(previous, current AccountRoutingFact, ema
 	line := identity + ": " + state
 	if allowanceReadFailing(current) {
 		line += fmt.Sprintf(" (its allowance could not be read again, so routing uses the reading from %s: %v)",
-			current.AllowanceSample.ObservedAt.Local().Format("Mon 2 Jan 15:04"), current.AccountStateCause)
+			logtime.Format(current.AllowanceSample.ObservedAt), current.AccountStateCause)
 	}
 	if allowance := describeAllowanceWindows(current.AllowanceSample); allowance != "" {
 		line += "; " + allowance
@@ -93,7 +95,7 @@ func describeAllowanceWindows(sample AllowanceSample) string {
 		}
 		windows = append(windows, fmt.Sprintf("%s %.0f%% used, %.0f%% free, resets %s",
 			label, window.UsedPercent, 100-window.UsedPercent,
-			window.ResetsAt.Local().Format("Mon 2 Jan 15:04")))
+			logtime.Format(window.ResetsAt)))
 	}
 	return strings.Join(windows, "; ")
 }

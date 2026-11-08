@@ -48,7 +48,8 @@ message Account {
   AllowanceObservation allowance = 5;
   uint32 account_number = 6;
   bool usable = 7;
-  // Why the account cannot take new work for the configured model; empty when usable.
+  // Why the account cannot take new work for the configured model; empty when
+  // usable. It holds no time: unavailable_until is when it ends, if known.
   string unavailable_reason = 8;
   // The account's plan offers the model Codex is configured to use, so it is
   // part of the pool for current work even while its allowance is used up.
@@ -56,6 +57,7 @@ message Account {
   Provider provider = 10;
   // Why new work goes elsewhere while the account remains usable.
   string reserve_status = 11;
+  google.protobuf.Timestamp unavailable_until = 12;
 }
 enum Provider {
   PROVIDER_UNSPECIFIED = 0;

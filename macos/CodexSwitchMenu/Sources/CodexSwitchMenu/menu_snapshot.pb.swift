@@ -325,49 +325,89 @@ nonisolated struct CSSwitch_ModelRequestCounts: Sendable {
   init() {}
 }
 
-nonisolated struct CSSwitch_Account: Sendable {
+nonisolated struct CSSwitch_Account: @unchecked Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
-  var key: String = String()
+  var key: String {
+    get {_storage._key}
+    set {_uniqueStorage()._key = newValue}
+  }
 
-  var email: String = String()
+  var email: String {
+    get {_storage._email}
+    set {_uniqueStorage()._email = newValue}
+  }
 
-  var plan: String = String()
+  var plan: String {
+    get {_storage._plan}
+    set {_uniqueStorage()._plan = newValue}
+  }
 
-  var state: CSSwitch_AccountState = .unspecified
+  var state: CSSwitch_AccountState {
+    get {_storage._state}
+    set {_uniqueStorage()._state = newValue}
+  }
 
   var allowance: CSSwitch_AllowanceObservation {
-    get {_allowance ?? CSSwitch_AllowanceObservation()}
-    set {_allowance = newValue}
+    get {_storage._allowance ?? CSSwitch_AllowanceObservation()}
+    set {_uniqueStorage()._allowance = newValue}
   }
   /// Returns true if `allowance` has been explicitly set.
-  var hasAllowance: Bool {self._allowance != nil}
+  var hasAllowance: Bool {_storage._allowance != nil}
   /// Clears the value of `allowance`. Subsequent reads from it will return its default value.
-  mutating func clearAllowance() {self._allowance = nil}
+  mutating func clearAllowance() {_uniqueStorage()._allowance = nil}
 
-  var accountNumber: UInt32 = 0
+  var accountNumber: UInt32 {
+    get {_storage._accountNumber}
+    set {_uniqueStorage()._accountNumber = newValue}
+  }
 
-  var usable: Bool = false
+  var usable: Bool {
+    get {_storage._usable}
+    set {_uniqueStorage()._usable = newValue}
+  }
 
-  /// Why the account cannot take new work for the configured model; empty when usable.
-  var unavailableReason: String = String()
+  /// Why the account cannot take new work for the configured model; empty when
+  /// usable. It holds no time: unavailable_until is when it ends, if known.
+  var unavailableReason: String {
+    get {_storage._unavailableReason}
+    set {_uniqueStorage()._unavailableReason = newValue}
+  }
 
   /// The account's plan offers the model Codex is configured to use, so it is
   /// part of the pool for current work even while its allowance is used up.
-  var offersConfiguredModel: Bool = false
+  var offersConfiguredModel: Bool {
+    get {_storage._offersConfiguredModel}
+    set {_uniqueStorage()._offersConfiguredModel = newValue}
+  }
 
-  var provider: CSSwitch_Provider = .unspecified
+  var provider: CSSwitch_Provider {
+    get {_storage._provider}
+    set {_uniqueStorage()._provider = newValue}
+  }
 
   /// Why new work goes elsewhere while the account remains usable.
-  var reserveStatus: String = String()
+  var reserveStatus: String {
+    get {_storage._reserveStatus}
+    set {_uniqueStorage()._reserveStatus = newValue}
+  }
+
+  var unavailableUntil: SwiftProtobuf.Google_Protobuf_Timestamp {
+    get {_storage._unavailableUntil ?? SwiftProtobuf.Google_Protobuf_Timestamp()}
+    set {_uniqueStorage()._unavailableUntil = newValue}
+  }
+  /// Returns true if `unavailableUntil` has been explicitly set.
+  var hasUnavailableUntil: Bool {_storage._unavailableUntil != nil}
+  /// Clears the value of `unavailableUntil`. Subsequent reads from it will return its default value.
+  mutating func clearUnavailableUntil() {_uniqueStorage()._unavailableUntil = nil}
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
   init() {}
 
-  fileprivate var _allowance: CSSwitch_AllowanceObservation? = nil
+  fileprivate var _storage = _StorageClass.defaultInstance
 }
 
 nonisolated struct CSSwitch_AllowanceObservation: Sendable {
@@ -879,83 +919,146 @@ nonisolated extension CSSwitch_ModelRequestCounts: SwiftProtobuf.Message, SwiftP
 
 nonisolated extension CSSwitch_Account: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".Account"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}key\0\u{1}email\0\u{1}plan\0\u{1}state\0\u{1}allowance\0\u{3}account_number\0\u{1}usable\0\u{3}unavailable_reason\0\u{3}offers_configured_model\0\u{1}provider\0\u{3}reserve_status\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}key\0\u{1}email\0\u{1}plan\0\u{1}state\0\u{1}allowance\0\u{3}account_number\0\u{1}usable\0\u{3}unavailable_reason\0\u{3}offers_configured_model\0\u{1}provider\0\u{3}reserve_status\0\u{3}unavailable_until\0")
+
+  fileprivate class _StorageClass {
+    var _key: String = String()
+    var _email: String = String()
+    var _plan: String = String()
+    var _state: CSSwitch_AccountState = .unspecified
+    var _allowance: CSSwitch_AllowanceObservation? = nil
+    var _accountNumber: UInt32 = 0
+    var _usable: Bool = false
+    var _unavailableReason: String = String()
+    var _offersConfiguredModel: Bool = false
+    var _provider: CSSwitch_Provider = .unspecified
+    var _reserveStatus: String = String()
+    var _unavailableUntil: SwiftProtobuf.Google_Protobuf_Timestamp? = nil
+
+      // This property is used as the initial default value for new instances of the type.
+      // The type itself is protecting the reference to its storage via CoW semantics.
+      // This will force a copy to be made of this reference when the first mutation occurs;
+      // hence, it is safe to mark this as `nonisolated(unsafe)`.
+      static nonisolated(unsafe) let defaultInstance = _StorageClass()
+
+    private init() {}
+
+    init(copying source: _StorageClass) {
+      _key = source._key
+      _email = source._email
+      _plan = source._plan
+      _state = source._state
+      _allowance = source._allowance
+      _accountNumber = source._accountNumber
+      _usable = source._usable
+      _unavailableReason = source._unavailableReason
+      _offersConfiguredModel = source._offersConfiguredModel
+      _provider = source._provider
+      _reserveStatus = source._reserveStatus
+      _unavailableUntil = source._unavailableUntil
+    }
+  }
+
+  fileprivate mutating func _uniqueStorage() -> _StorageClass {
+    if !isKnownUniquelyReferenced(&_storage) {
+      _storage = _StorageClass(copying: _storage)
+    }
+    return _storage
+  }
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.key) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self.email) }()
-      case 3: try { try decoder.decodeSingularStringField(value: &self.plan) }()
-      case 4: try { try decoder.decodeSingularEnumField(value: &self.state) }()
-      case 5: try { try decoder.decodeSingularMessageField(value: &self._allowance) }()
-      case 6: try { try decoder.decodeSingularUInt32Field(value: &self.accountNumber) }()
-      case 7: try { try decoder.decodeSingularBoolField(value: &self.usable) }()
-      case 8: try { try decoder.decodeSingularStringField(value: &self.unavailableReason) }()
-      case 9: try { try decoder.decodeSingularBoolField(value: &self.offersConfiguredModel) }()
-      case 10: try { try decoder.decodeSingularEnumField(value: &self.provider) }()
-      case 11: try { try decoder.decodeSingularStringField(value: &self.reserveStatus) }()
-      default: break
+    _ = _uniqueStorage()
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      while let fieldNumber = try decoder.nextFieldNumber() {
+        // The use of inline closures is to circumvent an issue where the compiler
+        // allocates stack space for every case branch when no optimizations are
+        // enabled. https://github.com/apple/swift-protobuf/issues/1034
+        switch fieldNumber {
+        case 1: try { try decoder.decodeSingularStringField(value: &_storage._key) }()
+        case 2: try { try decoder.decodeSingularStringField(value: &_storage._email) }()
+        case 3: try { try decoder.decodeSingularStringField(value: &_storage._plan) }()
+        case 4: try { try decoder.decodeSingularEnumField(value: &_storage._state) }()
+        case 5: try { try decoder.decodeSingularMessageField(value: &_storage._allowance) }()
+        case 6: try { try decoder.decodeSingularUInt32Field(value: &_storage._accountNumber) }()
+        case 7: try { try decoder.decodeSingularBoolField(value: &_storage._usable) }()
+        case 8: try { try decoder.decodeSingularStringField(value: &_storage._unavailableReason) }()
+        case 9: try { try decoder.decodeSingularBoolField(value: &_storage._offersConfiguredModel) }()
+        case 10: try { try decoder.decodeSingularEnumField(value: &_storage._provider) }()
+        case 11: try { try decoder.decodeSingularStringField(value: &_storage._reserveStatus) }()
+        case 12: try { try decoder.decodeSingularMessageField(value: &_storage._unavailableUntil) }()
+        default: break
+        }
       }
     }
   }
 
   func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    // The use of inline closures is to circumvent an issue where the compiler
-    // allocates stack space for every if/case branch local when no optimizations
-    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
-    // https://github.com/apple/swift-protobuf/issues/1182
-    if !self.key.isEmpty {
-      try visitor.visitSingularStringField(value: self.key, fieldNumber: 1)
-    }
-    if !self.email.isEmpty {
-      try visitor.visitSingularStringField(value: self.email, fieldNumber: 2)
-    }
-    if !self.plan.isEmpty {
-      try visitor.visitSingularStringField(value: self.plan, fieldNumber: 3)
-    }
-    if self.state != .unspecified {
-      try visitor.visitSingularEnumField(value: self.state, fieldNumber: 4)
-    }
-    try { if let v = self._allowance {
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 5)
-    } }()
-    if self.accountNumber != 0 {
-      try visitor.visitSingularUInt32Field(value: self.accountNumber, fieldNumber: 6)
-    }
-    if self.usable != false {
-      try visitor.visitSingularBoolField(value: self.usable, fieldNumber: 7)
-    }
-    if !self.unavailableReason.isEmpty {
-      try visitor.visitSingularStringField(value: self.unavailableReason, fieldNumber: 8)
-    }
-    if self.offersConfiguredModel != false {
-      try visitor.visitSingularBoolField(value: self.offersConfiguredModel, fieldNumber: 9)
-    }
-    if self.provider != .unspecified {
-      try visitor.visitSingularEnumField(value: self.provider, fieldNumber: 10)
-    }
-    if !self.reserveStatus.isEmpty {
-      try visitor.visitSingularStringField(value: self.reserveStatus, fieldNumber: 11)
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every if/case branch local when no optimizations
+      // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+      // https://github.com/apple/swift-protobuf/issues/1182
+      if !_storage._key.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._key, fieldNumber: 1)
+      }
+      if !_storage._email.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._email, fieldNumber: 2)
+      }
+      if !_storage._plan.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._plan, fieldNumber: 3)
+      }
+      if _storage._state != .unspecified {
+        try visitor.visitSingularEnumField(value: _storage._state, fieldNumber: 4)
+      }
+      try { if let v = _storage._allowance {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 5)
+      } }()
+      if _storage._accountNumber != 0 {
+        try visitor.visitSingularUInt32Field(value: _storage._accountNumber, fieldNumber: 6)
+      }
+      if _storage._usable != false {
+        try visitor.visitSingularBoolField(value: _storage._usable, fieldNumber: 7)
+      }
+      if !_storage._unavailableReason.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._unavailableReason, fieldNumber: 8)
+      }
+      if _storage._offersConfiguredModel != false {
+        try visitor.visitSingularBoolField(value: _storage._offersConfiguredModel, fieldNumber: 9)
+      }
+      if _storage._provider != .unspecified {
+        try visitor.visitSingularEnumField(value: _storage._provider, fieldNumber: 10)
+      }
+      if !_storage._reserveStatus.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._reserveStatus, fieldNumber: 11)
+      }
+      try { if let v = _storage._unavailableUntil {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 12)
+      } }()
     }
     try unknownFields.traverse(visitor: &visitor)
   }
 
   static func ==(lhs: CSSwitch_Account, rhs: CSSwitch_Account) -> Bool {
-    if lhs.key != rhs.key {return false}
-    if lhs.email != rhs.email {return false}
-    if lhs.plan != rhs.plan {return false}
-    if lhs.state != rhs.state {return false}
-    if lhs._allowance != rhs._allowance {return false}
-    if lhs.accountNumber != rhs.accountNumber {return false}
-    if lhs.usable != rhs.usable {return false}
-    if lhs.unavailableReason != rhs.unavailableReason {return false}
-    if lhs.offersConfiguredModel != rhs.offersConfiguredModel {return false}
-    if lhs.provider != rhs.provider {return false}
-    if lhs.reserveStatus != rhs.reserveStatus {return false}
+    if lhs._storage !== rhs._storage {
+      let storagesAreEqual: Bool = withExtendedLifetime((lhs._storage, rhs._storage)) { (_args: (_StorageClass, _StorageClass)) in
+        let _storage = _args.0
+        let rhs_storage = _args.1
+        if _storage._key != rhs_storage._key {return false}
+        if _storage._email != rhs_storage._email {return false}
+        if _storage._plan != rhs_storage._plan {return false}
+        if _storage._state != rhs_storage._state {return false}
+        if _storage._allowance != rhs_storage._allowance {return false}
+        if _storage._accountNumber != rhs_storage._accountNumber {return false}
+        if _storage._usable != rhs_storage._usable {return false}
+        if _storage._unavailableReason != rhs_storage._unavailableReason {return false}
+        if _storage._offersConfiguredModel != rhs_storage._offersConfiguredModel {return false}
+        if _storage._provider != rhs_storage._provider {return false}
+        if _storage._reserveStatus != rhs_storage._reserveStatus {return false}
+        if _storage._unavailableUntil != rhs_storage._unavailableUntil {return false}
+        return true
+      }
+      if !storagesAreEqual {return false}
+    }
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

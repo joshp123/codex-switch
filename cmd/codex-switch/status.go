@@ -147,6 +147,9 @@ func writeCurrentStatus(output io.Writer, snapshot *menupb.MenuSnapshot) {
 		state := "available"
 		if !account.Usable {
 			state = "unavailable: " + oneLine(account.UnavailableReason)
+			if account.UnavailableUntil != nil {
+				state += " until " + account.UnavailableUntil.AsTime().Local().Format("Mon 2 Jan 15:04")
+			}
 		} else if account.ReserveStatus != "" {
 			state = oneLine(account.ReserveStatus)
 		}

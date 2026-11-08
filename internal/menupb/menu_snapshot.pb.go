@@ -563,16 +563,18 @@ type Account struct {
 	Allowance     *AllowanceObservation  `protobuf:"bytes,5,opt,name=allowance,proto3" json:"allowance,omitempty"`
 	AccountNumber uint32                 `protobuf:"varint,6,opt,name=account_number,json=accountNumber,proto3" json:"account_number,omitempty"`
 	Usable        bool                   `protobuf:"varint,7,opt,name=usable,proto3" json:"usable,omitempty"`
-	// Why the account cannot take new work for the configured model; empty when usable.
+	// Why the account cannot take new work for the configured model; empty when
+	// usable. It holds no time: unavailable_until is when it ends, if known.
 	UnavailableReason string `protobuf:"bytes,8,opt,name=unavailable_reason,json=unavailableReason,proto3" json:"unavailable_reason,omitempty"`
 	// The account's plan offers the model Codex is configured to use, so it is
 	// part of the pool for current work even while its allowance is used up.
 	OffersConfiguredModel bool     `protobuf:"varint,9,opt,name=offers_configured_model,json=offersConfiguredModel,proto3" json:"offers_configured_model,omitempty"`
 	Provider              Provider `protobuf:"varint,10,opt,name=provider,proto3,enum=codex_switch.menu.Provider" json:"provider,omitempty"`
 	// Why new work goes elsewhere while the account remains usable.
-	ReserveStatus string `protobuf:"bytes,11,opt,name=reserve_status,json=reserveStatus,proto3" json:"reserve_status,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	ReserveStatus    string                 `protobuf:"bytes,11,opt,name=reserve_status,json=reserveStatus,proto3" json:"reserve_status,omitempty"`
+	UnavailableUntil *timestamppb.Timestamp `protobuf:"bytes,12,opt,name=unavailable_until,json=unavailableUntil,proto3" json:"unavailable_until,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *Account) Reset() {
@@ -680,6 +682,13 @@ func (x *Account) GetReserveStatus() string {
 		return x.ReserveStatus
 	}
 	return ""
+}
+
+func (x *Account) GetUnavailableUntil() *timestamppb.Timestamp {
+	if x != nil {
+		return x.UnavailableUntil
+	}
+	return nil
 }
 
 type AllowanceObservation struct {
@@ -1238,7 +1247,7 @@ const file_menu_snapshot_proto_rawDesc = "" +
 	"successful\x18\x02 \x01(\x03R\n" +
 	"successful\x12\x16\n" +
 	"\x06failed\x18\x03 \x01(\x03R\x06failed\x12 \n" +
-	"\vinterrupted\x18\x04 \x01(\x03R\vinterrupted\"\xc9\x03\n" +
+	"\vinterrupted\x18\x04 \x01(\x03R\vinterrupted\"\x92\x04\n" +
 	"\aAccount\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05email\x18\x02 \x01(\tR\x05email\x12\x12\n" +
@@ -1251,7 +1260,8 @@ const file_menu_snapshot_proto_rawDesc = "" +
 	"\x17offers_configured_model\x18\t \x01(\bR\x15offersConfiguredModel\x127\n" +
 	"\bprovider\x18\n" +
 	" \x01(\x0e2\x1b.codex_switch.menu.ProviderR\bprovider\x12%\n" +
-	"\x0ereserve_status\x18\v \x01(\tR\rreserveStatus\"\xa9\x02\n" +
+	"\x0ereserve_status\x18\v \x01(\tR\rreserveStatus\x12G\n" +
+	"\x11unavailable_until\x18\f \x01(\v2\x1a.google.protobuf.TimestampR\x10unavailableUntil\"\xa9\x02\n" +
 	"\x14AllowanceObservation\x12;\n" +
 	"\vobserved_at\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
 	"observedAt\x12\x18\n" +
@@ -1368,22 +1378,23 @@ var file_menu_snapshot_proto_depIdxs = []int32{
 	1,  // 14: codex_switch.menu.Account.state:type_name -> codex_switch.menu.AccountState
 	9,  // 15: codex_switch.menu.Account.allowance:type_name -> codex_switch.menu.AllowanceObservation
 	0,  // 16: codex_switch.menu.Account.provider:type_name -> codex_switch.menu.Provider
-	17, // 17: codex_switch.menu.AllowanceObservation.observed_at:type_name -> google.protobuf.Timestamp
-	10, // 18: codex_switch.menu.AllowanceObservation.windows:type_name -> codex_switch.menu.AllowanceWindow
-	17, // 19: codex_switch.menu.AllowanceWindow.reset_at:type_name -> google.protobuf.Timestamp
-	17, // 20: codex_switch.menu.CompletedTask.last_completed_at:type_name -> google.protobuf.Timestamp
-	2,  // 21: codex_switch.menu.ReportingPeriod.kind:type_name -> codex_switch.menu.ReportingPeriodKind
-	17, // 22: codex_switch.menu.ReportingPeriod.started_at:type_name -> google.protobuf.Timestamp
-	17, // 23: codex_switch.menu.ReportingPeriod.ended_at:type_name -> google.protobuf.Timestamp
-	15, // 24: codex_switch.menu.ReportingPeriod.accounts:type_name -> codex_switch.menu.AccountTotal
-	14, // 25: codex_switch.menu.ReportingPeriod.task_usage:type_name -> codex_switch.menu.TaskUsageReport
-	11, // 26: codex_switch.menu.TaskUsageReport.tasks:type_name -> codex_switch.menu.CompletedTask
-	0,  // 27: codex_switch.menu.ProviderBurn.provider:type_name -> codex_switch.menu.Provider
-	28, // [28:28] is the sub-list for method output_type
-	28, // [28:28] is the sub-list for method input_type
-	28, // [28:28] is the sub-list for extension type_name
-	28, // [28:28] is the sub-list for extension extendee
-	0,  // [0:28] is the sub-list for field type_name
+	17, // 17: codex_switch.menu.Account.unavailable_until:type_name -> google.protobuf.Timestamp
+	17, // 18: codex_switch.menu.AllowanceObservation.observed_at:type_name -> google.protobuf.Timestamp
+	10, // 19: codex_switch.menu.AllowanceObservation.windows:type_name -> codex_switch.menu.AllowanceWindow
+	17, // 20: codex_switch.menu.AllowanceWindow.reset_at:type_name -> google.protobuf.Timestamp
+	17, // 21: codex_switch.menu.CompletedTask.last_completed_at:type_name -> google.protobuf.Timestamp
+	2,  // 22: codex_switch.menu.ReportingPeriod.kind:type_name -> codex_switch.menu.ReportingPeriodKind
+	17, // 23: codex_switch.menu.ReportingPeriod.started_at:type_name -> google.protobuf.Timestamp
+	17, // 24: codex_switch.menu.ReportingPeriod.ended_at:type_name -> google.protobuf.Timestamp
+	15, // 25: codex_switch.menu.ReportingPeriod.accounts:type_name -> codex_switch.menu.AccountTotal
+	14, // 26: codex_switch.menu.ReportingPeriod.task_usage:type_name -> codex_switch.menu.TaskUsageReport
+	11, // 27: codex_switch.menu.TaskUsageReport.tasks:type_name -> codex_switch.menu.CompletedTask
+	0,  // 28: codex_switch.menu.ProviderBurn.provider:type_name -> codex_switch.menu.Provider
+	29, // [29:29] is the sub-list for method output_type
+	29, // [29:29] is the sub-list for method input_type
+	29, // [29:29] is the sub-list for extension type_name
+	29, // [29:29] is the sub-list for extension extendee
+	0,  // [0:29] is the sub-list for field type_name
 }
 
 func init() { file_menu_snapshot_proto_init() }

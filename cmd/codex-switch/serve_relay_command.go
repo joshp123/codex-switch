@@ -21,6 +21,7 @@ import (
 	accountapi "github.com/joshp123/codex-switch/internal/accounts"
 	"github.com/joshp123/codex-switch/internal/clientcapability"
 	"github.com/joshp123/codex-switch/internal/codexstate"
+	"github.com/joshp123/codex-switch/internal/logtime"
 	"github.com/joshp123/codex-switch/internal/relay"
 	"github.com/joshp123/codex-switch/internal/routing"
 	"github.com/joshp123/codex-switch/internal/store"
@@ -68,8 +69,8 @@ func serveRelay(tcpListenAddress string) {
 		log.Fatalf("open proxy log: %v", err)
 	}
 	defer proxyLog.Close()
-	log.SetOutput(proxyLog)
-	log.SetFlags(log.LstdFlags)
+	log.SetFlags(0)
+	log.SetOutput(logtime.StampedLines{Output: proxyLog})
 	capability, err := clientcapability.Create(dataDir())
 	if err != nil {
 		log.Fatal(err)
