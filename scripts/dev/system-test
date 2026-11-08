@@ -1168,14 +1168,16 @@ def reset_command(build, *args):
 
 
 def reset_credits():
-    """One credit on each Codex account; account-2's expires first."""
+    """One credit on each Codex account. account-2's expires first, but account-3 refills last (System.resets), so it has
+    the most of its week left: this build spends account-3's credit, and the published release, which took the credit
+    that expires first, spent account-2's."""
     now = int(time.time())
     return [f'credit account-1 credit-account-1 {now + 3 * DAY}', f'credit account-2 credit-account-2 {now + 2 * DAY}',
             f'credit account-3 credit-account-3 {now + 4 * DAY}']
 
 
 # The credit each build spends from reset_credits when every account is out.
-CHOSEN_CREDIT = {'cli': ('account-2', 'credit-account-2'), 'published-release': ('account-2', 'credit-account-2')}
+CHOSEN_CREDIT = {'cli': ('account-3', 'credit-account-3'), 'published-release': ('account-2', 'credit-account-2')}
 
 
 def lose_a_reset_and_retry(system, lost_by, retried_by):
@@ -1197,8 +1199,8 @@ def lose_a_reset_and_retry(system, lost_by, retried_by):
 
 
 def stored_resets(system):
-    """An agent spends a reset only when the pool is exhausted, choosing the first expiry and safely retrying a response
-    lost by the published release, as after an update"""
+    """An agent spends a reset only when the pool is exhausted, and safely retries a response lost by the published
+    release, as after an update"""
     def command(*args):
         return reset_command('cli', *args)
     status = command('status')
@@ -1209,7 +1211,7 @@ def stored_resets(system):
     if claude.returncode or 'not supported yet' not in claude.stdout:
         raise Failure(f'Claude reset: {claude.stdout} {claude.stderr}')
     available = command('reset', 'codex')
-    if available.returncode or 'can continue working' not in available.stdout:
+    if available.returncode or 'can take work' not in available.stdout:
         raise Failure(f'Available pool: {available.stdout} {available.stderr}')
     system.limited = set(system.accounts)
     system.extra = ['reset-soon']
@@ -1228,7 +1230,7 @@ def stored_resets(system):
     system.extra = []
     system.apply()
     recovered = command('reset', 'codex')
-    if recovered.returncode or 'can continue working' not in recovered.stdout:
+    if recovered.returncode or 'can take work' not in recovered.stdout:
         raise Failure(f'Retry after capacity returned: {recovered.stdout} {recovered.stderr}')
     if 'event=reset-claim' in rig.read('logs/fake-providers.log'):
         raise Failure('A retry spent a credit after another account could work again.')
@@ -1239,13 +1241,14 @@ def stored_resets(system):
     system.record_codex_task('work after reset', task.thread)
     if rig.pinned_account(task.thread) != 'account-2':
         raise Failure(f'Work after the reset used {rig.pinned_account(task.thread)}, not the reset account.')
-    return 'Status showed 2 Claude resets; available and near-reset pools spent none. A refused redemption spent nothing once another account could work. The exhausted pool chose the earliest credit; this build retried the response the published release lost with the same request ID, and work resumed on that account.'
+    return 'Status showed 2 Claude resets; available and near-reset pools spent none. A refused redemption spent nothing once another account could work. This build retried the response the published release lost with the same request ID, and work resumed on that account.'
 
 
 def reset_left_pending_completes_after_rollback(system):
     """A reset this build leaves pending when the provider drops its reply completes with the published release, as after a rollback"""
     lose_a_reset_and_retry(system, lost_by='cli', retried_by='published-release')
-    return 'This build spent the earliest credit and the provider dropped its reply; the published release retried it with the same request ID and finished it.'
+    return ('This build spent the credit of the account with the most of its week left, not the credit that expires first, and the provider '
+            'dropped its reply; the published release retried it with the same request ID and finished it.')
 
 
 # Each group shares one isolated system and runs at once with every other group. The first update and the rollback

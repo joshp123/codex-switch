@@ -278,8 +278,9 @@ clear both.
 
 To use a stored Codex reset when the pool is exhausted, run
 `codex-switch reset codex`. It keeps the credit when an account can still work
-or will reset within 30 minutes, and otherwise uses the credit that expires
-first. If the response is lost, run the same command again to resolve it.
+or will reset within 30 minutes. Otherwise the credit goes to the account with
+the most of its week left, using that account's credit that expires first. If
+the response is lost, run the same command again to resolve it.
 Claude reset redemption is not supported yet.
 
 ## How updates work
