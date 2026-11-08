@@ -12,7 +12,7 @@ import (
 )
 
 func routedWorkWithRequestCounts(state *usageFold, metadata taskMetadataLookup, accountKeys []string, now, requestsStartedAt time.Time, counts []store.ModelRequestCounts) (*menupb.ProxyActivity, error) {
-	activity := &menupb.ProxyActivity{StartedAt: timestamppb.New(state.localDay), EndedAt: timestamppb.New(now)}
+	activity := &menupb.ProxyActivity{StartedAt: timestamppb.New(state.today), EndedAt: timestamppb.New(now)}
 	accountActivity := make(map[string]*menupb.ProxyAccountActivity)
 	for _, key := range accountKeys {
 		accountActivity[key] = &menupb.ProxyAccountActivity{AccountKey: key}
@@ -40,7 +40,7 @@ func routedWorkWithRequestCounts(state *usageFold, metadata taskMetadataLookup, 
 	}
 	slices.SortFunc(activity.Accounts, func(a, b *menupb.ProxyAccountActivity) int { return cmp.Compare(a.AccountKey, b.AccountKey) })
 	// Activity contains only proxy rows, so its tasks do not use native turn owners.
-	tasks, err := totalTaskCohorts(maps.All(state.proxyActivity), metadata, nil, state.localDay, now)
+	tasks, err := totalTaskCohorts(maps.All(state.proxyActivity), metadata, nil, state.today, now)
 	if err != nil {
 		return nil, err
 	}

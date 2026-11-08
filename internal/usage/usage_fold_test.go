@@ -323,27 +323,6 @@ func TestChildRecordsNeedNativeSourceBeforeRollingUpProxyTask(t *testing.T) {
 	}
 }
 
-func TestLocalMidnightResetsProxyActivityWithoutMovingUTCTokens(t *testing.T) {
-	ledger := openTestUsageLedger(t)
-	// A fixed offset makes local midnight differ from the UTC date boundary.
-	previousLocal := time.Local
-	time.Local = time.FixedZone("test local", 3*60*60)
-	t.Cleanup(func() { time.Local = previousLocal })
-	now := time.Date(2026, 10, 22, 20, 59, 59, 0, time.UTC)
-	recordFoldProxy(t, ledger, "previous-local-day", "claude:previous", now.Add(-time.Second), 10, 2)
-	before := refreshTestFold(t, ledger, now)
-	if len(before.proxyActivity) != 1 {
-		t.Fatal("today's proxy activity missing")
-	}
-	after := refreshTestFold(t, ledger, now.Add(2*time.Second))
-	if after == before || len(after.proxyActivity) != 0 {
-		t.Fatal("local midnight did not reset today's proxy activity")
-	}
-	if task := testFoldTasks(t, ledger, after)["claude:previous"]; task.Tokens != 12 {
-		t.Fatalf("local midnight changed UTC reporting: %+v", task)
-	}
-}
-
 func TestLateProxyRetainsLegacyNativeOverlapError(t *testing.T) {
 	ledger := openTestUsageLedger(t)
 	now := time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)

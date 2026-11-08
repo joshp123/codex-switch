@@ -40,6 +40,50 @@ func TestUsageReportsUseEndOfTodayAndKeepEarlierResultsIndependent(t *testing.T)
 	}
 }
 
+// The proxy reads the Mac's time zone once, when it starts. Activity through
+// the proxy must cover the same UTC day as Today, whatever that zone was and
+// after the Mac moves to another.
+func TestProxyActivityCoversTheUTCDayWhateverTheMacsZone(t *testing.T) {
+	previousLocal := time.Local
+	t.Cleanup(func() { time.Local = previousLocal })
+	time.Local = time.FixedZone("Athens summer", 3*60*60)
+	ledger := openTestUsageLedger(t)
+	now := time.Date(2026, 10, 22, 21, 30, 0, 0, time.UTC) // 00:30 on 23 October in Athens
+	recordFoldProxy(t, ledger, "athens-evening", "claude:evening", time.Date(2026, 10, 22, 20, 30, 0, 0, time.UTC), 10, 2)
+	recordFoldProxy(t, ledger, "athens-after-midnight", "claude:night", time.Date(2026, 10, 22, 21, 15, 0, 0, time.UTC), 20, 3)
+	recordFoldProxy(t, ledger, "previous-utc-day", "claude:yesterday", time.Date(2026, 10, 21, 23, 0, 0, 0, time.UTC), 40, 4)
+	read := func(at time.Time) *menupb.ProxyActivity {
+		t.Helper()
+		periods, _, activity, err := ledger.readUsageReports(context.Background(), nil, at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var today int64
+		for _, task := range periods[0].TaskUsage.Tasks {
+			today += task.GetTokens()
+		}
+		var tokens int64
+		for _, account := range activity.Accounts {
+			tokens += account.Tokens
+		}
+		if !activity.StartedAt.AsTime().Equal(dateOnly(at)) || !activity.StartedAt.AsTime().Equal(periods[0].StartedAt.AsTime()) || tokens != today {
+			t.Fatalf("at %s with the Mac on %s, activity from %s has %d tokens; Today from %s has %d",
+				at, time.Local, activity.StartedAt.AsTime(), tokens, periods[0].StartedAt.AsTime(), today)
+		}
+		return activity
+	}
+	if tokens := read(now).Accounts[0].Tokens; tokens != 35 {
+		t.Fatalf("activity on 22 October UTC has %d tokens, want 35", tokens)
+	}
+	time.Local = time.FixedZone("California winter", -8*60*60) // the Mac moves while the proxy runs
+	if tokens := read(now.Add(time.Minute)).Accounts[0].Tokens; tokens != 35 {
+		t.Fatalf("after the Mac changed zone, activity has %d tokens, want 35", tokens)
+	}
+	if accounts := read(time.Date(2026, 10, 23, 0, 0, 1, 0, time.UTC)).Accounts; len(accounts) != 0 {
+		t.Fatalf("activity did not start again at midnight UTC: %v", accounts)
+	}
+}
+
 func TestUsageReportsRefreshTitleAndRequestCountsWithoutNewUsage(t *testing.T) {
 	ledger := openTestUsageLedger(t)
 	directory := t.TempDir()

@@ -61,23 +61,23 @@ type usageTurnOwner struct {
 }
 
 type usageFold struct {
-	marks                          usageRowWatermarks
-	today, localDay, standardStart time.Time
-	deferredUntil                  time.Time
-	hashSeed                       maphash.Seed
-	responses                      map[uint64]responseCounted
-	pending                        map[uint64]pendingUsageContribution
-	settled                        map[usageCohortKey]usageCohortAmount
-	proxyActivity                  map[usageCohortKey]usageCohortAmount
-	standardCost                   map[string]map[modelDay]nanoUSD
-	metadata                       map[string]*taskMetadata
-	childParents                   map[string]map[string]bool
-	turnOwners                     map[string]usageTurnOwner
-	firstProxy                     map[string]time.Time
-	latestLegacy                   map[string]time.Time
-	providerByKey                  map[store.AccountKey]store.ProviderAccountID
-	keysByProvider                 map[store.ProviderAccountID]store.AccountKey
-	allowanceOwners                map[allowanceIdentityKey]store.ProviderAccountID
+	marks                usageRowWatermarks
+	today, standardStart time.Time
+	deferredUntil        time.Time
+	hashSeed             maphash.Seed
+	responses            map[uint64]responseCounted
+	pending              map[uint64]pendingUsageContribution
+	settled              map[usageCohortKey]usageCohortAmount
+	proxyActivity        map[usageCohortKey]usageCohortAmount
+	standardCost         map[string]map[modelDay]nanoUSD
+	metadata             map[string]*taskMetadata
+	childParents         map[string]map[string]bool
+	turnOwners           map[string]usageTurnOwner
+	firstProxy           map[string]time.Time
+	latestLegacy         map[string]time.Time
+	providerByKey        map[store.AccountKey]store.ProviderAccountID
+	keysByProvider       map[store.ProviderAccountID]store.AccountKey
+	allowanceOwners      map[allowanceIdentityKey]store.ProviderAccountID
 	// consultedAllowanceWindows are the windows some counted usage was
 	// attributed through; only a change to one of their owners matters.
 	consultedAllowanceWindows map[allowanceIdentityKey]bool
@@ -89,19 +89,14 @@ func (reason usageRefoldReason) Error() string { return string(reason) }
 
 var lastUsageTime = time.Unix(0, math.MaxInt64)
 
-func newUsageFold(today, localDay, standardStart time.Time, providers map[store.AccountKey]store.ProviderAccountID, keys map[store.ProviderAccountID]store.AccountKey, owners map[allowanceIdentityKey]store.ProviderAccountID) *usageFold {
+func newUsageFold(today, standardStart time.Time, providers map[store.AccountKey]store.ProviderAccountID, keys map[store.ProviderAccountID]store.AccountKey, owners map[allowanceIdentityKey]store.ProviderAccountID) *usageFold {
 	return &usageFold{
-		today: today, localDay: localDay, standardStart: standardStart, hashSeed: maphash.MakeSeed(),
+		today: today, standardStart: standardStart, hashSeed: maphash.MakeSeed(),
 		responses: make(map[uint64]responseCounted), pending: make(map[uint64]pendingUsageContribution),
 		settled: make(map[usageCohortKey]usageCohortAmount), proxyActivity: make(map[usageCohortKey]usageCohortAmount), standardCost: make(map[string]map[modelDay]nanoUSD),
 		metadata: make(map[string]*taskMetadata), childParents: make(map[string]map[string]bool), turnOwners: make(map[string]usageTurnOwner), firstProxy: make(map[string]time.Time), latestLegacy: make(map[string]time.Time),
 		providerByKey: providers, keysByProvider: keys, allowanceOwners: owners, consultedAllowanceWindows: make(map[allowanceIdentityKey]bool),
 	}
-}
-
-func localDate(at time.Time) time.Time {
-	local := at.Local()
-	return time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, local.Location())
 }
 
 func oldestCreditDate(credits map[string][]accounts.OpenAIModelDayCredits) (time.Time, error) {
@@ -135,7 +130,7 @@ func (ledger *UsageLedger) refreshUsageFold(ctx context.Context, now time.Time, 
 	if err != nil {
 		return nil, err
 	}
-	today, localDay := dateOnly(now), localDate(now)
+	today := dateOnly(now)
 	state := ledger.fold
 	rebuildReason := ""
 	switch {
@@ -143,8 +138,6 @@ func (ledger *UsageLedger) refreshUsageFold(ctx context.Context, now time.Time, 
 		rebuildReason = "usage totals were not loaded"
 	case !state.today.Equal(today):
 		rebuildReason = "the UTC date changed"
-	case !state.localDay.Equal(localDay):
-		rebuildReason = "the local date changed"
 	case !state.standardStart.Equal(standardStart):
 		rebuildReason = "the dates used to value OpenAI usage changed"
 	case state.marks.MutationGeneration != marks.MutationGeneration:
@@ -164,13 +157,13 @@ func (ledger *UsageLedger) refreshUsageFold(ctx context.Context, now time.Time, 
 	var rebuildStarted time.Time
 	if refold {
 		rebuildStarted = time.Now()
-		state = newUsageFold(today, localDay, standardStart, providers, keys, owners)
+		state = newUsageFold(today, standardStart, providers, keys, owners)
 	}
 	err = ledger.foldRows(ctx, transaction, state, marks, now, refold)
 	if lateReason, ok := err.(usageRefoldReason); ok {
 		rebuildReason = string(lateReason)
 		rebuildStarted = time.Now()
-		state = newUsageFold(today, localDay, standardStart, providers, keys, owners)
+		state = newUsageFold(today, standardStart, providers, keys, owners)
 		err = ledger.foldRows(ctx, transaction, state, marks, now, true)
 	}
 	if err != nil {
@@ -314,12 +307,12 @@ func (ledger *UsageLedger) foldRows(ctx context.Context, query usageQuery, state
 			state.deferUntil(response.CompletedAt)
 			return nil
 		}
-		if !response.CompletedAt.Before(state.localDay) {
+		if !response.CompletedAt.Before(state.today) {
 			// Proxy activity prices only the proxy's token fields, as before.
 			response.CacheWriteInputTokens = nil
 			activity := proxyCompletion(response)
 			key, amount := completionCohort(activity)
-			key.Date = state.localDay
+			key.Date = state.today
 			addCohort(state.proxyActivity, key, amount)
 		}
 		return nil
