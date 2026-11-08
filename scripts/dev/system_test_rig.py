@@ -52,6 +52,11 @@ CLAUDE_ACCOUNTS = ['account-4', 'account-5', 'account-6']
 ACCOUNT_READ_SECONDS, CONNECTION_DRAIN_SECONDS = 1, 1
 MODEL = 'gpt-6-luna'
 LABEL = 'dev.codex-switch.system-test-' + hashlib.sha256(str(RUN).encode()).hexdigest()[:10]
+# A second proxy, as on Josh's other Mac, signed in to the same accounts.
+OTHER_MAC = RUN / 'other-mac'
+OTHER_MAC_LABEL = LABEL + '.other-mac'
+# Every launchd job a system may start: the proxy, the installer's two slots and the other Mac's proxy.
+LABELS = (LABEL, LABEL + '.a', LABEL + '.b', OTHER_MAC_LABEL)
 # Pi has no ChatGPT login of its own here: it needs a JWT-shaped key with a
 # chatgpt_account_id claim. The proxy replaces the credentials it carries.
 PI_PLACEHOLDER_KEY = 'eyJhbGciOiJub25lIn0.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiY29kZXgtc3dpdGNoIn19.codex-switch'
@@ -206,7 +211,7 @@ def start_proxy():
         'StandardOutPath': str(RUN / 'logs/launchd.log'),
         'StandardErrorPath': str(RUN / 'logs/launchd.log'),
     }))
-    for label in (LABEL, LABEL + '.a', LABEL + '.b'):
+    for label in LABELS:
         subprocess.run(['launchctl', 'bootout', f'gui/{os.getuid()}/{label}'], capture_output=True)
     subprocess.run(['launchctl', 'bootstrap', f'gui/{os.getuid()}', str(plist)], check=True)
     wait_for(deploy_status, 'the proxy to serve (see data/proxy.log)', timeout=60, interval=0.05)
@@ -214,15 +219,63 @@ def start_proxy():
     # client started before that would race it.
     wait_for(menu_snapshot_served, 'the first menu snapshot', interval=0.05)
     base = f'http://{listen_address()}/client/{read("data/client-capability").strip()}/backend-api/codex'
+    write_codex_config(RUN / 'home', base)
+    (RUN / 'pi/models.json').write_text(json.dumps({'providers': {'openai-codex': {'baseUrl': base, 'apiKey': PI_PLACEHOLDER_KEY}}}))
+    return base
+
+
+def write_codex_config(home, base):
+    """Points the Codex client in home at the proxy whose Codex URL is base."""
     # Everything else Codex asks ChatGPT for, such as its apps connector, goes to the fake providers too.
     chatgpt = '' if REAL_SERVICES else f'chatgpt_base_url = "{read("fake-providers-secure-origin")}/backend-api/"\n'
-    (RUN / 'home/config.toml').write_text(
+    (home / 'config.toml').write_text(
         f'model_provider = "switch-test"\nmodel = "{MODEL}"\nmodel_reasoning_effort = "low"\n' + chatgpt +
         'cli_auth_credentials_store = "file"\n[model_providers.switch-test]\nname = "OpenAI"\n'
         f'base_url = "{base}"\nwire_api = "responses"\nrequires_openai_auth = true\n'
         'supports_websockets = true\n[analytics]\nenabled = false\n')
-    (RUN / 'pi/models.json').write_text(json.dumps({'providers': {'openai-codex': {'baseUrl': base, 'apiKey': PI_PLACEHOLDER_KEY}}}))
-    return base
+
+
+class OtherMac:
+    """A second proxy, built from this tree, as on Josh's other Mac: its own data directory, Codex home and launchd job,
+    signed in to the same Codex accounts against the same fake providers. It signed in to them in the opposite order,
+    so its folders name each account differently: account-1 here is account-3 on the first proxy."""
+
+    def __init__(self):
+        self.data, self.home = OTHER_MAC / 'data', OTHER_MAC / 'home'
+        for part in (self.data, self.home, self.home / 'Library/LaunchAgents'):
+            part.mkdir(parents=True)
+        for number, account in enumerate(reversed(CODEX_ACCOUNTS), 1):
+            (self.data / f'account-{number}').mkdir()
+            shutil.copy2(RUN / 'data' / account / 'auth.json', self.data / f'account-{number}/auth.json')
+        shutil.copy2(RUN / 'home/auth.json', self.home / 'auth.json')
+        with socket.socket() as reservation:
+            reservation.bind(('127.0.0.1', 0))
+            self.listen = f'127.0.0.1:{reservation.getsockname()[1]}'
+        plist = self.home / 'Library/LaunchAgents' / f'{OTHER_MAC_LABEL}.plist'
+        plist.write_bytes(plistlib.dumps({
+            'Label': OTHER_MAC_LABEL,
+            'ProgramArguments': [str(RUN / 'cli'), 'serve', '--listen', self.listen],
+            'EnvironmentVariables': dict(proxy_environment(), CODEX_SWITCH_DATA_DIR=str(self.data), CODEX_HOME=str(self.home),
+                                         PI_CODING_AGENT_DIR=str(OTHER_MAC / 'pi')),
+            'KeepAlive': True, 'ThrottleInterval': 1, 'RunAtLoad': True, 'ExitTimeOut': 0,
+            'StandardOutPath': str(RUN / 'logs/other-mac-launchd.log'), 'StandardErrorPath': str(RUN / 'logs/other-mac-launchd.log'),
+        }))
+        subprocess.run(['launchctl', 'bootout', f'gui/{os.getuid()}/{OTHER_MAC_LABEL}'], capture_output=True)
+        subprocess.run(['launchctl', 'bootstrap', f'gui/{os.getuid()}', str(plist)], check=True)
+        wait_for(lambda: menu_snapshot_served(self.data), "the other Mac's first menu snapshot", timeout=60, interval=0.05)
+        write_codex_config(self.home, f'http://{self.listen}/client/{(self.data / "client-capability").read_text().strip()}/backend-api/codex')
+
+    def codex_task(self, name, prompt):
+        """Starts a `codex exec` task through this proxy."""
+        return CodexTask(name, prompt, env=dict(client_environment(), CODEX_HOME=str(self.home)))
+
+    def proxy_log(self):
+        return (self.data / 'proxy.log').read_text()
+
+    def pinned_account_key(self, task):
+        with sqlite3.connect(f'file:{self.data / "codex-switch.db"}?mode=ro', uri=True) as database:
+            row = database.execute('SELECT account_key FROM task_account_pins WHERE codex_task_id = ?', (task,)).fetchone()
+        return row[0] if row else None
 
 
 def proxy_environment():
@@ -258,7 +311,7 @@ def clean_up():
     for process in started_processes:
         if process.args[0] != fake_providers:
             stop_process_group(process)
-    for label in (LABEL, LABEL + '.a', LABEL + '.b'):
+    for label in LABELS:
         subprocess.run(['launchctl', 'bootout', f'gui/{os.getuid()}/{label}'], capture_output=True)
     for pid in run_processes(exclude=fake_providers):
         try:
@@ -276,7 +329,7 @@ def clean_up():
             pass
     wait_for(lambda: not run_processes(), 'the run to stop', timeout=10, fail=False)
     leftovers = [f'process {pid}' for pid in run_processes()]
-    for label in (LABEL, LABEL + '.a', LABEL + '.b'):
+    for label in LABELS:
         if subprocess.run(['launchctl', 'print', f'gui/{os.getuid()}/{label}'], capture_output=True).returncode == 0:
             leftovers.append('launchd job ' + label)
     return leftovers
@@ -321,10 +374,10 @@ def start_client(command, name, **options):
 class CodexTask:
     """One `codex exec` run of the official Codex client, in the background."""
 
-    def __init__(self, name, prompt, thread=None):
+    def __init__(self, name, prompt, thread=None, env=None):
         self.name = name
         command = [CODEX, 'exec'] + (['resume', thread] if thread else ['--sandbox', 'workspace-write'])
-        self.process = start_client(command + ['--json', '--skip-git-repo-check', prompt], name)
+        self.process = start_client(command + ['--json', '--skip-git-repo-check', prompt], name, env=env or client_environment())
 
     def finish(self, timeout=300):
         try:
@@ -740,9 +793,9 @@ def proxy_log():
     return read('data/proxy.log')
 
 
-def menu_snapshot_served():
+def menu_snapshot_served(data=RUN / 'data'):
     try:
-        with urllib.request.urlopen(read('data/menu-snapshot-url').strip(), timeout=5) as response:
+        with urllib.request.urlopen((data / 'menu-snapshot-url').read_text().strip(), timeout=5) as response:
             return response.status == 200
     except (OSError, ValueError):
         return False

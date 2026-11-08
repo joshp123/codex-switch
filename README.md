@@ -276,11 +276,22 @@ At 10% or less, new work and the next turn of pinned tasks use another account.
 The reserves are off by default; use `codex-switch reserve "Claude 1" off` to
 clear both.
 
-To use a stored Codex reset when the pool is exhausted, run
-`codex-switch reset codex`. It keeps the credit when an account can still work
-or will reset within 30 minutes. Otherwise the credit goes to the account with
-the most of its week left, using that account's credit that expires first. If
-the response is lost, run the same command again to resolve it.
+The proxy spends a stored Codex reset credit by itself in two cases:
+
+- Work is waiting, no Codex account can take it, and none refills within 30
+  minutes. The credit goes to the account with the most of its week left,
+  using that account's credit that expires first.
+- A credit is in its last hour, and its account has used more than 20% of its
+  week (OpenAI's minimum for a reset) and more than the share of its week that
+  has passed.
+
+Each spend is logged with the credit, the account and the reason. Proxies on
+several Macs signed in to the same accounts choose the same credit and send the
+same request, which OpenAI applies once; each reads every account again just
+before it spends and backs off if one can take work.
+
+`codex-switch reset codex` spends a credit by the first rule, without waiting
+work. If the response is lost, run the same command again to resolve it.
 Claude reset redemption is not supported yet.
 
 ## How updates work

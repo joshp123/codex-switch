@@ -137,6 +137,9 @@ func (router *TaskRouter) RouteForProviderTask(taskID store.TaskID, workKind sto
 	}
 	if !found {
 		router.accountFacts.RequestAccountRoutingFactsRefresh()
+		if provider == accounts.ProviderChatGPT && workKind == store.ModelTurnWorkKind {
+			router.accountFacts.ReportCodexWorkWaiting()
+		}
 		if provider == accounts.ProviderClaude {
 			availableAgainAt, limitClaim := router.claudePoolAvailableAgain(facts, modelSlug)
 			return RouteDecision{}, &ClaudePoolExhaustedError{AccountProblems: router.describeUnavailableAccounts(facts, modelSlug), AvailableAgainAt: availableAgainAt, LimitClaim: limitClaim}

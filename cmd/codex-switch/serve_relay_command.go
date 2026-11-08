@@ -140,7 +140,7 @@ func serveRelay(tcpListenAddress string) {
 	}
 	factsContext, stopFacts := context.WithCancel(context.Background())
 	var background sync.WaitGroup
-	for _, run := range []func(context.Context){accountMonitor.Run, usageLedger.Run} {
+	for _, run := range []func(context.Context){accountMonitor.Run, accountMonitor.RunAutomaticResets, usageLedger.Run} {
 		background.Add(1)
 		go func() { defer background.Done(); run(factsContext) }()
 	}

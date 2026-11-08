@@ -179,6 +179,7 @@ type providers struct {
 //	reset-soon                      a limited account-2 refills five minutes from each read
 //	reset-drop                      the first request to spend a credit spends it, but its reply is lost
 //	reset-refuse                    requests to spend a credit receive a provider HTTP error
+//	hold-resets                     requests to spend a credit wait, unanswered and not yet applied
 //	claude-grant                    Claude usage reads report reset grants
 //
 // A credit is spent as OpenAI spends one: once, for one redeem_request_id; a
@@ -205,6 +206,7 @@ type controls struct {
 	resetSoon         bool
 	resetDrop         bool
 	resetRefuse       bool
+	holdResets        bool
 	claudeGrant       bool
 	webSocketAgeLimit time.Duration
 }
@@ -239,6 +241,8 @@ func (providers *providers) readControls() (controls, error) {
 			parsed.resetDrop = true
 		case len(fields) == 1 && fields[0] == "reset-refuse":
 			parsed.resetRefuse = true
+		case len(fields) == 1 && fields[0] == "hold-resets":
+			parsed.holdResets = true
 		case len(fields) == 1 && fields[0] == "claude-grant":
 			parsed.claudeGrant = true
 		case len(fields) == 1 && fields[0] == "http-only":
@@ -410,6 +414,18 @@ func (providers *providers) spendResetCredit(writer http.ResponseWriter, request
 		return
 	}
 	log.Printf("event=reset-claim account=%s credit=%s request=%s", alias, claim.CreditID, claim.RequestID)
+	for controls.holdResets {
+		select {
+		case <-request.Context().Done():
+			return
+		case <-time.After(20 * time.Millisecond):
+		}
+		var err error
+		if controls, err = providers.readControls(); err != nil {
+			http.Error(writer, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+	}
 	used, _ := openAIUsage(controls, alias, providers.accountReset(alias), 0)
 	providers.resetMu.Lock()
 	code := "no_credit"

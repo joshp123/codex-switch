@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/joshp123/codex-switch/internal/store"
@@ -67,6 +68,10 @@ type Monitor struct {
 	accounts      map[store.AccountKey]*monitoredAccount
 	readRequested chan struct{}
 	firstReadDone chan struct{}
+
+	// codexWorkWaitingAt and resetCheckRequested drive RunAutomaticResets.
+	codexWorkWaitingAt  atomic.Int64
+	resetCheckRequested chan struct{}
 }
 
 // monitoredAccount has at most one read in flight. The request path may change
@@ -96,6 +101,8 @@ func NewMonitor(dataDirectory string, upstreamOrigin *url.URL, codexExecutable s
 		accounts:        map[store.AccountKey]*monitoredAccount{},
 		readRequested:   make(chan struct{}, 1),
 		firstReadDone:   make(chan struct{}),
+
+		resetCheckRequested: make(chan struct{}, 1),
 	}
 }
 

@@ -1,4 +1,4 @@
-<!-- Written by AI on 2026.10.11 by model claude-opus-5.5; updated on 2026.10.29 by model GPT-6.1 Terra; rewritten on 2026.11.01 by model claude-opus-5.5. -->
+<!-- Written by AI on 2026.10.11 by model claude-opus-5.5; updated on 2026.10.29 by model GPT-6.1 Terra; rewritten on 2026.11.01 by model claude-opus-5.5; updated on 2026.11.08 by model claude-opus-5.5. -->
 
 # System test
 
@@ -35,6 +35,8 @@ Before a release, also run the smoke test (see below).
 | rollback | A task the rolled-back published release moves off an exhausted account stays where it moved after the next update, although the first account has recovered. |
 | resets | Claude grants appear in status; the reset command checks pool availability and the next reset, and retries a response the published release lost with the same request ID, as after an update. |
 | reset-rollback | The reset command spends the credit of the account with the most of its week left, not the credit that expires first. A reset it leaves pending when the provider drops its reply completes with the published release, as after a rollback. |
+| auto-reset | Status shows each Codex account's reset credits. With every Codex account out and work waiting on two proxies, as on two Macs, neither spends a credit while an account refills within 30 minutes. Then both ask for the same credit with the same request ID, the credit of the account with the most of its week left; OpenAI spends it once, neither asks for another, and the work on both resumes there. |
+| expiry-reset | On two proxies, a credit in its last hour is kept while its account has used 20% of its week or less, or no more than the share of the week that has passed; otherwise both ask for it with the same request ID, it is spent once, and the account's second credit is then kept. |
 | routing | New Codex tasks and Pi sessions go to an account whose week has not started, then to the weekly allowance that resets first. They and their Codex forks stay on their account when another account becomes first, and move for a hard reserve. |
 | routing | A request without a task ID is served. |
 | exhaustion | When a task's account runs out, its next turn moves to another account. No model work is replayed, no tool effect repeats, and Codex shows no error. |
@@ -63,6 +65,9 @@ The command exits 0 only if every outcome held and nothing is left running.
   `codex` on `PATH`. It runs `codex exec` tasks and `/goal` through
   `codex app-server`, and runs the scripted model's tool calls itself.
 - Pi in sessions, if `pi` is on `PATH`.
+- A second proxy, built from this tree, for the groups that test two Macs. It
+  has its own data directory, Codex home and launchd job, and is signed in to
+  the same accounts in the opposite order, so its folders name them differently.
 - The newest Claude Code inside Claude Desktop, or `claude` on `PATH`, through
   `HTTPS_PROXY` and `NODE_EXTRA_CA_CERTS` from `print-claude-config`.
 
@@ -83,7 +88,9 @@ Anthropic sent on 31 October 2026, and a Claude five-hour limit. It refuses
 every fast-mode Claude request as Anthropic does for an account without usage
 credits. It holds reset credits and spends them as OpenAI does: once per
 request ID, `nothing_to_reset` for an account under 20% used, and `no_credit`
-for a credit spent by another request, expired or never held. It logs every model request with a fingerprint of its bytes, so the
+for a credit spent by another request, expired or never held. It can hold
+requests to spend a credit, so a test can see two proxies decide from the same
+accounts. It logs every model request with a fingerprint of its bytes, so the
 test can see that none was sent twice, and every usage read with the level it
 reported, so the test can wait until the proxy has read a level.
 

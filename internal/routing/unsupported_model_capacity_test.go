@@ -52,6 +52,7 @@ func (facts capacityWaitFacts) ReadAccountRoutingFacts() ([]accounts.AccountRout
 	return facts, nil
 }
 func (facts capacityWaitFacts) RequestAccountRoutingFactsRefresh() {}
+func (facts capacityWaitFacts) ReportCodexWorkWaiting()            {}
 func (facts capacityWaitFacts) RefreshAccountCredentialsAfterUnauthorized(store.AccountKey, accounts.Credentials) error {
 	return nil
 }
