@@ -12,8 +12,9 @@ It takes about 20 seconds and spends no tokens. Each group of outcomes runs on
 its own isolated system, and the groups run at once. A system is a build of
 this working tree under a private launchd job on a spare port, with its own
 data directory and fake accounts, and fake providers in place of OpenAI and
-Anthropic. One group starts from the newest published release, so its first
-update is the one Macs really make. The official Codex, Pi and Claude Code
+Anthropic. Two groups start from the newest published release, so their first
+update is the one Macs really make, and one from v0.1.9, the last release that
+names accounts only by their folders. The official Codex, Pi and Claude Code
 clients drive each system; a scripted model answers them. The test prints what
 each system did for every outcome, with how long it took, and leaves nothing
 running.
@@ -28,7 +29,8 @@ Before a release, also run the smoke test (see below).
 | --- | --- |
 | update | An update waits for model work before it switches. |
 | update | An update adopts the published release's single job during work. Responses in flight over WebSocket and HTTP finish on the old process, while new work starts on the new one and proves it. A goal's tool call spans the update and runs once. |
-| update | Records the published release wrote by folder name, including those it writes while it drains, keep their contents and take their account keys, and a task it pinned keeps its account. |
+| update | Records the published release wrote, including those it writes while it drains, keep their contents and their accounts' keys, and a task it pinned keeps its account. |
+| keyless-update | Records v0.1.9, the last release before account keys, wrote by folder name, including those it writes while it drains, keep their contents and take their account keys, and a task it pinned keeps its account. |
 | rollback | After an update, `deploy/deploy.sh back` restores the published release. Tasks pinned by either build stay on their accounts while new work goes to the account the rule picks. T3 reads every account's usage by the index the other build gave it, after the update and after the rollback. |
 | rollback | A task the rolled-back published release moves off an exhausted account stays where it moved after the next update, although the first account has recovered. |
 | resets | Claude grants appear in status; the reset command checks pool availability and the next reset, chooses the earliest credit, and retries a response the published release lost with the same request ID, as after an update. |
@@ -52,8 +54,9 @@ The command exits 0 only if every outcome held and nothing is left running.
 
 ## What is real
 
-- The proxy: the build of this tree (or the newest published release, for the
-  first update) under launchd, with the real installer, `deploy/install-proxy.sh`.
+- The proxy: the build of this tree (or, for the first update, the newest
+  published release or v0.1.9) under launchd, with the real installer,
+  `deploy/install-proxy.sh`.
 - The official Codex client: the one inside the desktop app
   (`/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex`), or
   `codex` on `PATH`. It runs `codex exec` tasks and `/goal` through

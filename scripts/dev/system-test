@@ -3,7 +3,7 @@
 
 Each group of outcomes gets its own isolated system: a private launchd job on a
 spare port running a build of this working tree (or, for the first update, the
-newest published release), its own data directory with fake accounts, and fake
+newest published release or v0.1.9), its own data directory with fake accounts, and fake
 providers in place of OpenAI and Anthropic. The groups run at once. The
 official Codex, Pi and Claude Code clients drive each system; a scripted model
 answers them, so no tokens are spent and no real service is waited on. Prints
@@ -649,7 +649,7 @@ def update_during_work_finishes_on_the_old_process(system):
     token_parts[1] = rig.base64.urlsafe_b64encode(rig.json.dumps(claims).encode()).decode().rstrip('=')
     auth['tokens']['id_token'] = '.'.join(token_parts)
     (signed_out / 'auth.json').write_text(rig.json.dumps(auth))
-    # The published release names accounts only by folder; what it wrote must take its account keys after the update.
+    # What the published release wrote must keep its contents and accounts across the update.
     system.records_before_update = rig.account_records()
     update_started = time.monotonic()
     update = start_installer('candidate', 'update')
@@ -712,18 +712,51 @@ def update_during_work_finishes_on_the_old_process(system):
             'A goal running a tool across the update finished with its effect run once. Nothing was replayed and Codex showed no error.')
 
 
-# Columns the published release changes in place while it drains: a day's request counts only grow.
+def update_keeps_the_published_releases_records(system):
+    """Records the published release wrote, including those it writes while it drains, keep their contents and their accounts' keys, and a task it pinned keeps its account"""
+    return require_records_kept_and_keyed(system.records_before_update, system.goal_across_update, 'the published release')
+
+
+def update_keys_the_records_a_keyless_release_wrote(system):
+    """Records the last release before account keys wrote by folder name, including those it writes while it drains, keep their contents and take their account keys, and a task it pinned keeps its account"""
+    goal = rig.Goal('keyless-goal', SLEEPING_GOAL)
+    task = rig.CodexTask('keyless-task', 'Reply with the word before.').finish()
+    system.record_codex_task(task.name, task.thread)
+    rig.wait_for(goal.effect_file.exists, 'the goal to start the tool call that spans the update')
+    before = rig.account_records()
+    if not before or any(row.get('account_key') is not None for row in before.values()):
+        raise Failure(f'Before the update, expected records with no account key from {rig.KEYLESS_RELEASE_TAG}; found {before}.')
+    old = rig.deploy_status()['pid']
+    update = start_installer('candidate', 'keyless-update')
+    wait_for_candidate(old)
+    (rig.RUN / 'work/keyless-goal-release').touch()
+    # The goal keeps its WebSocket to the old process; the new one proves itself on a new task.
+    new_task = rig.CodexTask('keyless-new-task', 'Reply with the word new.').finish()
+    system.record_codex_task(new_task.name, new_task.thread)
+    errors = goal.finish() + task.errors + new_task.errors
+    system.record_codex_task('goal across the update', goal.thread)
+    rig.wait_for(lambda: not rig.process_alive(old), 'the old process to retire', timeout=120)
+    try:
+        exit_code = update.wait(timeout=120)
+    except rig.subprocess.TimeoutExpired:
+        raise Failure('The installer did not finish cleanup after the old proxy exited.')
+    if exit_code:
+        raise Failure(f'The update command failed: {rig.read("logs/keyless-update.err")[-400:]}')
+    if errors:
+        raise Failure(f'The update completed, but Codex showed {describe_errors(errors)}.')
+    return require_records_kept_and_keyed(before, goal.thread, f'{rig.KEYLESS_RELEASE_TAG}, the last release before account keys,')
+
+
+# Columns the old release changes in place while it drains: a day's request counts only grow.
 GROWING_COLUMNS = {'model_request_counts': ('requests', 'successful', 'failed', 'interrupted')}
 
 
-def update_gives_old_records_their_account_keys(system):
-    """Records the published release wrote by folder name keep their contents and take their account keys, and a task it pinned keeps its account"""
-    before = system.records_before_update
-    if not before or any(row.get('account_key') is not None for row in before.values()):
-        raise Failure(f'Before the update, expected records with no account key from the published release; found {before}.')
+def require_records_kept_and_keyed(before, goal_thread, writer):
+    """Every record the old release wrote before an update is still there after it with the same contents, and every
+    record of a signed-in account carries that account's key: the one it had, or the one its folder gives it."""
     signed_in = lambda folder: rig.account_key(folder) is not None
     rig.wait_for(lambda: all(row['account_key'] is not None for row in rig.account_records().values() if signed_in(row['account_name'])),
-                 'the new proxy to record account keys on the published release\'s records', timeout=30)
+                 f'the new proxy to record account keys on the records {writer} wrote', timeout=30)
     after = rig.account_records()
     wrong = [f'{table} {identity}: {row["account_name"]} has {row["account_key"]}' for (table, identity), row in after.items()
              if signed_in(row['account_name']) and row['account_key'] != rig.account_key(row['account_name'])]
@@ -733,20 +766,22 @@ def update_gives_old_records_their_account_keys(system):
     for (table, identity), original in before.items():
         now = after.get((table, identity))
         growing = GROWING_COLUMNS.get(table, ())
+        unchanged = [column for column, value in original.items() if column not in growing and not (column == 'account_key' and value is None)]
         if now is None:
             changed.append(f'{table} {identity} is gone')
-        elif any(now[column] != value for column, value in original.items() if column not in growing):
+        elif any(now[column] != original[column] for column in unchanged):
             changed.append(f'{table} {identity} was {original}, is {now}')
         elif any(now[column] < original[column] for column in growing):
             changed.append(f'{table} {identity} counts fell from {original} to {now}')
     if changed:
-        raise Failure(f'{len(changed)} of {len(before)} records the published release wrote were lost or changed: ' + '; '.join(changed[:10]))
-    goal_accounts = {row[0] for row in rig.database_rows(system.goal_across_update)}
+        raise Failure(f'{len(changed)} of {len(before)} records {writer} wrote were lost or changed: ' + '; '.join(changed[:10]))
+    goal_accounts = {row[0] for row in rig.database_rows(goal_thread)}
     if len(goal_accounts) != 1:
-        raise Failure(f'The goal pinned by the published release was served by {sorted(goal_accounts)} across the update.')
+        raise Failure(f'The goal pinned by {writer} was served by {sorted(goal_accounts)} across the update.')
+    keyed_by_folder = sum(1 for row in before.values() if row.get('account_key') is None)
     tables = sorted({table for table, _ in before})
-    return (f'All {len(before)} records the published release wrote by folder name ({", ".join(tables)}) kept their\n'
-            f'contents and folders and took their accounts\' keys after the update. The goal it pinned stayed on {goal_accounts.pop()}.')
+    return (f'All {len(before)} records {writer} wrote kept their contents and folders after the update\n'
+            f'({", ".join(tables)}); {keyed_by_folder} took their account keys from their folders. The goal it pinned stayed on {goal_accounts.pop()}.')
 
 
 def rollback_keeps_tasks_on_their_accounts(system):
@@ -1176,10 +1211,12 @@ def reset_left_pending_completes_after_rollback(system):
     return 'This build spent the earliest credit and the provider dropped its reply; the published release retried it with the same request ID and finished it.'
 
 
-# Each group shares one isolated system and runs at once with every other group. Only the first update starts from
-# the published release; every other system starts on a build of this tree.
+# Each group shares one isolated system and runs at once with every other group. The first update and the rollback
+# start from the published release, the keyless update from the last release before account keys, and every other
+# system from a build of this tree.
 GROUPS = [
-    ('update', 'published-release', [update_waits_for_work, update_during_work_finishes_on_the_old_process, update_gives_old_records_their_account_keys]),
+    ('update', 'published-release', [update_waits_for_work, update_during_work_finishes_on_the_old_process, update_keeps_the_published_releases_records]),
+    ('keyless-update', 'keyless-release', [update_keys_the_records_a_keyless_release_wrote]),
     ('rollback', 'published-release', [rollback_keeps_tasks_on_their_accounts, update_after_rollback_keeps_a_task_the_published_release_moved]),
     ('resets', 'cli', [stored_resets]),
     ('reset-rollback', 'cli', [reset_left_pending_completes_after_rollback]),

@@ -31,9 +31,12 @@ BUILDS = ROOT / 'builds'
 # The smoke test runs one system against the real services, with copies of the live logins.
 REAL_SERVICES = os.environ.get('CODEX_SWITCH_REAL_SERVICES') == '1'
 LIVE_DATA = Path.home() / 'Library/Application Support/codex-switch'
-# The newest published release, kept between runs by its tag.
+# Published releases, kept between runs by their tags.
 RELEASES = REPO / '.project-private/system-test-releases'
 PUBLISHED_RELEASE_PROXY = BUILDS / 'published-release/CodexSwitchMenu.app/Contents/Helpers/codex-switch'
+# The last release that names accounts only by their folders, so an update from it must give its records account keys.
+KEYLESS_RELEASE_TAG = 'v0.1.9'
+KEYLESS_RELEASE_PROXY = BUILDS / 'keyless-release/CodexSwitchMenu.app/Contents/Helpers/codex-switch'
 # The Codex client the proxy itself reads: the one inside the desktop app, else `codex` on PATH.
 DESKTOP_CODEX = Path('/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex')
 CODEX = str(DESKTOP_CODEX) if DESKTOP_CODEX.exists() else shutil.which('codex')
@@ -67,7 +70,8 @@ class Failure(Exception):
 
 def build():
     """Builds the same source with distinct release numbers, and the fake providers, once for every isolated system;
-    and fetches the newest published release, so one system's first update is one Macs really make."""
+    and fetches the newest published release, so one system's first update is one Macs really make, and the last
+    release before account keys."""
     BUILDS.mkdir(parents=True)
     newest = subprocess.Popen(['gh', 'release', 'view', '--repo', 'joshp123/codex-switch', '--json', 'tagName', '--jq', '.tagName'],
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -83,17 +87,22 @@ def build():
     tag, problem = newest.communicate()
     if newest.returncode:
         raise Failure(f'Could not find the newest published release: {problem[-400:]}')
-    release = RELEASES / tag.strip()
+    (BUILDS / 'published-release').symlink_to(fetch_release(tag.strip()))
+    (BUILDS / 'keyless-release').symlink_to(fetch_release(KEYLESS_RELEASE_TAG))
+
+
+def fetch_release(tag):
+    release = RELEASES / tag
     if not (release / 'CodexSwitchMenu.app').exists():
-        subprocess.run(['gh', 'release', 'download', tag.strip(), '--repo', 'joshp123/codex-switch', '--pattern', 'CodexSwitchMenu.zip',
+        subprocess.run(['gh', 'release', 'download', tag, '--repo', 'joshp123/codex-switch', '--pattern', 'CodexSwitchMenu.zip',
                         '--dir', str(release)], check=True, capture_output=True)
         subprocess.run(['ditto', '-x', '-k', str(release / 'CodexSwitchMenu.zip'), str(release)], check=True)
-    (BUILDS / 'published-release').symlink_to(release)
+    return release
 
 
 def prepare(first_proxy):
-    """Creates this system's run directory with fake accounts. first_proxy is 'published-release' or 'cli', the build
-    its launchd job starts with."""
+    """Creates this system's run directory with fake accounts. first_proxy is 'published-release', 'keyless-release' or
+    'cli', the build its launchd job starts with."""
     os.umask(0o077)  # logins, logs and the proxy's data stay private to this user
     if not CODEX:
         raise Failure('Codex is not installed: neither the desktop app nor `codex` on PATH.')
@@ -101,7 +110,7 @@ def prepare(first_proxy):
         (RUN / part).mkdir(parents=True)
     for name in (*BUILD_NAMES, 'fake-providers'):
         os.link(BUILDS / name, RUN / name)
-    first = PUBLISHED_RELEASE_PROXY if first_proxy == 'published-release' else BUILDS / 'cli'
+    first = {'published-release': PUBLISHED_RELEASE_PROXY, 'keyless-release': KEYLESS_RELEASE_PROXY, 'cli': BUILDS / 'cli'}[first_proxy]
     shutil.copy2(first, RUN / 'codex-switch')
     for number, account in enumerate(CODEX_ACCOUNTS, 1):
         (RUN / 'data' / account).mkdir()
@@ -620,7 +629,7 @@ ACCOUNT_TABLES = ('task_account_pins', 'account_reported_resets', 'completed_res
 def account_records():
     """Every record of an account in the proxy's database, as {(table, primary key): row}, each row a dictionary of its
     columns. A record's identity is its primary key, never its rowid: SQLite reuses the rowids of deleted rows. Its
-    account_key is None where the record has none, and absent where only the published release has written."""
+    account_key is None where the record has none, and absent where only a release before account keys has written."""
     with sqlite3.connect(f'file:{RUN / "data/codex-switch.db"}?mode=ro', uri=True) as database:
         database.row_factory = sqlite3.Row
         records = {}
