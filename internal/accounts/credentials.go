@@ -35,6 +35,9 @@ type credentialError struct {
 }
 
 func (e *credentialError) Error() string {
+	if e.Kind == credentialErrorSignInRequired && e.Cause != nil {
+		return "sign-in required: " + e.Cause.Error()
+	}
 	if e.Kind == credentialErrorSignInRequired {
 		return "sign-in required"
 	}

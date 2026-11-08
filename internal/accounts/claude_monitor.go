@@ -20,6 +20,11 @@ const claudeUsageReadInterval = 5 * time.Minute
 // SetClaudeUpstreamOrigin changes the Claude origin before Run starts.
 func (monitor *Monitor) SetClaudeUpstreamOrigin(origin *url.URL) { monitor.claudeOrigin = origin }
 
+// SetClaudeTokenOrigin changes where Claude logins are refreshed, before Run starts.
+func (monitor *Monitor) SetClaudeTokenOrigin(origin *url.URL) {
+	monitor.claudeTokenURL = origin.ResolveReference(&url.URL{Path: "/v1/oauth/token"}).String()
+}
+
 type claudeAllowanceCache struct {
 	Sample       AllowanceSample
 	Restrictions map[string]ClaudeRestriction

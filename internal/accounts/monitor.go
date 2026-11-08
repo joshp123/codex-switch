@@ -51,6 +51,7 @@ type AccountRoutingFact struct {
 // latest facts without waiting on the network.
 type Monitor struct {
 	claudeOrigin    *url.URL
+	claudeTokenURL  string
 	codexOrigin     *url.URL
 	dataDirectory   string
 	usageURL        string
@@ -84,6 +85,7 @@ func NewMonitor(dataDirectory string, upstreamOrigin *url.URL, codexExecutable s
 	return &Monitor{
 		codexOrigin:     upstreamOrigin,
 		claudeOrigin:    &url.URL{Scheme: "https", Host: "api.anthropic.com"},
+		claudeTokenURL:  claudeOAuthTokenURL,
 		dataDirectory:   dataDirectory,
 		usageURL:        upstreamOrigin.ResolveReference(&url.URL{Path: "/backend-api/wham/usage"}).String(),
 		modelsURL:       upstreamOrigin.ResolveReference(&url.URL{Path: "/backend-api/codex/models"}).String(),
@@ -320,6 +322,9 @@ func (monitor *Monitor) monitoredAccountLocked(account PoolAccount) *monitoredAc
 	if !known || monitored.savedLogin.home != filepath.Join(monitor.dataDirectory, account.Folder) {
 		monitored = &monitoredAccount{savedLogin: newSavedLogin(filepath.Join(monitor.dataDirectory, account.Folder), monitor.httpClient)}
 		monitored.savedLogin.provider = account.Provider
+		if account.Provider == ProviderClaude {
+			monitored.savedLogin.token = monitor.claudeTokenURL
+		}
 		monitor.accounts[account.Key] = monitored
 	}
 	return monitored

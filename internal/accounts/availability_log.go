@@ -46,9 +46,14 @@ func describeAccountAvailabilityChange(previous, current AccountRoutingFact, ema
 			state = "Claude reports its usage limit reached"
 		}
 	case AccountSignInRequired:
-		state = fmt.Sprintf("signed out (%v); run: codex-switch login %q", current.AccountStateCause, current.DisplayName)
+		// "signed out" already says that sign-in is required.
+		reason := current.AccountStateCause
+		if credentialError, ok := reason.(*credentialError); ok && credentialError.Cause != nil {
+			reason = credentialError.Cause
+		}
+		state = fmt.Sprintf("signed out (%v); run: codex-switch login %q", reason, current.DisplayName)
 		if current.Provider == ProviderClaude {
-			state = fmt.Sprintf("signed out (%v); run: codex-switch login --claude %q", current.AccountStateCause, current.DisplayName)
+			state = fmt.Sprintf("signed out (%v); run: codex-switch login --claude %q", reason, current.DisplayName)
 		}
 	case AccountCredentialsUnavailable:
 		state = fmt.Sprintf("cannot read its saved login: %v", current.AccountStateCause)

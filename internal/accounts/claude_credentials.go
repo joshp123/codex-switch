@@ -103,7 +103,7 @@ func (s *savedLogin) claudeCredentials(ctx context.Context, rejected Credentials
 		forceRefresh := rejected.AccessToken != "" && rejected.AccessToken == auth.AccessToken
 		if forceRefresh || !auth.ExpiresAt.After(time.Now().Add(time.Minute)) {
 			var refreshed claudeTokenResponse
-			if err := postClaudeOAuth(ctx, s.client, map[string]string{
+			if err := postClaudeOAuth(ctx, s.client, s.token, map[string]string{
 				"grant_type": "refresh_token", "client_id": claudeOAuthClientID,
 				"refresh_token": auth.RefreshToken, "scope": claudeOAuthScopes,
 			}, &refreshed); err != nil {
@@ -141,12 +141,12 @@ type claudeTokenResponse struct {
 	} `json:"organization"`
 }
 
-func postClaudeOAuth(ctx context.Context, client *http.Client, body any, result any) error {
+func postClaudeOAuth(ctx context.Context, client *http.Client, tokenURL string, body any, result any) error {
 	encoded, err := json.Marshal(body)
 	if err != nil {
 		return err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, claudeOAuthTokenURL, bytes.NewReader(encoded))
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, bytes.NewReader(encoded))
 	if err != nil {
 		return err
 	}
@@ -157,12 +157,51 @@ func postClaudeOAuth(ctx context.Context, client *http.Client, body any, result 
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		io.Copy(io.Discard, io.LimitReader(response.Body, maximumRefreshResponseBytes))
-		err := fmt.Errorf("Claude token request returned HTTP %d", response.StatusCode)
+		refusal, _ := io.ReadAll(io.LimitReader(response.Body, maximumRefreshResponseBytes))
+		err := fmt.Errorf("Anthropic refused the token request with HTTP %d%s", response.StatusCode, describeClaudeTokenRefusal(refusal))
 		if response.StatusCode == 400 || response.StatusCode == 401 || response.StatusCode == 403 {
 			return signInRequired(err)
 		}
 		return temporary(err)
 	}
 	return json.NewDecoder(io.LimitReader(response.Body, maximumRefreshResponseBytes)).Decode(result)
+}
+
+// describeClaudeTokenRefusal is Anthropic's reason for refusing a token
+// request, read as Claude Code reads it: the code is "error" when that is a
+// string and "error.type" when it is an object; the message is
+// "error_description", or "error.message" in Anthropic's API error shape. A
+// body without either is quoted, shortened to one line.
+func describeClaudeTokenRefusal(body []byte) string {
+	var refusal struct {
+		Error            json.RawMessage `json:"error"`
+		ErrorDescription string          `json:"error_description"`
+	}
+	var code, message string
+	if json.Unmarshal(body, &refusal) == nil {
+		var apiError struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(refusal.Error, &code) != nil && json.Unmarshal(refusal.Error, &apiError) == nil {
+			code, message = apiError.Type, apiError.Message
+		}
+		if refusal.ErrorDescription != "" {
+			message = refusal.ErrorDescription
+		}
+	}
+	switch {
+	case code != "" && message != "":
+		return " " + code + ": " + message
+	case code != "" || message != "":
+		return " " + code + message
+	}
+	excerpt := strings.Join(strings.Fields(string(body)), " ")
+	if excerpt == "" {
+		return " and an empty body"
+	}
+	if len(excerpt) > 200 {
+		excerpt = excerpt[:200] + "..."
+	}
+	return fmt.Sprintf(" and the body %q", excerpt)
 }

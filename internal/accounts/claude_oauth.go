@@ -96,7 +96,7 @@ func SignInClaude(dataDirectory string, replacing store.AccountKey) (PoolAccount
 	}
 	client := &http.Client{Timeout: 30 * time.Second}
 	var token claudeTokenResponse
-	if err := postClaudeOAuth(ctx, client, map[string]string{"grant_type": "authorization_code", "code": code, "state": verifier,
+	if err := postClaudeOAuth(ctx, client, claudeOAuthTokenURL, map[string]string{"grant_type": "authorization_code", "code": code, "state": verifier,
 		"client_id": claudeOAuthClientID, "redirect_uri": redirectURI, "code_verifier": verifier}, &token); err != nil {
 		return PoolAccount{}, err
 	}

@@ -231,6 +231,7 @@ def proxy_environment():
                    'PATH': os.environ['PATH']}
     if not REAL_SERVICES:
         environment.update({'CODEX_SWITCH_UPSTREAM_ORIGIN': read('fake-providers-origin'), 'CODEX_SWITCH_CLAUDE_UPSTREAM_ORIGIN': read('fake-providers-origin'),
+                            'CODEX_SWITCH_CLAUDE_TOKEN_ORIGIN': read('fake-providers-origin'),
                             'CODEX_SWITCH_ACCOUNT_READ_SECONDS': str(ACCOUNT_READ_SECONDS),
                             'CODEX_SWITCH_CONNECTION_DRAIN_SECONDS': str(CONNECTION_DRAIN_SECONDS)})
     return environment

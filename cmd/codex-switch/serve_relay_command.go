@@ -113,6 +113,13 @@ func serveRelay(tcpListenAddress string) {
 		log.Fatal(fmt.Errorf("Claude upstream origin: %w", err))
 	}
 	accountMonitor.SetClaudeUpstreamOrigin(claudeUpstreamOrigin)
+	if value := strings.TrimSpace(os.Getenv("CODEX_SWITCH_CLAUDE_TOKEN_ORIGIN")); value != "" {
+		claudeTokenOrigin, err := url.Parse(value)
+		if err != nil {
+			log.Fatal(fmt.Errorf("Claude token origin: %w", err))
+		}
+		accountMonitor.SetClaudeTokenOrigin(claudeTokenOrigin)
+	}
 	if interval, set := secondsFromEnvironment("CODEX_SWITCH_ACCOUNT_READ_SECONDS"); set {
 		accountMonitor.SetAccountReadInterval(interval)
 	}

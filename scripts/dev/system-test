@@ -507,6 +507,27 @@ def claude_limit_reaches_the_client_at_once(system):
             f'Claude Code stopped after {format_duration(took)}: {said!r}')
 
 
+def claude_sign_out_logs_what_anthropic_said(system):
+    """When Anthropic refuses to refresh a Claude login, the proxy log says what Anthropic answered"""
+    require_available_claude_accounts(1)
+    account = rig.CLAUDE_ACCOUNTS[-1]
+    path = rig.RUN / 'data' / account / 'auth.json'
+    auth = json.loads(path.read_text())
+    # The stored token runs out, so the proxy must refresh it; the fake providers refuse every refresh.
+    auth['expires_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(time.time() - 60))
+    path.with_name('auth.json.next').write_text(json.dumps(auth))
+    os.replace(path.with_name('auth.json.next'), path)
+    signed_out = rig.wait_for(lambda: [line for line in rig.proxy_log().splitlines() if f'({auth["email"]}, ' in line and ': signed out (' in line],
+                              f'the proxy to log {account} as signed out', timeout=15)
+    line = signed_out[0]
+    if not rig.fake_provider_events('claude-refresh-refused'):
+        raise Failure(f'The proxy logged {account} as signed out without asking Anthropic to refresh it: {line}')
+    missing = [part for part in ('HTTP 400', 'invalid_grant', 'Refresh token not found or invalid') if part not in line]
+    if missing or auth['refresh_token'] in line or auth['access_token'] in line:
+        raise Failure(f'The sign-out line lacks {missing} or shows a token: {line}')
+    return f'Anthropic refused the refresh with HTTP 400 and invalid_grant; the proxy logged:\n{line.split(" ", 1)[1]}'
+
+
 def require_available_claude_accounts(count):
     """The fake Claude accounts, every one with allowance left."""
     if not rig.CLAUDE:
@@ -1229,6 +1250,7 @@ GROUPS = [
     ('claude-fast-mode', 'cli', [claude_fast_mode_refusal_stays_on_the_account]),
     ('claude-failover', 'cli', [claude_limit_moves_the_task_to_a_free_account]),
     ('claude-limited', 'cli', [claude_limit_reaches_the_client_at_once]),
+    ('claude-sign-out', 'cli', [claude_sign_out_logs_what_anthropic_said]),
     ('retire', 'cli', [retiring_proxy_keeps_only_working_connections]),
     ('outage', 'cli', [provider_outage_blocks_neither_restart_nor_release]),
     ('failed-release', 'cli', [failed_release_steps_aside]),

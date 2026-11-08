@@ -51,6 +51,7 @@ const (
 	accountsCheckPath  = "/backend-api/wham/accounts/check"
 	claudeMessagesPath = "/v1/messages"
 	claudeUsagePath    = "/api/oauth/usage"
+	claudeTokenPath    = "/v1/oauth/token"
 )
 
 // codexModels is OpenAI's catalogue entry for gpt-6-luna without its
@@ -172,6 +173,7 @@ type providers struct {
 //	websocket-age-limit SECONDS     a WebSocket opened now gets OpenAI's one-hour limit error after SECONDS, then closes
 //
 // Fast-mode Claude requests are always refused, as for an account without usage credits.
+// Claude login refreshes are always refused, as for a refresh token Anthropic has retired.
 type controls struct {
 	weeklyUsed        map[string]float64
 	weeklyResets      map[string]int64
@@ -790,6 +792,9 @@ func (providers *providers) serveCodexWebSocket(writer http.ResponseWriter, requ
 func (providers *providers) serveAnthropic(writer http.ResponseWriter, request *http.Request, controls controls) {
 	alias := providers.alias(request)
 	switch {
+	case request.URL.Path == claudeTokenPath:
+		providers.logRequest("claude-refresh-refused", request, http.StatusBadRequest)
+		writeJSON(writer, http.StatusBadRequest, []byte(`{"error":"invalid_grant","error_description":"Refresh token not found or invalid"}`))
 	case request.URL.Path == claudeUsagePath && controls.claudeGrant:
 		writeJSON(writer, http.StatusOK, fmt.Appendf(nil, `{"five_hour":{"utilization":10,"resets_at":%q},"cedar_ember":{"eligible":true,"grants":[{"resets_left":2},{"resets_left":1,"ends_at":%q}]}}`, time.Now().Add(3*time.Hour).Format(time.RFC3339), time.Now().Add(-time.Hour).Format(time.RFC3339)))
 	case request.URL.Path == claudeUsagePath && controls.claudeLimited[alias]:
