@@ -286,10 +286,10 @@ The reserves are off by default; use `codex-switch reserve "Claude 1" off` to
 clear both.
 
 One Mac's proxy may spend stored Codex reset credits by itself. Turn this on
-with `codex-switch auto-reset on` on a Mac that is always on, and on no other:
+with `codex-switch auto-reset codex on` on a Mac that is always on, and on no other:
 a spend cannot be undone, and proxies on two Macs deciding alone could each
 spend a credit for the same need. `codex-switch status` shows whether it is on;
-`codex-switch auto-reset off` turns it off. When that Mac is off, no credit is
+`codex-switch auto-reset codex off` turns it off. When that Mac is off, no credit is
 spent by itself, and work waits for an account to refill.
 
 The proxy with automatic resets on spends a credit in two cases:

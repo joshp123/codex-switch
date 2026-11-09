@@ -62,11 +62,11 @@ func writeDeploymentStatus(output io.Writer, dataDirectory string) {
 	}
 	switch on, err := accountapi.AutomaticResetsOn(dataDirectory); {
 	case err != nil:
-		fmt.Fprintf(output, "Automatic resets: %v\n", err)
+		fmt.Fprintf(output, "Automatic Codex resets: %v\n", err)
 	case on:
-		fmt.Fprintln(output, "Automatic resets: on")
+		fmt.Fprintln(output, "Automatic Codex resets: on")
 	default:
-		fmt.Fprintln(output, "Automatic resets: off")
+		fmt.Fprintln(output, "Automatic Codex resets: off")
 	}
 }
 

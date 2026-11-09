@@ -1358,13 +1358,13 @@ def stored_resets(system):
 
 def automatic_resets(on, data=None):
     """Turns automatic resets on or off for the installation in data, this Mac's by default, as a person does."""
-    result = subprocess.run([str(rig.RUN / 'cli'), 'auto-reset', 'on' if on else 'off'], capture_output=True, text=True, timeout=15,
+    result = subprocess.run([str(rig.RUN / 'cli'), 'auto-reset', 'codex', 'on' if on else 'off'], capture_output=True, text=True, timeout=15,
                             env=dict(rig.client_environment(), CODEX_SWITCH_DATA_DIR=str(data or rig.RUN / 'data')))
     if result.returncode:
         raise Failure(f'codex-switch auto-reset failed: {result.stderr}')
 
 
-WAITING_WITHOUT_RESETS = 'Automatic resets are off, so no reset credit is spent for it.'
+WAITING_WITHOUT_RESETS = 'Automatic Codex resets are off, so no reset credit is spent for it.'
 READING_LAGS = 'does not show the reset of Codex'
 
 
@@ -1394,11 +1394,11 @@ def only_the_authority_spends_one_credit(system):
     and no other while OpenAI's usage reading lags behind the spend; nor does the reset command. Work on both Macs
     resumes once the reading catches up"""
     status = rig.proxy_command('status')
-    if status.count('holds 1 weekly reset · expires ') != 3 or 'Automatic resets: off' not in status:
+    if status.count('holds 1 weekly reset · expires ') != 3 or 'Automatic Codex resets: off' not in status:
         raise Failure(f'Status did not show each Codex account\'s reset credit and automatic resets off:\n{status}')
     automatic_resets(True)
-    if 'Automatic resets: on' not in (status := rig.proxy_command('status')):
-        raise Failure(f'After `codex-switch auto-reset on`, status showed:\n{status}')
+    if 'Automatic Codex resets: on' not in (status := rig.proxy_command('status')):
+        raise Failure(f'After `codex-switch auto-reset codex on`, status showed:\n{status}')
     other = rig.OtherMac()
     system.limited = set(system.accounts)
     system.extra = ['reset-soon']  # account-2 refills five minutes from each read
@@ -1504,7 +1504,7 @@ def expiring_credit_is_spent_once_by_the_authority(system):
     claims = rig.fake_provider_events('reset-claim')
     if spends() != [('account-1', 'expiring-first')] or len({claim['request'] for claim in claims}) != len(claims):
         raise Failure(f'Expected one spend of expiring-first, each request under its own ID; OpenAI saw {claims} and spent {spends()}.')
-    if 'Reset credit' in other.proxy_log() or 'Keeping reset credit' in other.proxy_log() or 'Automatic resets are off' not in other.proxy_log():
+    if 'Reset credit' in other.proxy_log() or 'Keeping reset credit' in other.proxy_log() or 'Automatic Codex resets are off' not in other.proxy_log():
         raise Failure('The Mac with automatic resets off decided about a credit.')
     return (f'At 15% used with a fifteenth of the week gone, this Mac asked OpenAI to spend the expiring credit; it found nothing '
             f'to reset, and the credit was kept. At 40% used with half the week gone, it kept the credit without asking. At 60% '
@@ -1686,6 +1686,22 @@ def usage_credits_stop_at_the_floor(system):
                       f'went to {rig.pinned_account(task.thread)}.')
     return (f'account-3 drew from 2,350 to {final:,.0f} over {served} task(s); the next task waited until account-2 refilled, '
             f'and finished there. The proxy logged:\n{stopped}')
+
+
+def low_credit_balance_leaves_included_allowance_usable(system):
+    """An account with no usage credits left still takes work on its included allowance"""
+    first = system.best_account()
+    system.usage_credits = {first: 0}
+    system.apply()
+    wait_until_the_proxy_reads(first, balance=0, used=system.weekly[first])
+    rig.wait_for(lambda: 'usage credit balance 0 is below 1,000' in rig.proxy_log(), 'the proxy to note the empty balance')
+    task = rig.CodexTask('empty-balance-with-allowance', 'Reply with the word working.').finish()
+    system.record_codex_task('work on included allowance with no usage credits', task.thread)
+    if rig.pinned_account(task.thread) != first or draws():
+        raise Failure(f'With no usage credits on {first}, which has allowance left, work went to {rig.pinned_account(task.thread)} and drew {draws()}.')
+    system.usage_credits = {}
+    system.apply()
+    return f'{system.describe(first)}, held no usage credits. New work still went to it, and no usage credits were drawn.'
 
 
 def low_credit_balance_blocks_until_weekly_reset(system):
@@ -1871,7 +1887,7 @@ GROUPS = [
     ('authority-rollback', 'published-release', [rollback_and_back_spends_no_second_credit]),
     ('secrets', 'cli', [no_part_of_a_token_reaches_the_log, a_reset_result_quoting_the_token_is_neither_logged_nor_printed,
                         a_signed_out_account_pauses_resets_and_says_why_once, a_claude_refresh_failure_quoting_the_refresh_token_is_not_shown]),
-    ('low-credit-balance', 'cli', [low_credit_balance_blocks_until_weekly_reset]),
+    ('low-credit-balance', 'cli', [low_credit_balance_leaves_included_allowance_usable, low_credit_balance_blocks_until_weekly_reset]),
     ('usage-credits', 'cli', [status_shows_each_accounts_usage_credits, usage_credits_wait_while_an_account_has_included_allowance,
                               usage_credits_are_drawn_when_every_allowance_is_out, usage_credits_stop_at_the_floor, reset_credits_come_first]),
     ('routing', 'cli', [t3_reads_the_account_pool, new_work_goes_to_the_allowance_that_resets_first, request_without_task_id_is_served]),

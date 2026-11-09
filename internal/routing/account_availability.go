@@ -59,10 +59,6 @@ func (router *TaskRouter) allowanceRule(fact accounts.AccountRoutingFact, modelS
 		return problem, creditDraw{whyNotDrawing: problem.Reason}, nil
 	}
 	now := router.currentTime().UTC()
-	if fact.CreditBalanceBlockedUntil.After(now) {
-		reason := "usage credit balance fell below 1,000"
-		return AccountUnavailability{Reason: reason, Until: fact.CreditBalanceBlockedUntil}, creditDraw{whyNotDrawing: reason}, nil
-	}
 	if reason := accounts.ReserveUnavailableReason(fact, now); reason != "" {
 		return AccountUnavailability{Reason: reason}, creditDraw{whyNotDrawing: reason}, nil
 	}
@@ -87,6 +83,13 @@ func (router *TaskRouter) allowanceRule(fact accounts.AccountRoutingFact, modelS
 		usedUp := AccountUnavailability{Reason: fmt.Sprintf("%s allowance used up", kind), Until: window.ResetsAt}
 		if !creditsAllowed {
 			return usedUp, creditDraw{whyNotDrawing: usedUp.Reason}, nil
+		}
+		// A balance seen below 1,000 ends the account's credit drawing for the
+		// week, whatever it reports later. Its included allowance is untouched.
+		if fact.CreditBalanceBlockedUntil.After(now) {
+			lowBalance := "usage credit balance fell below 1,000"
+			usedUp.Reason += ", and its " + lowBalance
+			return usedUp, creditDraw{whyNotDrawing: lowBalance}, nil
 		}
 		problem, err := router.creditDrawProblem(fact, modelSlug)
 		if err != nil || problem != "" {

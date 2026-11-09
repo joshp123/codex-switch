@@ -71,7 +71,7 @@ func (monitor *Monitor) observeAccount(parent context.Context, account PoolAccou
 		if balance := sample.CreditBalance; balance != nil && *balance < 1000 && fact.CreditBalanceBlockedUntil.IsZero() {
 			if weekly, known := AnalyseAllowance(sample, AccountReady, time.Now(), Weekly); known {
 				fact.CreditBalanceBlockedUntil = weekly.ResetsAt
-				log.Printf("%s unavailable until its weekly reset at %s: usage credit balance %.0f is below 1,000", account.DisplayName, weekly.ResetsAt.UTC().Format(time.RFC3339), *balance)
+				log.Printf("%s draws no usage credits until its weekly reset at %s: usage credit balance %.0f is below 1,000", account.DisplayName, weekly.ResetsAt.UTC().Format(time.RFC3339), *balance)
 			}
 		}
 		fact.AllowanceSample = sample

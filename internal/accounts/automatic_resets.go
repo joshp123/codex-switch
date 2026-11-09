@@ -74,12 +74,12 @@ func (monitor *Monitor) RunAutomaticResets(ctx context.Context) {
 		now := time.Now()
 		workWaiting := now.Sub(time.Unix(0, monitor.codexWorkWaitingAt.Load())) < codexWorkWaitingLifetime
 		on, err := AutomaticResetsOn(monitor.dataDirectory)
-		switched := "Automatic resets are off: this proxy spends no reset credit by itself."
+		switched := "Automatic Codex resets are off: this proxy spends no reset credit by itself."
 		if on {
-			switched = "Automatic resets are on: this proxy spends a reset credit when the Codex pool is out, or before a credit expires."
+			switched = "Automatic Codex resets are on: this proxy spends a reset credit when the Codex pool is out, or before a credit expires."
 		}
 		if err != nil {
-			switched = "Automatic resets are off: " + err.Error()
+			switched = "Automatic Codex resets are off: " + err.Error()
 		}
 		if switched != lastSwitch && ctx.Err() == nil {
 			log.Print(switched)
@@ -90,7 +90,7 @@ func (monitor *Monitor) RunAutomaticResets(ctx context.Context) {
 		switch rules := (resetRules{whenPoolOut: workWaiting, beforeExpiry: monitor.creditMayExpireWithinTheHour(now)}); {
 		case !on:
 			if workWaiting {
-				message = "Codex work is waiting for an account. Automatic resets are off, so no reset credit is spent for it."
+				message = "Codex work is waiting for an account. Automatic Codex resets are off, so no reset credit is spent for it."
 			}
 		case rules.whenPoolOut || rules.beforeExpiry:
 			decision, err = spendResetCredit(ctx, monitor.dataDirectory, monitor.codexOrigin, monitor.httpClient, rules)
