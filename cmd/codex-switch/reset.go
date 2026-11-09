@@ -36,3 +36,20 @@ func resetCommand(args []string) {
 	}
 	fmt.Println(result.Message)
 }
+
+// autoResetCommand turns this installation's automatic resets on or off; see
+// accounts.AutomaticResetsOn. Keep them on for one Mac only, one that is
+// always on.
+func autoResetCommand(args []string) {
+	if len(args) != 1 || (args[0] != "on" && args[0] != "off") {
+		log.Fatal("usage: codex-switch auto-reset <on|off>")
+	}
+	if err := accounts.SetAutomaticResets(dataDir(), args[0] == "on"); err != nil {
+		log.Fatal(err)
+	}
+	if args[0] == "on" {
+		fmt.Println("Automatic resets on: this Mac's proxy spends a Codex reset credit when the pool is out, or before a credit expires. Keep them on for one Mac only.")
+		return
+	}
+	fmt.Println("Automatic resets off: this Mac's proxy spends no reset credit by itself. `codex-switch reset codex` still spends one.")
+}

@@ -12,7 +12,7 @@ It takes about 20 seconds and spends no tokens. Each group of outcomes runs on
 its own isolated system, and the groups run at once. A system is a build of
 this working tree under a private launchd job on a spare port, with its own
 data directory and fake accounts, and fake providers in place of OpenAI and
-Anthropic. Two groups start from the newest published release, so their first
+Anthropic. Three groups start from the newest published release, so their first
 update is the one Macs really make, and one from v0.1.9, the last release that
 names accounts only by their folders. The official Codex, Pi and Claude Code
 clients drive each system; a scripted model answers them. The test prints what
@@ -34,10 +34,12 @@ Before a release, also run the smoke test (see below).
 | rollback | After an update, `deploy/deploy.sh back` restores the published release. Tasks pinned by either build stay on their accounts while new work goes to the account the rule picks. T3 reads every account's usage by the index the other build gave it, after the update and after the rollback. |
 | rollback | A task the rolled-back published release moves off an exhausted account stays where it moved after the next update, although the first account has recovered. |
 | resets | Claude grants appear in status; the reset command checks pool availability and the next reset, and retries a response the published release lost with the same request ID, as after an update. |
-| reset-rollback | The reset command spends the credit of the account with the most of its week left, not the credit that expires first. A reset it leaves pending when the provider drops its reply completes with the published release, as after a rollback. |
-| auto-reset | Status shows each Codex account's reset credits. With every Codex account out and work waiting on two proxies, as on two Macs, neither spends a credit while an account refills within 30 minutes. Then both ask for the same credit with the same request ID, the credit of the account with the most of its week left; OpenAI spends it once, neither asks for another, and the work on both resumes there. |
-| lagging-reset | With every Codex account out and work waiting on two proxies, OpenAI's usage reading still shows the reset account at its limit after a credit is spent. Neither proxy, nor the reset command, spends another credit, and the work on both resumes once the reading catches up. |
-| expiry-reset | On two proxies, a credit in its last hour is kept while its account has used no more of its week than the share of the week that has passed, or when OpenAI finds nothing to reset; otherwise both ask for it with the same request ID, it is spent once, and the account's second credit is then kept. |
+| auto-reset | Status shows each Codex account's reset credits, and automatic resets off until `codex-switch auto-reset on`. With every Codex account out and work waiting on two proxies, as on two Macs, only the one with automatic resets on spends a credit. It spends none while an account refills within 30 minutes, then one, on the account with the most of its week left. While OpenAI's usage reading still shows that account at its limit, neither it nor the reset command spends another, and the work on both resumes once the reading catches up. |
+| cold-reset | A second proxy with automatic resets off, started after the first spent a credit while the reading still lags, spends none while its work waits. |
+| authority-off | With automatic resets off and every Codex account out, no credit is spent; the work waits and resumes when an account refills. |
+| expiry-reset | Of two proxies, only the one with automatic resets on spends a credit in its last hour. It keeps the credit while its account has used no more of its week than the share of the week that has passed, or when OpenAI finds nothing to reset; a later attempt, under a new request ID, spends it once, and the account's second credit is then kept. |
+| authority-rollback | The proxy with automatic resets on spends a credit and loses the reply. `deploy/deploy.sh back` restores the published release, which spends nothing by itself, and its reset command finishes the pending reset. After the next update the proxy spends no second credit while the reading lags, and the work resumes on the reset account once it catches up. |
+| secrets | When OpenAI's reason for refusing a model request, or another request, quotes the access token across the 300 bytes of a reason the log keeps or the 4096 bytes the proxy reads, the proxy log holds no part of the token. |
 | routing | New Codex tasks and Pi sessions go to an account whose week has not started, then to the weekly allowance that resets first. They and their Codex forks stay on their account when another account becomes first, and move for a hard reserve. |
 | routing | A request without a task ID is served. |
 | exhaustion | When a task's account runs out, its next turn moves to another account. No model work is replayed, no tool effect repeats, and Codex shows no error. |
@@ -92,11 +94,13 @@ every fast-mode Claude request as Anthropic does for an account without usage
 credits. It refuses every Claude login refresh with Anthropic's error, and its
 message quotes the refresh token sent. It holds reset credits and spends them
 as OpenAI does: once per request ID, and `no_credit` for a credit spent by
-another request, expired or never held. It answers `nothing_to_reset` for an
+another request, expired or never held. A request ID names one attempt, as
+Codex's own client treats it, so a repeat gets the attempt's first answer. It answers `nothing_to_reset` for an
 account under 20% used; OpenAI documents no such level, so the test picks one
-to make that answer happen. It can hold requests to spend a credit, so a test
-can see two proxies decide from the same accounts, and can make its usage
-reading lag behind a spend. It logs every model request with a fingerprint of its bytes, so the
+to make that answer happen. It can hold requests to spend a credit, lose
+every reply to one, and make its usage reading lag behind a spend. It can
+refuse requests with a reason that quotes their access token where the proxy
+shortens what it logs. It logs every model request with a fingerprint of its bytes, so the
 test can see that none was sent twice, and every usage read with the level it
 reported, so the test can wait until the proxy has read a level.
 

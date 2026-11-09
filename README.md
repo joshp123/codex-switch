@@ -276,7 +276,14 @@ At 10% or less, new work and the next turn of pinned tasks use another account.
 The reserves are off by default; use `codex-switch reserve "Claude 1" off` to
 clear both.
 
-The proxy spends a stored Codex reset credit by itself in two cases:
+One Mac's proxy may spend stored Codex reset credits by itself. Turn this on
+with `codex-switch auto-reset on` on a Mac that is always on, and on no other:
+a spend cannot be undone, and proxies on two Macs deciding alone could each
+spend a credit for the same need. `codex-switch status` shows whether it is on;
+`codex-switch auto-reset off` turns it off. When that Mac is off, no credit is
+spent by itself, and work waits for an account to refill.
+
+The proxy with automatic resets on spends a credit in two cases:
 
 - Work is waiting, no Codex account can take it, and none refills within 30
   minutes. The credit goes to the account with the most of its week left,
@@ -285,18 +292,14 @@ The proxy spends a stored Codex reset credit by itself in two cases:
   than the share of its week that has passed. If OpenAI finds nothing to
   reset, it keeps the credit.
 
-Each spend is logged with the credit, the account and the reason. Proxies on
-several Macs signed in to the same accounts choose the same credit and send the
-same request, which OpenAI applies once; each reads every account again just
-before it spends and backs off if one can take work. OpenAI's usage reading can
-lag behind a spend, so each Mac remembers the credits it has seen. When one
-disappears before it expires, that counts as the pool refilling, and no other
-credit is spent for waiting work until the reading shows the reset, for up to
-30 minutes.
+Each spend is logged with the credit, the account and the reason. OpenAI's
+usage reading can lag behind a spend, so after one the proxy spends no other
+credit until the reading shows that account refilled, however long that
+takes. The log says when the reading is late.
 
 `codex-switch reset codex` spends a credit by the first rule, without waiting
-work. If the response is lost, run the same command again to resolve it.
-Claude reset redemption is not supported yet.
+work, on any Mac. If the response is lost, run the same command again to
+resolve it. Claude reset redemption is not supported yet.
 
 ## How updates work
 

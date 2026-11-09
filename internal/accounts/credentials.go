@@ -80,6 +80,30 @@ func WithoutSecrets(text string, secrets ...string) string {
 	return text
 }
 
+// WithoutCutSecret drops the start of a secret from the end of head, the first
+// bytes of a longer body. A secret the cut splits no longer matches the whole
+// secret, so WithoutSecrets would leave its start.
+func WithoutCutSecret(head []byte, secrets ...string) []byte {
+	for _, secret := range secrets {
+		if secret == "" {
+			continue
+		}
+		// Only bytes after the last whole secret, and within one secret's
+		// length of the end, can start a cut one.
+		from := max(0, len(head)-len(secret)+1)
+		if last := bytes.LastIndex(head, []byte(secret)); last >= 0 {
+			from = max(from, last+len(secret))
+		}
+		for start := from; start < len(head); start++ {
+			if strings.HasPrefix(secret, string(head[start:])) {
+				head = head[:start]
+				break
+			}
+		}
+	}
+	return head
+}
+
 // savedLogin reads one account's auth.json and refreshes its tokens.
 type savedLogin struct {
 	provider Provider

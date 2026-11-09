@@ -3,8 +3,42 @@ package accounts
 import (
 	"context"
 	"log"
+	"os"
+	"path/filepath"
 	"time"
 )
+
+// automaticResetsFilename marks the one installation whose proxy spends reset
+// credits by itself. A spend cannot be undone, and proxies on several Macs
+// share the same accounts' credits: two that each decide from a usage reading
+// that lags behind a spend would each spend one. So exactly one installation
+// spends automatically, the one on a Mac that is always on. When that Mac is
+// off, no credit is spent automatically and work waits for an account to
+// refill. `codex-switch reset codex` spends on any Mac.
+const automaticResetsFilename = "automatic-resets"
+
+// AutomaticResetsOn reports whether this installation's proxy spends reset
+// credits by itself. They are off unless turned on.
+func AutomaticResetsOn(directory string) (bool, error) {
+	_, err := os.Stat(filepath.Join(directory, automaticResetsFilename))
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// SetAutomaticResets turns automatic resets on or off for this installation.
+// The running proxy follows within one account read.
+func SetAutomaticResets(directory string, on bool) error {
+	path := filepath.Join(directory, automaticResetsFilename)
+	if on {
+		return writeAtomicData(path, []byte("on\n"))
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
 
 // codexWorkWaitingLifetime is how long a report of waiting Codex work counts.
 // Waiting work asks for an account every five seconds, so a report this old
@@ -22,14 +56,14 @@ func (monitor *Monitor) ReportCodexWorkWaiting() {
 }
 
 // RunAutomaticResets spends a reset credit by the rule in chooseResetCredit
-// until ctx ends. It looks once per account read, and at once when work starts
-// waiting. It asks OpenAI only when the latest readings show a need: work
-// waiting for an account, or a credit in its last hour. The decision itself is
-// made from a fresh read of every account.
+// until ctx ends, while automatic resets are on. It looks once per account
+// read, and at once when work starts waiting. It asks OpenAI only when the
+// latest readings show a need: work waiting for an account, or a credit in its
+// last hour. The decision itself is made from a fresh read of every account.
 func (monitor *Monitor) RunAutomaticResets(ctx context.Context) {
 	ticker := time.NewTicker(monitor.readInterval)
 	defer ticker.Stop()
-	lastMessage := ""
+	lastMessage, lastSwitch := "", ""
 	for {
 		select {
 		case <-ctx.Done():
@@ -38,18 +72,32 @@ func (monitor *Monitor) RunAutomaticResets(ctx context.Context) {
 		case <-monitor.resetCheckRequested:
 		}
 		now := time.Now()
-		rules := resetRules{
-			whenPoolOut:  now.Sub(time.Unix(0, monitor.codexWorkWaitingAt.Load())) < codexWorkWaitingLifetime,
-			beforeExpiry: monitor.creditMayExpireWithinTheHour(now),
+		workWaiting := now.Sub(time.Unix(0, monitor.codexWorkWaitingAt.Load())) < codexWorkWaitingLifetime
+		on, err := AutomaticResetsOn(monitor.dataDirectory)
+		switched := "Automatic resets are off: this proxy spends no reset credit by itself."
+		if on {
+			switched = "Automatic resets are on: this proxy spends a reset credit when the Codex pool is out, or before a credit expires."
 		}
-		if !rules.whenPoolOut && !rules.beforeExpiry {
-			lastMessage = ""
-			continue
-		}
-		decision, err := spendResetCredit(ctx, monitor.dataDirectory, monitor.codexOrigin, monitor.httpClient, rules)
-		message := decision.Message
 		if err != nil {
-			message = "Automatic reset: " + err.Error()
+			switched = "Automatic resets are off: " + err.Error()
+		}
+		if switched != lastSwitch && ctx.Err() == nil {
+			log.Print(switched)
+			lastSwitch = switched
+		}
+		var decision ResetDecision
+		message := ""
+		switch rules := (resetRules{whenPoolOut: workWaiting, beforeExpiry: monitor.creditMayExpireWithinTheHour(now)}); {
+		case !on:
+			if workWaiting {
+				message = "Codex work is waiting for an account. Automatic resets are off, so no reset credit is spent for it."
+			}
+		case rules.whenPoolOut || rules.beforeExpiry:
+			decision, err = spendResetCredit(ctx, monitor.dataDirectory, monitor.codexOrigin, monitor.httpClient, rules)
+			message = decision.Message
+			if err != nil {
+				message = "Automatic reset: " + err.Error()
+			}
 		}
 		// A decision that has not changed is logged once.
 		if message != "" && (message != lastMessage || decision.Spent) && ctx.Err() == nil {

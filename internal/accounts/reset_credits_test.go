@@ -47,7 +47,7 @@ func TestPoolOutSpendsTheCreditOfTheAccountThatRefillsLast(t *testing.T) {
 		for _, index := range order {
 			ordered = append(ordered, readings[index])
 		}
-		choice, found, reason := chooseResetCredit(ordered, spentResetCredit{}, now, resetRules{whenPoolOut: true})
+		choice, found, reason := chooseResetCredit(ordered, now, resetRules{whenPoolOut: true})
 		if !found || choice.credit.ID != "three-credit-b" {
 			t.Fatalf("order %v: chose %q (found %t, %s); want the earliest credit of the account that refills last", order, choice.credit.ID, found, reason)
 		}
@@ -66,7 +66,7 @@ func TestPoolOutSpendsNothingWhenWorkCanContinueOrWaitBriefly(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			readings := []codexAccountReading{resetTestReading("one", "account-1", 100, now.Add(24*time.Hour), now), test.second}
-			if _, found, reason := chooseResetCredit(readings, spentResetCredit{}, now, resetRules{whenPoolOut: true}); found || !strings.Contains(reason, test.want) {
+			if _, found, reason := chooseResetCredit(readings, now, resetRules{whenPoolOut: true}); found || !strings.Contains(reason, test.want) {
 				t.Fatalf("found %t, reason %q; want no spend because %s", found, reason, test.want)
 			}
 		})
@@ -88,7 +88,7 @@ func TestExpiringCreditIsSpentOnlyWhenTheResetGainsAllowance(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			readings := []codexAccountReading{resetTestReading("one", "account-1", test.used, halfWeekLeft, now, test.expiry)}
-			choice, found, reason := chooseResetCredit(readings, spentResetCredit{}, now, resetRules{beforeExpiry: true})
+			choice, found, reason := chooseResetCredit(readings, now, resetRules{beforeExpiry: true})
 			if found != test.spend || !strings.Contains(reason, test.reason) || (test.reason == "" && !test.spend && reason != "") {
 				t.Fatalf("found %t (%q), reason %q; want spend %t, reason %q", found, choice.credit.ID, reason, test.spend, test.reason)
 			}
@@ -96,30 +96,27 @@ func TestExpiringCreditIsSpentOnlyWhenTheResetGainsAllowance(t *testing.T) {
 	}
 }
 
-// OpenAI applies a spend at once, but its usage reading can lag behind it.
-// While the reading still shows the account a credit was seen spent on at its
-// limit, that spend refills the pool, so no second credit is spent for the
-// same need.
-func TestACreditSeenSpentRefillsThePoolUntilTheReadingShowsIt(t *testing.T) {
-	now := time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)
-	readings := []codexAccountReading{
-		resetTestReading("one", "account-1", 100, now.Add(24*time.Hour), now, 3*24*time.Hour),
-		// three's credit has gone; its reading still shows it at its limit.
-		resetTestReading("three", "account-3", 100, now.Add(72*time.Hour), now),
+// OpenAI's usage reading can lag behind a spend. Only a reading whose windows
+// all began after the spend shows it. OpenAI's window ends move by a second
+// or two between reads, as the live readings of 4 to 9 November 2026 show.
+func TestOnlyAReadingWhoseWindowsBeganAfterASpendShowsIt(t *testing.T) {
+	askedAt := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
+	reading := func(resetsAt time.Time, used float64) AllowanceSample {
+		return AllowanceSample{Windows: []ReportedWindow{{UsedPercent: used, DurationSeconds: int64(week / time.Second), ResetsAt: resetsAt}}}
 	}
-	threeSpent := spentResetCredit{AccountKey: readings[1].account.Key, CreditID: "three-credit-a", SeenAt: now.Add(-time.Minute), RefillsAt: now.Add(72 * time.Hour)}
-	if _, found, reason := chooseResetCredit(readings, threeSpent, now, resetRules{whenPoolOut: true}); found || !strings.Contains(reason, "does not show the reset yet") {
-		t.Fatalf("found %t, reason %q; want no spend while the reading lags", found, reason)
-	}
-	// The reading has caught up: three refilled, then ran out again later in its new week.
-	caughtUp := threeSpent
-	caughtUp.RefillsAt = now.Add(48 * time.Hour)
-	// The spend was seen 30 minutes ago, and the reading never showed it.
-	stale := threeSpent
-	stale.SeenAt = now.Add(-poolRefillWait)
-	for name, spent := range map[string]spentResetCredit{"reading caught up": caughtUp, "seen 30 minutes ago": stale} {
-		if choice, found, reason := chooseResetCredit(readings, spent, now, resetRules{whenPoolOut: true}); !found || choice.credit.ID != "one-credit-a" {
-			t.Fatalf("%s: chose %q (found %t, %s); want one's credit", name, choice.credit.ID, found, reason)
+	for name, test := range map[string]struct {
+		sample AllowanceSample
+		shows  bool
+	}{
+		"the week from before the spend":                 {reading(askedAt.Add(2*24*time.Hour), 100), false},
+		"the same week, its end a second earlier":        {reading(askedAt.Add(2*24*time.Hour-time.Second), 100), false},
+		"a week not started, a full week from the read":  {reading(askedAt.Add(5*time.Second+week), 0), true},
+		"a week started at the first request after":      {reading(askedAt.Add(3*time.Minute+week), 4), true},
+		"a week started then, its end two seconds early": {reading(askedAt.Add(week-2*time.Second), 1), true},
+		"no allowance windows":                           {AllowanceSample{}, true},
+	} {
+		if shows := readingShowsReset(test.sample, askedAt); shows != test.shows {
+			t.Errorf("%s: shows the reset %t; want %t", name, shows, test.shows)
 		}
 	}
 }
@@ -131,7 +128,7 @@ func TestExpiringCreditsAreSpentEarliestFirst(t *testing.T) {
 		resetTestReading("two", "account-2", 80, now.Add(week/2), now, 10*time.Minute),
 	}
 	for range 2 {
-		choice, found, _ := chooseResetCredit(readings, spentResetCredit{}, now, resetRules{beforeExpiry: true})
+		choice, found, _ := chooseResetCredit(readings, now, resetRules{beforeExpiry: true})
 		if !found || choice.credit.ID != "two-credit-a" {
 			t.Fatalf("chose %q; want the credit that expires first", choice.credit.ID)
 		}

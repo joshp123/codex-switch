@@ -76,7 +76,7 @@ func main() {
 		log.Fatal(err)
 	}
 	providers := &providers{controlPath: *controlPath, aliases: aliases, requestsDirectory: *requestsDirectory,
-		redeemedBy: map[string]string{}, resetAccounts: map[string]bool{}}
+		redeemedBy: map[string]string{}, resetAccounts: map[string]bool{}, resetAnswers: map[string]string{}}
 	if _, err := providers.readControls(); err != nil {
 		log.Fatal(err)
 	}
@@ -154,10 +154,11 @@ type providers struct {
 	// response ID: Codex sends only the new items with previous_response_id.
 	conversations sync.Map
 	// Reset credits, as OpenAI keeps them: the request that redeemed each
-	// credit, and each account a credit has reset.
+	// credit, each account a credit has reset, and the answer to each request ID.
 	resetMu       sync.Mutex
 	redeemedBy    map[string]string
 	resetAccounts map[string]bool
+	resetAnswers  map[string]string
 }
 
 // controls is one reading of the simulation file:
@@ -171,6 +172,9 @@ type providers struct {
 //	hold-responses CLIENT           model responses for CLIENT (its Originator header) pause once started
 //	break-responses                 model requests receive a malformed HTTP response
 //	provider-error                  model requests receive a provider HTTP error
+//	token-quoting-error             Codex model and model-list requests receive a provider HTTP error quoting the request's
+//	                                access token where the proxy shortens what it logs: after 260 bytes of a model
+//	                                request's reason, and across the 4096 bytes it reads of any other body
 //	usage-error                     usage reads receive a provider HTTP error
 //	hold-usage-reads                usage reads wait, unanswered
 //	claude-throttle COUNT           the next COUNT Claude model requests receive a 429 that names no usage limit
@@ -178,7 +182,7 @@ type providers struct {
 //	websocket-age-limit             the next idle Codex WebSocket gets OpenAI's one-hour limit error and closes, once
 //	credit account-N ID UNIX        the account holds reset credit ID, which expires at UNIX seconds
 //	reset-soon                      a limited account-2 refills five minutes from each read
-//	reset-drop                      the first request to spend a credit spends it, but its reply is lost
+//	reset-drop                      requests to spend a credit are answered as usual, but the replies are lost
 //	reset-refuse                    requests to spend a credit receive a provider HTTP error
 //	hold-resets                     requests to spend a credit wait, unanswered and not yet applied
 //	usage-lag                       usage reads report each account as it was before a credit reset it
@@ -186,7 +190,10 @@ type providers struct {
 //
 // A credit is spent as OpenAI spends one: once, for one redeem_request_id; a
 // repeat of that request is already_redeemed, and any other request for it, or
-// for a credit expired or never held, is no_credit. An account that has used
+// for a credit expired or never held, is no_credit. A redeem_request_id names
+// one attempt, as Codex's own client treats it: a repeat gets the attempt's
+// answer, so a repeat of an attempt that found nothing to reset finds nothing
+// again. An account that has used
 // under 20% of its week has nothing_to_reset and keeps the credit: OpenAI
 // documents no such level, so this fake picks one to make the answer happen. A
 // spent credit resets its account at once: nothing used, and a week that has
@@ -206,6 +213,7 @@ type controls struct {
 	holdResponses  map[string]bool
 	breakResponses bool
 	providerError  bool
+	quoteToken     bool
 	usageError     bool
 	holdUsageReads bool
 	claudeThrottle bool
@@ -261,6 +269,8 @@ func (providers *providers) readControls() (controls, error) {
 			parsed.breakResponses = true
 		case len(fields) == 1 && fields[0] == "provider-error":
 			parsed.providerError = true
+		case len(fields) == 1 && fields[0] == "token-quoting-error":
+			parsed.quoteToken = true
 		case len(fields) == 1 && fields[0] == "usage-error":
 			parsed.usageError = true
 		case len(fields) == 1 && fields[0] == "hold-usage-reads":
@@ -326,6 +336,14 @@ func (providers *providers) ServeHTTP(writer http.ResponseWriter, request *http.
 	alias := providers.alias(request)
 	webSocket := request.URL.Path == responsesPath && strings.EqualFold(request.Header.Get("Upgrade"), "websocket")
 	switch {
+	case controls.quoteToken && (request.URL.Path == modelsPath || request.URL.Path == responsesPath):
+		providers.logRequest("token-quoting-error", request, http.StatusServiceUnavailable)
+		token := strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer ")
+		body := fmt.Appendf(nil, `{"error":{"type":"invalid_request_error","message":"%s Rejected Bearer %s"}}`, strings.Repeat("x", 260), token)
+		if request.URL.Path == modelsPath {
+			body = fmt.Appendf(nil, "%sRejected Bearer %s", strings.Repeat(" ", 4096-len("Rejected Bearer ")-40), token)
+		}
+		writeJSON(writer, http.StatusServiceUnavailable, body)
 	case request.URL.Path == modelsPath:
 		writeJSON(writer, http.StatusOK, codexModels)
 	case request.URL.Path == accountsCheckPath:
@@ -445,26 +463,32 @@ func (providers *providers) spendResetCredit(writer http.ResponseWriter, request
 	}
 	used, _ := openAIUsage(controls, alias, providers.accountReset(alias), 0)
 	providers.resetMu.Lock()
-	code := "no_credit"
-	for _, credit := range controls.credits[alias] {
-		if credit.id != claim.CreditID || claim.RequestID == "" {
-			continue
-		}
-		switch status := providers.creditStatus(credit); {
-		case status == "redeemed" && providers.redeemedBy[credit.id] == claim.RequestID:
-			code = "already_redeemed"
-		case status != "available":
-		case used < 20:
-			code = "nothing_to_reset"
-		default:
-			providers.redeemedBy[credit.id] = claim.RequestID
-			providers.resetAccounts[alias] = true
+	code, answered := providers.resetAnswers[claim.RequestID]
+	switch {
+	case answered && code == "reset":
+		code = "already_redeemed"
+	case answered:
+	default:
+		code = "no_credit"
+		for _, credit := range controls.credits[alias] {
+			if credit.id != claim.CreditID || claim.RequestID == "" || providers.creditStatus(credit) != "available" {
+				continue
+			}
 			code = "reset"
+			if used < 20 {
+				code = "nothing_to_reset"
+			} else {
+				providers.redeemedBy[credit.id] = claim.RequestID
+				providers.resetAccounts[alias] = true
+			}
+		}
+		if claim.RequestID != "" {
+			providers.resetAnswers[claim.RequestID] = code
 		}
 	}
 	providers.resetMu.Unlock()
 	log.Printf("event=reset-%s account=%s credit=%s request=%s", strings.ReplaceAll(code, "_", "-"), alias, claim.CreditID, claim.RequestID)
-	if code == "reset" && controls.resetDrop {
+	if controls.resetDrop {
 		if connection, _, err := writer.(http.Hijacker).Hijack(); err == nil {
 			_ = connection.Close()
 		}

@@ -170,7 +170,7 @@ def run_group(name):
         if name == "resets":
             system.extra = ["claude-grant"]
         # The proxy reads credits every five minutes, so the credits these groups test are there from the start.
-        if name in ("resets", "reset-rollback", "auto-reset", "lagging-reset"):
+        if name in ("resets", "auto-reset", "cold-reset", "authority-off", "authority-rollback"):
             system.credits = reset_credits()
         if name == "routing":
             system.credits = [f'credit account-1 routing-credit {int(time.time()) + 20 * DAY}']
@@ -1219,8 +1219,10 @@ def lose_a_reset_and_retry(system, lost_by, retried_by):
     lost = reset_command(lost_by, 'reset', 'codex')
     if lost.returncode == 0 or 'outcome unknown' not in lost.stderr:
         raise Failure(f'{BUILD_DESCRIPTIONS[lost_by]} losing a reset reply: {lost.stdout} {lost.stderr}')
+    system.extra = []
+    system.apply()
     retry = reset_command(retried_by, 'reset', 'codex')
-    if retry.returncode or 'already redeemed' not in retry.stdout:
+    if retry.returncode or 'spent, by an earlier try of this request' not in retry.stdout:
         raise Failure(f'{BUILD_DESCRIPTIONS[retried_by]} retrying the reset {BUILD_DESCRIPTIONS[lost_by].lower()} left pending: {retry.stdout} {retry.stderr}')
     claims = re.findall(r'event=reset-claim account=(\S+) credit=(\S+) request=(\S+)', rig.read('logs/fake-providers.log'))
     if len(claims) != 2 or claims[0] != claims[1] or claims[0][:2] != CHOSEN_CREDIT[lost_by]:
@@ -1274,107 +1276,124 @@ def stored_resets(system):
     return 'Status showed 2 Claude resets; available and near-reset pools spent none. A refused redemption spent nothing once another account could work. This build retried the response the published release lost with the same request ID, and work resumed on that account.'
 
 
-def reset_left_pending_completes_after_rollback(system):
-    """A reset this build leaves pending when the provider drops its reply completes with the published release, as after a rollback"""
-    lose_a_reset_and_retry(system, lost_by='cli', retried_by='published-release')
-    return ('This build spent the credit of the account with the most of its week left, not the credit that expires first, and the provider '
-            'dropped its reply; the published release retried it with the same request ID and finished it.')
+def automatic_resets(on, data=None):
+    """Turns automatic resets on or off for the installation in data, this Mac's by default, as a person does."""
+    result = subprocess.run([str(rig.RUN / 'cli'), 'auto-reset', 'on' if on else 'off'], capture_output=True, text=True, timeout=15,
+                            env=dict(rig.client_environment(), CODEX_SWITCH_DATA_DIR=str(data or rig.RUN / 'data')))
+    if result.returncode:
+        raise Failure(f'codex-switch auto-reset failed: {result.stderr}')
 
 
-def proxy_logs_say(other, text):
-    """Whether both proxies have logged text."""
-    return text in rig.proxy_log() and text in other.proxy_log()
+WAITING_WITHOUT_RESETS = 'Automatic resets are off, so no reset credit is spent for it.'
+READING_LAGS = 'does not show the reset of Codex'
 
 
-def both_ask_for_one_credit(earlier=0):
-    """Waits for both proxies to ask OpenAI, which holds the requests, to spend a credit, after the earlier requests it
-    has seen, and checks that they asked for the same credit with the same request ID."""
-    held = rig.wait_for(lambda: (claims[earlier:] if len(claims := rig.fake_provider_events('reset-claim')) >= earlier + 2 else None),
-                        'both proxies to ask to spend a credit')
-    asked = {(claim['account'], claim['credit'], claim['request']) for claim in held}
-    if len(asked) != 1:
-        raise Failure(f'From the same accounts, the two proxies asked for different credits or request IDs: {sorted(asked)}.')
+def spends():
+    """(account, credit) for every credit OpenAI spent."""
+    return [(event['account'], event['credit']) for event in rig.fake_provider_events('reset-reset')]
 
 
-def pool_out_spends_one_credit_on_two_macs(system):
-    """With every Codex account out and work waiting on two Macs, the proxies spend no credit while an account refills
-    within 30 minutes, then one credit between them, on the account with the most of its week left, and work resumes on both"""
+def wait_until_every_account_reads_limited(*others):
+    limited = 'OpenAI reports its usage limit reached'
+    rig.wait_for(lambda: rig.proxy_log().count(limited) >= 3 and all(other.proxy_log().count(limited) >= 3 for other in others),
+                 'every proxy to read every account as limited')
+
+
+def resumed_on_the_reset_account(here, there=None, other=None):
+    here.finish()
+    if there:
+        there.finish()
+    resumed = (rig.pinned_account(here.thread), other.pinned_account_key(there.thread) if there else rig.account_key('account-3'))
+    if resumed != ('account-3', rig.account_key('account-3')):
+        raise Failure(f'Work resumed on {resumed}, not on the reset account.')
+
+
+def only_the_authority_spends_one_credit(system):
+    """With every Codex account out and work waiting on two Macs, only the Mac with automatic resets on spends a credit.
+    It spends none while an account refills within 30 minutes, then one, on the account with the most of its week left,
+    and no other while OpenAI's usage reading lags behind the spend; nor does the reset command. Work on both Macs
+    resumes once the reading catches up"""
     status = rig.proxy_command('status')
-    if status.count('reset credits: 1') != 3:
-        raise Failure(f'Status did not show each Codex account\'s reset credit:\n{status}')
+    if status.count('reset credits: 1') != 3 or 'Automatic resets: off' not in status:
+        raise Failure(f'Status did not show each Codex account\'s reset credit and automatic resets off:\n{status}')
+    automatic_resets(True)
+    if 'Automatic resets: on' not in (status := rig.proxy_command('status')):
+        raise Failure(f'After `codex-switch auto-reset on`, status showed:\n{status}')
     other = rig.OtherMac()
     system.limited = set(system.accounts)
     system.extra = ['reset-soon']  # account-2 refills five minutes from each read
     system.apply()
-    limited = 'OpenAI reports its usage limit reached'
-    rig.wait_for(lambda: rig.proxy_log().count(limited) >= 3 and other.proxy_log().count(limited) >= 3, 'both proxies to read every account as limited')
+    wait_until_every_account_reads_limited(other)
     here = rig.CodexTask('waiting-here', 'Reply with the word here.')
     there = other.codex_task('waiting-there', 'Reply with the word there.')
-    rig.wait_for(lambda: proxy_logs_say(other, 'within 30 minutes.'), 'both proxies to keep their credits while an account refills within 30 minutes')
+    rig.wait_for(lambda: 'within 30 minutes.' in rig.proxy_log() and WAITING_WITHOUT_RESETS in other.proxy_log(),
+                 'this Mac to keep its credits while an account refills within 30 minutes, and the other to wait')
     if rig.fake_provider_events('reset-claim'):
-        raise Failure('A proxy spent a credit while an account would refill within 30 minutes.')
-    # OpenAI holds the requests to spend, so both proxies decide from the same accounts.
-    system.extra = ['hold-resets']
+        raise Failure('A proxy asked to spend a credit while an account would refill within 30 minutes.')
+    system.extra = ['usage-lag']
     system.apply()
-    both_ask_for_one_credit()
+    rig.wait_for(lambda: len(spends()) > 1 or (spends() and READING_LAGS in rig.proxy_log()),
+                 'this Mac to spend a credit, then wait for OpenAI\'s reading to show it')
+    reset = reset_command('cli', 'reset', 'codex')
+    if reset.returncode or READING_LAGS not in reset.stdout:
+        raise Failure(f'The reset command, with the reading lagging: {reset.stdout} {reset.stderr}')
+    claims = rig.fake_provider_events('reset-claim')
+    if spends() != [CHOSEN_CREDIT['cli']] or len(claims) != 1:
+        raise Failure(f'Expected one request, spending {CHOSEN_CREDIT["cli"][1]}; OpenAI saw {claims} and spent {spends()}.')
+    if 'Reset credit' in other.proxy_log():
+        raise Failure('The Mac with automatic resets off decided about a credit.')
     system.extra = []
     system.apply()
-    here.finish()
-    there.finish()
+    resumed_on_the_reset_account(here, there, other)
     system.record_codex_task('work waiting on this Mac', here.thread)
-    spent = [(event['account'], event['credit'], event['request']) for event in rig.fake_provider_events('reset-reset')]
-    claims = [(event['account'], event['credit'], event['request']) for event in rig.fake_provider_events('reset-claim')]
-    if len(spent) != 1 or spent[0][:2] != CHOSEN_CREDIT['cli']:
-        raise Failure(f'Expected one credit spent, {CHOSEN_CREDIT["cli"][1]}; OpenAI spent {spent} from the requests {claims}.')
-    if set(claims) != set(spent):
-        raise Failure(f'A proxy asked for another credit, or for the same credit with another request ID: {claims}.')
-    key = rig.account_key('account-3')
-    resumed = (rig.pinned_account(here.thread), other.pinned_account_key(there.thread))
-    if resumed != ('account-3', key):
-        raise Failure(f'Work resumed on {resumed}, not on the reset account on both Macs.')
-    by = [name for name, log in (('this Mac', rig.proxy_log()), ('the other Mac', other.proxy_log())) if 'credit-account-3 on Codex' in log and ' spent. ' in log]
-    return (f'While account-2 would refill within 30 minutes, neither proxy spent a credit. Then both asked OpenAI, from the same accounts, for '
-            f'credit-account-3 with one request ID: the credit of the account that refills last, not account-2\'s, which expires first. '
-            f'OpenAI spent it once, for {" and ".join(by)}; once it had, neither proxy asked for another, and the work waiting on both Macs '
-            f'finished on that account.')
+    said = next(line for line in rig.proxy_log().splitlines() if READING_LAGS in line)
+    return (f'While account-2 would refill within 30 minutes, this Mac kept its credits and the other Mac, with automatic resets '
+            f'off, logged that its work waits. Then this Mac alone asked OpenAI once, for {CHOSEN_CREDIT["cli"][1]}, the credit '
+            f'of the account that refills last. While the reading still showed account-3 at its limit, it and the reset command '
+            f'spent nothing more; it logged:\n{said.split(" ", 1)[1]}\nOnce the reading caught up, the work on both Macs finished on account-3.')
 
 
-def lagging_usage_spends_one_credit(system):
-    """With every Codex account out, work waiting on two Macs, and OpenAI's usage reading still showing the reset
-    account at its limit after a credit is spent, neither proxy nor the reset command spends a second credit, and
-    the work on both resumes once the reading catches up"""
-    other = rig.OtherMac()
+def a_mac_started_after_a_spend_spends_nothing(system):
+    """A Mac with automatic resets off that starts after the other Mac spent a credit, while OpenAI's usage reading
+    still shows every account out and work waits on it, spends none"""
+    automatic_resets(True)
     system.limited = set(system.accounts)
     system.extra = ['usage-lag']
     system.apply()
-    limited = 'OpenAI reports its usage limit reached'
-    rig.wait_for(lambda: rig.proxy_log().count(limited) >= 3 and other.proxy_log().count(limited) >= 3, 'both proxies to read every account as limited')
+    wait_until_every_account_reads_limited()
     here = rig.CodexTask('waiting-here', 'Reply with the word here.')
+    rig.wait_for(lambda: len(spends()) > 1 or (spends() and READING_LAGS in rig.proxy_log()),
+                 'this Mac to spend a credit, then wait for OpenAI\'s reading to show it')
+    other = rig.OtherMac()
     there = other.codex_task('waiting-there', 'Reply with the word there.')
-    backing_off = 'does not show the reset yet'
-    rig.wait_for(lambda: len(rig.fake_provider_events('reset-reset')) >= 2 or proxy_logs_say(other, backing_off),
-                 'a second credit to be spent, or both proxies to see the first spent and wait for its reading')
-    reset = reset_command('cli', 'reset', 'codex')
-    spent = [(event['account'], event['credit']) for event in rig.fake_provider_events('reset-reset')]
-    if len(spent) != 1:
-        raise Failure(f'With usage lagging behind the first spend, OpenAI spent {spent}.')
-    if reset.returncode or backing_off not in reset.stdout:
-        raise Failure(f'The reset command, with usage still lagging: {reset.stdout} {reset.stderr}')
+    rig.wait_for(lambda: WAITING_WITHOUT_RESETS in other.proxy_log(), 'the Mac started afterwards to have work waiting')
+    if len(rig.fake_provider_events('reset-claim')) != 1 or spends() != [CHOSEN_CREDIT['cli']]:
+        raise Failure(f'Expected one spend, of {CHOSEN_CREDIT["cli"][1]}; OpenAI saw {rig.fake_provider_events("reset-claim")}.')
     system.extra = []
     system.apply()
-    here.finish()
-    there.finish()
+    resumed_on_the_reset_account(here, there, other)
     system.record_codex_task('work waiting on this Mac', here.thread)
-    spent = [(event['account'], event['credit']) for event in rig.fake_provider_events('reset-reset')]
-    if spent != [CHOSEN_CREDIT['cli']]:
-        raise Failure(f'Expected one credit spent, {CHOSEN_CREDIT["cli"][1]}; OpenAI spent {spent}.')
-    resumed = (rig.pinned_account(here.thread), other.pinned_account_key(there.thread))
-    if resumed != ('account-3', rig.account_key('account-3')):
-        raise Failure(f'Work resumed on {resumed}, not on the reset account on both Macs.')
-    said = next(line for line in rig.proxy_log().splitlines() if backing_off in line)
-    return (f'OpenAI spent {CHOSEN_CREDIT["cli"][1]} once. While its usage reading still showed account-3 at its limit, both proxies '
-            f'and the reset command spent nothing more; this proxy logged:\n{said.split(" ", 1)[1]}\n'
-            f'Once the reading caught up, the work waiting on both Macs finished on account-3.')
+    return (f'This Mac spent {CHOSEN_CREDIT["cli"][1]}. A second Mac started afterwards, read every account still out, and '
+            f'with work waiting logged "{WAITING_WITHOUT_RESETS}" OpenAI saw one request to spend a credit; once its reading '
+            f'caught up, the work on both Macs finished on account-3.')
+
+
+def no_credit_is_spent_while_the_authority_is_off(system):
+    """While the Mac with automatic resets on is off, no credit is spent: work waits with every Codex account out, and
+    resumes when one refills"""
+    system.limited = set(system.accounts)
+    system.apply()
+    wait_until_every_account_reads_limited()
+    task = rig.CodexTask('waiting-for-a-refill', 'Reply with the word refilled.')
+    rig.wait_for(lambda: WAITING_WITHOUT_RESETS in rig.proxy_log(), 'the proxy to have work waiting')
+    system.limited.discard('account-1')
+    system.apply()
+    task.finish()
+    system.record_codex_task('work waiting for a refill', task.thread)
+    if rig.fake_provider_events('reset-claim') or rig.pinned_account(task.thread) != 'account-1':
+        raise Failure(f'Work finished on {rig.pinned_account(task.thread)}; OpenAI saw requests to spend {rig.fake_provider_events("reset-claim")}.')
+    return (f'With every account out and a credit on each, the proxy, with automatic resets off, logged "{WAITING_WITHOUT_RESETS}" '
+            'and asked OpenAI for none. When account-1 refilled, the work finished there.')
 
 
 def expiring_credits():
@@ -1383,37 +1402,116 @@ def expiring_credits():
     return [f'credit account-1 expiring-first {now + 1800}', f'credit account-1 expiring-second {now + 2400}']
 
 
-def expiring_credit_is_spent_once_on_two_macs(system):
-    """A credit in its last hour is kept while its account has used no more of its week than the share of the week that
-    has passed, or OpenAI finds nothing to reset, and is otherwise spent once between two Macs"""
+def expiring_credit_is_spent_once_by_the_authority(system):
+    """Of two Macs, only the one with automatic resets on spends a credit in its last hour. It keeps the credit while
+    its account has used no more of its week than the share of the week that has passed, or when OpenAI finds nothing
+    to reset; a later attempt, under a new request ID, spends it once"""
+    automatic_resets(True)
     other = rig.OtherMac()
     nothing = 'not spent, because OpenAI found nothing to reset'
-    rig.wait_for(lambda: proxy_logs_say(other, nothing), 'both proxies to ask OpenAI to spend the credit, and keep it when it finds nothing to reset')
+    rig.wait_for(lambda: nothing in rig.proxy_log(), 'this Mac to ask OpenAI to spend the credit, and keep it when it finds nothing to reset')
     system.weekly['account-1'], system.resets['account-1'] = 40, int(time.time() + 3.5 * DAY)
     system.apply()
-    rig.wait_for(lambda: proxy_logs_say(other, 'has used 40% of its week, no more than the 50% of the week that has passed'),
-                 'both proxies to keep the credit of an account behind its week')
-    if rig.fake_provider_events('reset-reset'):
-        raise Failure('A proxy spent a credit OpenAI found nothing to reset with, or one that gains less than it loses.')
-    # OpenAI holds the requests to spend, so both proxies decide from the same accounts.
-    asked_before = len(rig.fake_provider_events('reset-claim'))
-    system.weekly['account-1'], system.extra = 60, ['hold-resets']
+    rig.wait_for(lambda: 'has used 40% of its week, no more than the 50% of the week that has passed' in rig.proxy_log(),
+                 'this Mac to keep the credit of an account behind its week')
+    if spends():
+        raise Failure('A credit OpenAI found nothing to reset with, or one that gains less than it loses, was spent.')
+    system.weekly['account-1'] = 60
     system.apply()
-    both_ask_for_one_credit(asked_before)
+    # Once the first credit is spent the account has used nothing, so the second is kept.
+    rig.wait_for(lambda: 'Keeping reset credit expiring-second' in rig.proxy_log() and 'has used 0% of its week' in rig.proxy_log(),
+                 'this Mac to spend the first credit, then keep the second')
+    claims = rig.fake_provider_events('reset-claim')
+    if spends() != [('account-1', 'expiring-first')] or len({claim['request'] for claim in claims}) != len(claims):
+        raise Failure(f'Expected one spend of expiring-first, each request under its own ID; OpenAI saw {claims} and spent {spends()}.')
+    if 'Reset credit' in other.proxy_log() or 'Keeping reset credit' in other.proxy_log() or 'Automatic resets are off' not in other.proxy_log():
+        raise Failure('The Mac with automatic resets off decided about a credit.')
+    return (f'At 15% used with a fifteenth of the week gone, this Mac asked OpenAI to spend the expiring credit; it found nothing '
+            f'to reset, and the credit was kept. At 40% used with half the week gone, it kept the credit without asking. At 60% '
+            f'it asked again under a new request ID and OpenAI spent it, once; the account\'s second credit was then kept. '
+            f'Each of the {len(claims)} requests had its own ID; the other Mac, with automatic resets off, decided nothing.')
+
+
+def rollback_and_back_spends_no_second_credit(system):
+    """Rolling the Mac with automatic resets on back to the published release and forward again, while a spend's
+    outcome is unknown and OpenAI's usage reading lags, spends no second credit: the published release's reset command
+    finishes the pending reset, and work resumes on the reset account once the reading catches up"""
+    automatic_resets(True)
+    published_build = int(subprocess.check_output([str(rig.RUN / 'codex-switch'), 'print-build'], text=True))
+    # An update waits for model work.
+    system.record_codex_task('work before the update', rig.CodexTask('authority-before-update', 'Reply with the word before.').finish().thread)
+    old = rig.deploy_status()['pid']
+    update = start_installer('candidate', 'authority-update')
+    wait_for_candidate(old)
+    system.record_codex_task('proof of the update', rig.CodexTask('authority-update-proof', 'Reply with the word updated.').finish().thread)
+    if update.wait(timeout=120):
+        raise Failure(f'The update failed: {rig.read("logs/authority-update.err")[-400:]}')
+    # OpenAI spends the credit, but every reply to a request to spend one is lost.
+    system.limited = set(system.accounts)
+    system.extra = ['usage-lag', 'reset-drop']
+    system.apply()
+    wait_until_every_account_reads_limited()
+    waiting = rig.CodexTask('waiting-before-rollback', 'Reply with the word lost.')
+    rig.wait_for(lambda: len(rig.fake_provider_events('reset-claim')) >= 2 and 'outcome unknown' in rig.proxy_log(),
+                 'the updated build to spend a credit, lose the reply, and retry')
+    rig.stop_process_group(waiting.process)
+    rollback = rig.start_client([str(rig.REPO / 'deploy/deploy.sh'), 'back'], 'authority-rollback', env=installer_environment())
+    if rollback.wait(timeout=120):
+        raise Failure(f'deploy.sh back failed: {rig.read("logs/authority-rollback.err")[-400:]}')
+    if int(rig.deploy_status()['build']) != published_build:
+        raise Failure(f'After deploy.sh back, build {rig.deploy_status()["build"]} serves, not the published build {published_build}.')
+    system.extra = ['usage-lag']
+    system.apply()
+    finished = reset_command('published-release', 'reset', 'codex')
+    if finished.returncode or (rig.RUN / 'data/pending-reset.json').exists():
+        raise Failure(f'The published release did not finish the pending reset: {finished.stdout} {finished.stderr}')
+    # Work on account-1 lets the next update start and the updated build prove itself; then every account is out again
+    # while the reading still lags.
+    system.limited = set(system.accounts) - {'account-1'}
+    system.apply()
+    system.record_codex_task('work after the rollback', rig.CodexTask('authority-after-rollback', 'Reply with the word back.').finish().thread)
+    old = rig.deploy_status()['pid']
+    update = start_installer('candidate-2', 'authority-update-again')
+    wait_for_candidate(old)
+    system.record_codex_task('proof of the second update', rig.CodexTask('authority-update-again-proof', 'Reply with the word again.').finish().thread)
+    if update.wait(timeout=120):
+        raise Failure(f'The second update failed: {rig.read("logs/authority-update-again.err")[-400:]}')
+    reads = len(rig.fake_provider_events('usage-read', account='account-1'))
+    system.limited = set(system.accounts)
+    system.apply()
+    rig.wait_for(lambda: len(rig.fake_provider_events('usage-read', account='account-1')) >= reads + 2, 'the updated build to read account-1 as limited')
+    here = rig.CodexTask('waiting-after-update', 'Reply with the word here.')
+    rig.wait_for(lambda: len(spends()) > 1 or READING_LAGS in rig.proxy_log(), 'the updated build to wait for OpenAI\'s reading to show the spend')
+    if spends() != [CHOSEN_CREDIT['cli']]:
+        raise Failure(f'Expected one spend, of {CHOSEN_CREDIT["cli"][1]}; OpenAI spent {spends()}.')
     system.extra = []
     system.apply()
-    # Once the first credit is spent the account has used nothing, so both proxies keep the second.
-    rig.wait_for(lambda: proxy_logs_say(other, 'Keeping reset credit expiring-second') and 'has used 0% of its week' in rig.proxy_log()
-                 and 'has used 0% of its week' in other.proxy_log(), 'both proxies to see the reset account and keep its second credit')
-    spent = [(event['account'], event['credit'], event['request']) for event in rig.fake_provider_events('reset-reset')]
-    claims = [(event['account'], event['credit'], event['request']) for event in rig.fake_provider_events('reset-claim')]
-    if len(spent) != 1 or spent[0][:2] != ('account-1', 'expiring-first') or set(claims) != set(spent):
-        raise Failure(f'Expected one spend of expiring-first; OpenAI spent {spent} from the requests {claims}.')
-    by = [name for name, log in (('this Mac', rig.proxy_log()), ('the other Mac', other.proxy_log())) if 'expiring-first on Codex' in log and ' spent. ' in log]
-    return (f'At 15% used with a fifteenth of the week gone, both proxies asked OpenAI to spend the expiring credit; it found nothing to '
-            f'reset, and the credit was kept. At 40% used with half the week gone, both kept it without asking. At 60% used both '
-            f'asked OpenAI to spend it, with one request ID, and OpenAI spent it once, for {" and ".join(by)}. Both then kept the '
-            f'account\'s second credit, as it had used nothing.')
+    resumed_on_the_reset_account(here)
+    system.record_codex_task('work waiting after the rollback and update', here.thread)
+    said = next(line for line in reversed(rig.proxy_log().splitlines()) if READING_LAGS in line)
+    return (f'The updated build spent {CHOSEN_CREDIT["cli"][1]} and lost the reply. After deploy.sh back, the published release '
+            f'spent nothing by itself, and its reset command finished the pending reset: "{finished.stdout.strip()}" After the '
+            f'next update the build logged:\n{said.split(" ", 1)[1]}\nOpenAI spent one credit; the work finished on account-3 once the reading caught up.')
+
+
+def no_part_of_a_token_reaches_the_log(system):
+    """When OpenAI's reason for refusing a request quotes the request's access token where the proxy shortens what it
+    logs, the proxy log holds no part of the token"""
+    with simulating(system, 'token-quoting-error'):
+        try:
+            rig.post_without_task_id(system.base, 'Reply with the word refused.')
+        except urllib.error.HTTPError as refused:
+            refused.read()
+        try:
+            urllib.request.urlopen(f'{system.base}/models?client_version=1.0.0', timeout=30).read()
+        except urllib.error.HTTPError as refused:
+            refused.read()
+        quoted = rig.wait_for(lambda: [line for line in rig.proxy_log().splitlines() if 'with HTTP 503' in line and 'Rejected Bearer' in line]
+                              if len(rig.fake_provider_events('token-quoting-error')) >= 2 else None, 'the proxy to log both refusals')
+    tokens = [json.loads((rig.RUN / 'data' / account / 'auth.json').read_text())['tokens']['access_token'] for account in rig.CODEX_ACCOUNTS]
+    if len(quoted) < 2 or any('Bearer ' + token[:3] in rig.proxy_log() for token in tokens):
+        raise Failure('The proxy logged a token, or part of one:\n' + '\n'.join(quoted))
+    return 'OpenAI quoted the access token across the 300 bytes of a reason the log keeps, and across the 4096 bytes the proxy reads of another body. The proxy logged:\n' + '\n'.join(line.split(' ', 1)[1] for line in quoted)
 
 
 # Each group shares one isolated system and runs at once with every other group. The first update and the rollback
@@ -1424,10 +1522,12 @@ GROUPS = [
     ('keyless-update', 'keyless-release', [update_keys_the_records_a_keyless_release_wrote]),
     ('rollback', 'published-release', [rollback_keeps_tasks_on_their_accounts, update_after_rollback_keeps_a_task_the_published_release_moved]),
     ('resets', 'cli', [stored_resets]),
-    ('reset-rollback', 'cli', [reset_left_pending_completes_after_rollback]),
-    ('auto-reset', 'cli', [pool_out_spends_one_credit_on_two_macs]),
-    ('lagging-reset', 'cli', [lagging_usage_spends_one_credit]),
-    ('expiry-reset', 'cli', [expiring_credit_is_spent_once_on_two_macs]),
+    ('auto-reset', 'cli', [only_the_authority_spends_one_credit]),
+    ('cold-reset', 'cli', [a_mac_started_after_a_spend_spends_nothing]),
+    ('authority-off', 'cli', [no_credit_is_spent_while_the_authority_is_off]),
+    ('expiry-reset', 'cli', [expiring_credit_is_spent_once_by_the_authority]),
+    ('authority-rollback', 'published-release', [rollback_and_back_spends_no_second_credit]),
+    ('secrets', 'cli', [no_part_of_a_token_reaches_the_log]),
     ('routing', 'cli', [t3_reads_the_account_pool, new_work_goes_to_the_allowance_that_resets_first, request_without_task_id_is_served]),
     ('exhaustion', 'cli', [exhausted_task_moves_on_its_next_turn]),
     ('outage-goal', 'cli', [goal_continues_when_an_account_returns]),

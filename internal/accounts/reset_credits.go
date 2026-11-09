@@ -19,9 +19,10 @@ import (
 )
 
 // A reset credit restores an account's weekly allowance, and OpenAI starts
-// the new week at the account's first request afterwards. The proxy spends a
-// credit only when the pool is out or the credit is about to expire; see
-// chooseResetCredit.
+// the new week at the account's first request afterwards. A credit is spent
+// only when the pool is out or the credit is about to expire; see
+// chooseResetCredit. Only the installation with automatic resets on spends one
+// by itself; see automatic_resets.go.
 const (
 	// poolRefillWait is how long work waits for an account to refill by itself
 	// before a credit is worth spending.
@@ -32,12 +33,15 @@ const (
 )
 
 // ResetDecision is what a reset request did, in words for the person or the
-// proxy log. Spent is true only when this request spent a credit.
+// proxy log. Spent is true when OpenAI confirmed that a credit this
+// installation asked for was spent.
 type ResetDecision struct {
 	Message string
 	Spent   bool
 }
 
+// ResetCredit is a credit as OpenAI lists it. OpenAI may list a credit
+// without an expiry, which never expires: its ExpiresAt is zero.
 type ResetCredit struct {
 	ID        string    `json:"id"`
 	Status    string    `json:"status"`
@@ -47,20 +51,55 @@ type ResetCredit struct {
 
 // usable reports whether the credit can reset a Codex allowance at now.
 func (credit ResetCredit) usable(now time.Time) bool {
-	return credit.ID != "" && credit.Status == "available" && credit.ResetType == "codex_rate_limits" && credit.ExpiresAt.After(now)
+	return credit.ID != "" && credit.Status == "available" && credit.ResetType == "codex_rate_limits" && (credit.neverExpires() || credit.ExpiresAt.After(now))
 }
 
-// pendingReset is a reset whose reply was lost, kept in this Mac's data
-// directory until a retry learns its outcome, so the folder names its login.
-// Every build reads and writes it under these JSON names, so a build after an
-// update or a rollback finishes a reset another build began.
+func (credit ResetCredit) neverExpires() bool {
+	return credit.ExpiresAt.IsZero()
+}
+
+// expiresBefore orders credits by expiry, those that never expire last, then
+// by ID.
+func (credit ResetCredit) expiresBefore(other ResetCredit) bool {
+	if !credit.ExpiresAt.Equal(other.ExpiresAt) {
+		return other.neverExpires() || (!credit.neverExpires() && credit.ExpiresAt.Before(other.ExpiresAt))
+	}
+	return credit.ID < other.ID
+}
+
+func (credit ResetCredit) describeExpiry() string {
+	if credit.neverExpires() {
+		return "which never expires"
+	}
+	return "which expires at " + logtime.Format(credit.ExpiresAt)
+}
+
+// pendingReset is a request to spend a credit whose outcome is not known yet,
+// kept in this Mac's data directory until a retry learns it, so the folder
+// names its login. Every build reads and writes it under these JSON names, so
+// a build after an update or a rollback finishes a reset another build began.
+//
+// RequestID is the attempt's redeem_request_id: a new attempt gets a new one,
+// and a retry of the attempt sends it again, so OpenAI answers the retry with
+// the attempt's outcome. A file without one was written by a build that
+// derived the ID from the account and credit; a retry sends that ID. A build
+// that ignores RequestID retries with the derived ID, which OpenAI answers as
+// another request for the same credit: it cannot spend a second one.
 type pendingReset struct {
 	Folder    string `json:"AccountName"`
 	AccountID string
 	CreditID  string
+	RequestID string `json:",omitempty"`
 }
 
 var resetNamespace = uuid.MustParse("6f1c2a9e-2d4b-4c1e-9a7f-3b8d5e0c1a42")
+
+func (pending pendingReset) requestID() string {
+	if pending.RequestID != "" {
+		return pending.RequestID
+	}
+	return uuid.NewSHA1(resetNamespace, []byte(pending.AccountID+":"+pending.CreditID)).String()
+}
 
 // resetRules says which needs may spend a credit. The reset command spends
 // only for an exhausted pool; the proxy also spends a credit about to expire,
@@ -87,24 +126,21 @@ type resetChoice struct {
 
 // chooseResetCredit is the one rule for spending a credit. Its choice depends
 // only on what OpenAI reports, never on this Mac's folders or the order it
-// reads accounts in, so two Macs that read the same accounts choose the same
-// credit and send the same request, which OpenAI applies once.
+// reads accounts in.
 //
 // The pool is out when no Codex account can take work and none refills within
-// 30 minutes. A credit seen spent in the last 30 minutes whose account's
-// reading does not show the reset yet already refills the pool. Otherwise the
-// credit goes to the account with the most of its week left, the one that
-// would refill last, using its credit that expires first.
+// 30 minutes. The credit then goes to the account with the most of its week
+// left, the one that would refill last, using its credit that expires first.
 //
 // A credit in its last hour is spent when its account has used more of its
 // week than the share of the week that has passed. OpenAI decides whether
 // there is anything to reset: when there is not, it keeps the credit.
 //
 // With no credit to spend it returns why, or "" when no need arose.
-func chooseResetCredit(readings []codexAccountReading, lastSpent spentResetCredit, now time.Time, rules resetRules) (resetChoice, bool, string) {
+func chooseResetCredit(readings []codexAccountReading, now time.Time, rules resetRules) (resetChoice, bool, string) {
 	var reasons []string
 	if rules.whenPoolOut {
-		choice, found, reason := choosePoolOutCredit(readings, lastSpent, now)
+		choice, found, reason := choosePoolOutCredit(readings, now)
 		if found {
 			return choice, true, ""
 		}
@@ -122,7 +158,7 @@ func chooseResetCredit(readings []codexAccountReading, lastSpent spentResetCredi
 	return resetChoice{}, false, strings.Join(reasons, " ")
 }
 
-func choosePoolOutCredit(readings []codexAccountReading, lastSpent spentResetCredit, now time.Time) (resetChoice, bool, string) {
+func choosePoolOutCredit(readings []codexAccountReading, now time.Time) (resetChoice, bool, string) {
 	type candidate struct {
 		reading   codexAccountReading
 		credit    ResetCredit
@@ -149,10 +185,6 @@ func choosePoolOutCredit(readings []codexAccountReading, lastSpent spentResetCre
 		if !refillsAt.After(now.Add(poolRefillWait)) {
 			return resetChoice{}, false, fmt.Sprintf("No reset: %s refills at %s, within 30 minutes.", name, logtime.Format(refillsAt))
 		}
-		if reading.account.Key == lastSpent.AccountKey && refillsAt.Equal(lastSpent.RefillsAt) && now.Sub(lastSpent.SeenAt) < poolRefillWait {
-			return resetChoice{}, false, fmt.Sprintf("No reset: reset credit %s on %s was spent by %s, and OpenAI's usage reading does not show the reset yet.",
-				lastSpent.CreditID, name, logtime.Format(lastSpent.SeenAt))
-		}
 		if credit, found := firstExpiringCredit(reading.credits, now); found {
 			candidates = append(candidates, candidate{reading, credit, refillsAt})
 		}
@@ -170,8 +202,8 @@ func choosePoolOutCredit(readings []codexAccountReading, lastSpent spentResetCre
 		return candidates[i].reading.account.Key < candidates[j].reading.account.Key
 	})
 	chosen := candidates[0]
-	why := fmt.Sprintf("no Codex account can take work and none refills within 30 minutes; %s has the most of its week left, refilling at %s, and this is its credit that expires first, at %s",
-		chosen.reading.account.DisplayName, logtime.Format(chosen.refillsAt), logtime.Format(chosen.credit.ExpiresAt))
+	why := fmt.Sprintf("no Codex account can take work and none refills within 30 minutes; %s has the most of its week left, refilling at %s, and this is its credit that expires first, %s",
+		chosen.reading.account.DisplayName, logtime.Format(chosen.refillsAt), chosen.credit.describeExpiry())
 	return resetChoice{chosen.reading.account, chosen.credit, why}, true, ""
 }
 
@@ -188,7 +220,7 @@ func chooseExpiringCredit(readings []codexAccountReading, now time.Time) (resetC
 		}
 		name := reading.account.DisplayName
 		for _, credit := range reading.credits {
-			if !credit.usable(now) || credit.ExpiresAt.After(now.Add(expiringCreditWindow)) {
+			if !credit.usable(now) || credit.neverExpires() || credit.ExpiresAt.After(now.Add(expiringCreditWindow)) {
 				continue
 			}
 			week, known := currentWeek(reading.allowance, now)
@@ -207,12 +239,7 @@ func chooseExpiringCredit(readings []codexAccountReading, now time.Time) (resetC
 		}
 	}
 	byExpiry := func(list []expiring) {
-		sort.Slice(list, func(i, j int) bool {
-			if !list[i].credit.ExpiresAt.Equal(list[j].credit.ExpiresAt) {
-				return list[i].credit.ExpiresAt.Before(list[j].credit.ExpiresAt)
-			}
-			return list[i].credit.ID < list[j].credit.ID
-		})
+		sort.Slice(list, func(i, j int) bool { return list[i].credit.expiresBefore(list[j].credit) })
 	}
 	if len(spend) > 0 {
 		byExpiry(spend)
@@ -244,7 +271,7 @@ func firstExpiringCredit(credits []ResetCredit, now time.Time) (ResetCredit, boo
 		if !credit.usable(now) {
 			continue
 		}
-		if first.ID == "" || credit.ExpiresAt.Before(first.ExpiresAt) || (credit.ExpiresAt.Equal(first.ExpiresAt) && credit.ID < first.ID) {
+		if first.ID == "" || credit.expiresBefore(first) {
 			first = credit
 		}
 	}
@@ -279,22 +306,43 @@ func ResetCodexPool(ctx context.Context, directory string, origin *url.URL, clie
 }
 
 // spendResetCredit reads every Codex account from OpenAI and spends the credit
-// chooseResetCredit picks under rules. reset.lock keeps the reset command and
-// each proxy generation on this Mac from deciding at once; another Mac decides
-// from the same readings and sends the same request.
+// chooseResetCredit picks under rules. It first finishes a request whose
+// outcome is unknown, and spends nothing while OpenAI's usage reading does not
+// show a reset this installation spent; see unconfirmedReset. reset.lock keeps
+// the reset command and each proxy generation on this Mac from deciding at
+// once.
 func spendResetCredit(ctx context.Context, directory string, origin *url.URL, client *http.Client, rules resetRules) (decision ResetDecision, err error) {
 	err = withFileLock(filepath.Join(directory, "reset.lock"), func() error {
+		unconfirmed, err := readUnconfirmedReset(directory)
+		if err != nil {
+			return err
+		}
 		pendingPath := filepath.Join(directory, "pending-reset.json")
 		if data, readErr := os.ReadFile(pendingPath); readErr == nil {
 			var pending pendingReset
 			if err := json.Unmarshal(data, &pending); err != nil {
 				return fmt.Errorf("read pending reset: %w", err)
 			}
-			unspent, err := pendingCreditUnspent(ctx, directory, origin, client, pending)
+			account, credentials, err := pendingResetAccount(ctx, directory, client, pending)
+			if err != nil {
+				return fmt.Errorf("reset outcome unknown; run the command again to retry: %w", err)
+			}
+			unspent, err := pendingCreditUnspent(ctx, origin, client, credentials, pending)
 			if err != nil {
 				return fmt.Errorf("reset outcome unknown; run the command again to retry: %w", err)
 			}
 			if !unspent {
+				if unconfirmed == nil || unconfirmed.CreditID != pending.CreditID {
+					// Another build began this reset. It wrote the file just before
+					// it asked, so the reset came after the file's time.
+					info, err := os.Stat(pendingPath)
+					if err != nil {
+						return err
+					}
+					if err := writeUnconfirmedReset(directory, unconfirmedReset{account.Key, pending.CreditID, info.ModTime().UTC()}); err != nil {
+						return err
+					}
+				}
 				return completeReset(ctx, directory, origin, client, pendingPath, pending, "it retries a reset whose reply was lost", &decision)
 			}
 			// The lost request never spent the credit, so the pool may no longer
@@ -302,19 +350,34 @@ func spendResetCredit(ctx context.Context, directory string, origin *url.URL, cl
 			if err := os.Remove(pendingPath); err != nil {
 				return err
 			}
+			if unconfirmed != nil && unconfirmed.CreditID == pending.CreditID {
+				if err := removeUnconfirmedReset(directory); err != nil {
+					return err
+				}
+				unconfirmed = nil
+			}
 		} else if !os.IsNotExist(readErr) {
 			return readErr
 		}
-		readings, lastSpent, err := readCodexAccountsForReset(ctx, directory, origin, client)
+		readings, err := readCodexAccountsForReset(ctx, directory, origin, client)
 		if err != nil {
 			return err
 		}
-		choice, found, reason := chooseResetCredit(readings, lastSpent, time.Now(), rules)
+		if unconfirmed != nil {
+			if waiting := unconfirmed.waitingFor(readings, time.Now()); waiting != "" {
+				decision.Message = waiting
+				return nil
+			}
+			if err := removeUnconfirmedReset(directory); err != nil {
+				return err
+			}
+		}
+		choice, found, reason := chooseResetCredit(readings, time.Now(), rules)
 		if !found {
 			decision.Message = reason
 			return nil
 		}
-		pending := pendingReset{choice.account.Folder, choice.account.AccountID, choice.credit.ID}
+		pending := pendingReset{choice.account.Folder, choice.account.AccountID, choice.credit.ID, uuid.NewString()}
 		data, err := json.Marshal(pending)
 		if err != nil {
 			return err
@@ -322,21 +385,20 @@ func spendResetCredit(ctx context.Context, directory string, origin *url.URL, cl
 		if err := writeAtomicData(pendingPath, data); err != nil {
 			return err
 		}
+		if err := writeUnconfirmedReset(directory, unconfirmedReset{choice.account.Key, choice.credit.ID, time.Now().UTC()}); err != nil {
+			return err
+		}
 		return completeReset(ctx, directory, origin, client, pendingPath, pending, choice.why, &decision)
 	})
 	return
 }
 
-// readCodexAccountsForReset reads every Codex account from OpenAI, notes its
-// credits, and returns the latest credit seen spent; see noteResetCredits. It
-// reads an account's credits before its allowance, so a credit spent between
-// the two reads is either still listed or gone beside an allowance from after
-// the spend.
-func readCodexAccountsForReset(ctx context.Context, directory string, origin *url.URL, client *http.Client) ([]codexAccountReading, spentResetCredit, error) {
-	var lastSpent spentResetCredit
+// readCodexAccountsForReset reads every Codex account's credits and allowance
+// from OpenAI.
+func readCodexAccountsForReset(ctx context.Context, directory string, origin *url.URL, client *http.Client) ([]codexAccountReading, error) {
 	pool, err := ReadPool(directory)
 	if err != nil {
-		return nil, lastSpent, err
+		return nil, err
 	}
 	var readings []codexAccountReading
 	for _, account := range pool {
@@ -349,28 +411,25 @@ func readCodexAccountsForReset(ctx context.Context, directory string, origin *ur
 			continue
 		}
 		if err != nil {
-			return nil, lastSpent, fmt.Errorf("%s: cannot check credentials: %w", account.DisplayName, err)
+			return nil, fmt.Errorf("%s: cannot check credentials: %w", account.DisplayName, err)
 		}
 		var list struct {
 			Credits []ResetCredit `json:"credits"`
 		}
 		if err := resetRequest(ctx, client, origin, credentials, http.MethodGet, "/backend-api/wham/rate-limit-reset-credits", nil, &list); err != nil {
-			return nil, lastSpent, fmt.Errorf("%s: cannot check reset credits: %w", account.DisplayName, err)
+			return nil, fmt.Errorf("%s: cannot check reset credits: %w", account.DisplayName, err)
 		}
 		var usage usageResponse
 		if err := resetRequest(ctx, client, origin, credentials, http.MethodGet, "/backend-api/wham/usage", nil, &usage); err != nil {
-			return nil, lastSpent, fmt.Errorf("%s: cannot check allowance: %w", account.DisplayName, err)
+			return nil, fmt.Errorf("%s: cannot check allowance: %w", account.DisplayName, err)
 		}
 		sample, err := usage.Sample(credentials.AccountID, time.Now())
 		if err != nil {
-			return nil, lastSpent, fmt.Errorf("%s: %w", account.DisplayName, err)
-		}
-		if lastSpent, err = noteResetCredits(directory, account, list.Credits, sample, time.Now()); err != nil {
-			return nil, lastSpent, fmt.Errorf("record reset credits: %w", err)
+			return nil, fmt.Errorf("%s: %w", account.DisplayName, err)
 		}
 		readings = append(readings, codexAccountReading{account: account, allowance: sample, credits: list.Credits})
 	}
-	return readings, lastSpent, nil
+	return readings, nil
 }
 
 func pendingResetAccount(ctx context.Context, directory string, client *http.Client, pending pendingReset) (PoolAccount, Credentials, error) {
@@ -389,11 +448,7 @@ func pendingResetAccount(ctx context.Context, directory string, client *http.Cli
 
 // pendingCreditUnspent reports whether the credit of a reset whose response
 // was lost is still listed as available, meaning the request never spent it.
-func pendingCreditUnspent(ctx context.Context, directory string, origin *url.URL, client *http.Client, pending pendingReset) (bool, error) {
-	_, credentials, err := pendingResetAccount(ctx, directory, client, pending)
-	if err != nil {
-		return false, err
-	}
+func pendingCreditUnspent(ctx context.Context, origin *url.URL, client *http.Client, credentials Credentials, pending pendingReset) (bool, error) {
 	var list struct {
 		Credits []ResetCredit `json:"credits"`
 	}
@@ -408,16 +463,15 @@ func pendingCreditUnspent(ctx context.Context, directory string, origin *url.URL
 	return false, nil
 }
 
-// completeReset spends the pending credit. Its request ID is derived from the
-// account and credit alone, so a retry, another build or another Mac spending
-// the same credit sends the same request, and OpenAI applies it once.
+// completeReset sends the pending request and records its outcome. A spend
+// OpenAI confirms stays unconfirmed until its reading shows it; a credit it
+// did not spend is no longer waited for.
 func completeReset(ctx context.Context, directory string, origin *url.URL, client *http.Client, path string, pending pendingReset, why string, decision *ResetDecision) error {
 	account, credentials, err := pendingResetAccount(ctx, directory, client, pending)
 	if err != nil {
 		return err
 	}
-	requestID := uuid.NewSHA1(resetNamespace, []byte(pending.AccountID+":"+pending.CreditID)).String()
-	body, _ := json.Marshal(map[string]string{"credit_id": pending.CreditID, "redeem_request_id": requestID})
+	body, _ := json.Marshal(map[string]string{"credit_id": pending.CreditID, "redeem_request_id": pending.requestID()})
 	var result struct {
 		Code string `json:"code"`
 	}
@@ -426,7 +480,7 @@ func completeReset(ctx context.Context, directory string, origin *url.URL, clien
 	}
 	outcomes := map[string]string{
 		"reset":            "spent",
-		"already_redeemed": "already redeemed by an identical request from this Mac or another",
+		"already_redeemed": "spent, by an earlier try of this request",
 		"nothing_to_reset": "not spent, because OpenAI found nothing to reset",
 		"no_credit":        "not spent, because the credit is no longer available",
 	}
@@ -437,7 +491,12 @@ func completeReset(ctx context.Context, directory string, origin *url.URL, clien
 	if err := os.Remove(path); err != nil {
 		return err
 	}
-	decision.Spent = result.Code == "reset"
+	decision.Spent = result.Code == "reset" || result.Code == "already_redeemed"
+	if !decision.Spent {
+		if err := removeUnconfirmedReset(directory); err != nil {
+			return err
+		}
+	}
 	decision.Message = fmt.Sprintf("Reset credit %s on %s %s. Chosen because %s.", pending.CreditID, account.DisplayName, outcome, why)
 	return nil
 }

@@ -61,10 +61,22 @@ func (handler *TrafficRelayHandler) observeRejectedResponse(routedRequest *route
 
 // describeRejection quotes why a request was refused: Cloudflare's challenge
 // when Cloudflare stopped it before OpenAI, OpenAI's API error when the body is
-// one, otherwise the page title or the start of the text, on one line. The
-// access token the request carried is removed, whatever the provider quoted.
+// one, otherwise the page title or the start of the text, on one line. body
+// may be only the start of the response. The access token the request carried
+// is removed, whatever the provider quoted.
 func describeRejection(header http.Header, body []byte, accessToken string) string {
-	return accounts.WithoutSecrets(describeRejectionText(header, body), accessToken)
+	return withoutTokenShortened(describeRejectionText(header, accounts.WithoutCutSecret(body, accessToken)), accessToken)
+}
+
+// withoutTokenShortened removes the access token from a provider's reason,
+// then shortens it to 300 bytes. In the other order a token the cut splits
+// would no longer match, and its start would be logged.
+func withoutTokenShortened(reason, accessToken string) string {
+	reason = accounts.WithoutSecrets(reason, accessToken)
+	if len(reason) > 300 {
+		reason = reason[:300] + "..."
+	}
+	return reason
 }
 
 func describeRejectionText(header http.Header, body []byte) string {
@@ -87,7 +99,8 @@ func describeRejectionText(header http.Header, body []byte) string {
 	return ": an HTML page instead of an API error"
 }
 
-// describeProviderReason quotes the error OpenAI returned, on one line.
+// describeProviderReason quotes the error OpenAI returned, on one line, in
+// full; see withoutTokenShortened.
 func describeProviderReason(rejected httpJSONResponseWire) string {
 	reason := rejected.Detail
 	if rejected.Error != nil {
@@ -96,9 +109,6 @@ func describeProviderReason(rejected httpJSONResponseWire) string {
 	reason = strings.Join(strings.Fields(reason), " ")
 	if reason == "" {
 		return ""
-	}
-	if len(reason) > 300 {
-		reason = reason[:300] + "..."
 	}
 	return ": " + reason
 }

@@ -59,6 +59,14 @@ func writeDeploymentStatus(output io.Writer, dataDirectory string) {
 	if skipped, err := os.ReadFile(filepath.Join(dataDirectory, "skipped-builds")); err == nil && strings.TrimSpace(string(skipped)) != "" {
 		fmt.Fprintf(output, "Skipped builds: %s\n", strings.Join(strings.Fields(string(skipped)), ", "))
 	}
+	switch on, err := accountapi.AutomaticResetsOn(dataDirectory); {
+	case err != nil:
+		fmt.Fprintf(output, "Automatic resets: %v\n", err)
+	case on:
+		fmt.Fprintln(output, "Automatic resets: on")
+	default:
+		fmt.Fprintln(output, "Automatic resets: off")
+	}
 }
 
 // fetchMenuSnapshot reads the snapshot the serving proxy last composed.
