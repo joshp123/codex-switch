@@ -189,6 +189,7 @@ type providers struct {
 //	credit account-N ID UNIX        the account holds reset credit ID, which expires at UNIX seconds
 //	usage-credits account-N BALANCE the account starts with BALANCE usage credits; see below
 //	reset-soon                      a limited account-2 refills five minutes from each read
+//	reset-nothing                   requests to spend a credit find nothing to reset, whatever the account has used
 //	reset-drop                      requests to spend a credit are answered as usual, but the replies are lost
 //	reset-refuse                    requests to spend a credit receive a provider HTTP error
 //	reset-token-code                requests to spend a credit are answered with the request's access token as the code,
@@ -258,6 +259,7 @@ type controls struct {
 	resetSoon      bool
 	resetDrop      bool
 	resetRefuse    bool
+	resetNothing   bool
 	resetTokenCode bool
 	holdResets     bool
 	usageLag       bool
@@ -299,6 +301,8 @@ func (providers *providers) readControls() (controls, error) {
 			parsed.usageCredits[fields[1]] = balance
 		case len(fields) == 1 && fields[0] == "reset-soon":
 			parsed.resetSoon = true
+		case len(fields) == 1 && fields[0] == "reset-nothing":
+			parsed.resetNothing = true
 		case len(fields) == 1 && fields[0] == "reset-drop":
 			parsed.resetDrop = true
 		case len(fields) == 1 && fields[0] == "reset-refuse":
@@ -587,7 +591,7 @@ func (providers *providers) spendResetCredit(writer http.ResponseWriter, request
 				continue
 			}
 			code = "reset"
-			if used < 20 {
+			if used < 20 || controls.resetNothing {
 				code = "nothing_to_reset"
 			} else {
 				providers.redeemedBy[credit.id] = claim.RequestID

@@ -146,6 +146,9 @@ func (monitor *Monitor) ResetCreditComesFirst() bool {
 	if on, err := AutomaticResetsOn(monitor.dataDirectory); err != nil || !on {
 		return false
 	}
+	if _, refused := poolResetRefusedAt(monitor.dataDirectory, now); refused {
+		return false
+	}
 	_, found, _ := choosePoolOutCredit(readings, now)
 	return found
 }

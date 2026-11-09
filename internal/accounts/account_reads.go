@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/joshp123/codex-switch/internal/store"
@@ -68,9 +71,20 @@ func (monitor *Monitor) observeAccount(parent context.Context, account PoolAccou
 		fact.AccountState = AccountReady
 	}
 	if err == nil {
-		if balance := sample.CreditBalance; balance != nil && *balance < 1000 && fact.CreditBalanceBlockedUntil.IsZero() {
+		// The stop is saved beside the login, so a restart before the weekly
+		// reset does not start the account drawing again.
+		stopPath := filepath.Join(savedLogin.home, "usage-credits-stopped-until")
+		if fact.CreditBalanceBlockedUntil.IsZero() {
+			if saved, readErr := os.ReadFile(stopPath); readErr == nil {
+				fact.CreditBalanceBlockedUntil, _ = time.Parse(time.RFC3339, strings.TrimSpace(string(saved)))
+			}
+		}
+		if balance := sample.CreditBalance; balance != nil && *balance < 1000 && !fact.CreditBalanceBlockedUntil.After(time.Now()) {
 			if weekly, known := AnalyseAllowance(sample, AccountReady, time.Now(), Weekly); known {
 				fact.CreditBalanceBlockedUntil = weekly.ResetsAt
+				if writeErr := writeAtomicData(stopPath, []byte(weekly.ResetsAt.UTC().Format(time.RFC3339)+"\n")); writeErr != nil {
+					log.Printf("%s: could not save that its usage credits are stopped: %v", account.DisplayName, writeErr)
+				}
 				log.Printf("%s draws no usage credits until its weekly reset at %s: usage credit balance %.0f is below 1,000", account.DisplayName, weekly.ResetsAt.UTC().Format(time.RFC3339), *balance)
 			}
 		}

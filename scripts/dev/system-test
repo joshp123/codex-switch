@@ -178,8 +178,12 @@ def run_group(name):
             system.extra = [f"claude-grant {NEWER_CLAUDE_CODE}"]
             rig.CLAUDE_USAGE_READ_SECONDS = 1  # so the read after the newer Claude Code's request comes at once
         # The proxy reads credits every five minutes, so the credits these groups test are there from the start.
-        if name in ("resets", "auto-reset", "cold-reset", "authority-off", "authority-rollback", "secrets"):
+        if name in ("resets", "auto-reset", "cold-reset", "authority-off", "authority-rollback", "secrets", "reset-refused"):
             system.credits = reset_credits()
+        if name == "reset-refused":
+            system.usage_credits = dict(USAGE_CREDITS)
+        if name == "reset-refused":
+            system.extra = ["reset-nothing"]
         if name == "usage-credits":
             system.credits = [f'credit account-3 credit-account-3 {int(time.time()) + 20 * DAY}']
             system.usage_credits = dict(USAGE_CREDITS)
@@ -1490,9 +1494,10 @@ def expiring_credit_is_spent_once_by_the_authority(system):
     other = rig.OtherMac()
     nothing = 'not spent, because OpenAI found nothing to reset'
     rig.wait_for(lambda: nothing in rig.proxy_log(), 'this Mac to ask OpenAI to spend the credit, and keep it when it finds nothing to reset')
-    system.weekly['account-1'], system.resets['account-1'] = 40, int(time.time() + 3.5 * DAY)
+    # Under the 20% at which the fake OpenAI resets, so an attempt already under way when this lands spends nothing.
+    system.weekly['account-1'], system.resets['account-1'] = 18, int(time.time() + 3.5 * DAY)
     system.apply()
-    rig.wait_for(lambda: 'has used 40% of its week, no more than the 50% of the week that has passed' in rig.proxy_log(),
+    rig.wait_for(lambda: 'has used 18% of its week, no more than the 50% of the week that has passed' in rig.proxy_log(),
                  'this Mac to keep the credit of an account behind its week')
     if spends():
         raise Failure('A credit OpenAI found nothing to reset with, or one that gains less than it loses, was spent.')
@@ -1507,7 +1512,7 @@ def expiring_credit_is_spent_once_by_the_authority(system):
     if 'Reset credit' in other.proxy_log() or 'Keeping reset credit' in other.proxy_log() or 'Automatic Codex resets are off' not in other.proxy_log():
         raise Failure('The Mac with automatic resets off decided about a credit.')
     return (f'At 15% used with a fifteenth of the week gone, this Mac asked OpenAI to spend the expiring credit; it found nothing '
-            f'to reset, and the credit was kept. At 40% used with half the week gone, it kept the credit without asking. At 60% '
+            f'to reset, and the credit was kept. At 18% used with half the week gone, it kept the credit without asking. At 60% '
             f'it asked again under a new request ID and OpenAI spent it, once; the account\'s second credit was then kept. '
             f'Each of the {len(claims)} requests had its own ID; the other Mac, with automatic resets off, decided nothing.')
 
@@ -1728,6 +1733,21 @@ def low_credit_balance_blocks_until_weekly_reset(system):
     return 'At 900 credits the account was blocked until its weekly reset. A later 4,000-credit reading did not unblock it; work resumed on account-2.'
 
 
+def refused_reset_lets_work_draw_usage_credits(system):
+    """When OpenAI finds nothing to reset for a pool that is out, the Mac with automatic resets on asks once, and the
+    waiting work goes on by drawing usage credits"""
+    automatic_resets(True)
+    system.limited = set(system.accounts)
+    system.apply()
+    wait_until_the_proxy_reads(*system.accounts)
+    task = rig.CodexTask('reset-refused-work', 'Reply with the word drawn.').finish()
+    system.record_codex_task('work after a refused reset', task.thread)
+    claims = rig.fake_provider_events('reset-claim')
+    if len(claims) != 1 or spends() or not draws() or 'found nothing to reset' not in rig.proxy_log():
+        raise Failure(f'OpenAI was asked to spend a credit {len(claims)} times and spent {spends()}; usage credits drawn: {draws()}.')
+    return f'OpenAI found nothing to reset. The proxy asked once, kept the credit, and the work finished on usage credits ({len(draws())} draws).'
+
+
 def reset_credits_come_first(system):
     """On the Mac with automatic resets on, with every Codex account's included allowance used up, a reset credit is
     spent before any account draws its usage credits"""
@@ -1888,6 +1908,7 @@ GROUPS = [
     ('secrets', 'cli', [no_part_of_a_token_reaches_the_log, a_reset_result_quoting_the_token_is_neither_logged_nor_printed,
                         a_signed_out_account_pauses_resets_and_says_why_once, a_claude_refresh_failure_quoting_the_refresh_token_is_not_shown]),
     ('low-credit-balance', 'cli', [low_credit_balance_leaves_included_allowance_usable, low_credit_balance_blocks_until_weekly_reset]),
+    ('reset-refused', 'cli', [refused_reset_lets_work_draw_usage_credits]),
     ('usage-credits', 'cli', [status_shows_each_accounts_usage_credits, usage_credits_wait_while_an_account_has_included_allowance,
                               usage_credits_are_drawn_when_every_allowance_is_out, usage_credits_stop_at_the_floor, reset_credits_come_first]),
     ('routing', 'cli', [t3_reads_the_account_pool, new_work_goes_to_the_allowance_that_resets_first, request_without_task_id_is_served]),

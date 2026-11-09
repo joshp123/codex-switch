@@ -122,6 +122,9 @@ type resetChoice struct {
 	account PoolAccount
 	credit  ResetCredit
 	why     string
+	// poolOut is a credit chosen because the pool is out, not because it is
+	// about to expire.
+	poolOut bool
 }
 
 // chooseResetCredit is the one rule for spending a credit. Its choice depends
@@ -204,7 +207,7 @@ func choosePoolOutCredit(readings []codexAccountReading, now time.Time) (resetCh
 	chosen := candidates[0]
 	why := fmt.Sprintf("no Codex account can take work and none refills within 30 minutes; %s has the most of its week left, refilling at %s, and this is its credit that expires first, %s",
 		chosen.reading.account.DisplayName, logtime.Format(chosen.refillsAt), chosen.credit.describeExpiry())
-	return resetChoice{chosen.reading.account, chosen.credit, why}, true, ""
+	return resetChoice{chosen.reading.account, chosen.credit, why, true}, true, ""
 }
 
 func chooseExpiringCredit(readings []codexAccountReading, now time.Time) (resetChoice, bool, string) {
@@ -243,7 +246,7 @@ func chooseExpiringCredit(readings []codexAccountReading, now time.Time) (resetC
 	}
 	if len(spend) > 0 {
 		byExpiry(spend)
-		return resetChoice{spend[0].reading.account, spend[0].credit, spend[0].why}, true, ""
+		return resetChoice{account: spend[0].reading.account, credit: spend[0].credit, why: spend[0].why}, true, ""
 	}
 	if len(keep) == 0 {
 		return resetChoice{}, false, ""
@@ -372,9 +375,18 @@ func spendResetCredit(ctx context.Context, directory string, origin *url.URL, cl
 				return err
 			}
 		}
+		if refusedAt, refused := poolResetRefusedAt(directory, time.Now()); refused && rules.whenPoolOut {
+			// OpenAI just found nothing to reset for this need; only a credit
+			// about to expire is still worth asking about.
+			rules.whenPoolOut = false
+			decision.Message = fmt.Sprintf("No reset: OpenAI found nothing to reset at %s. The pool's need is asked again after %s; until then work draws usage credits.",
+				logtime.Format(refusedAt), logtime.Format(refusedAt.Add(poolRefillWait)))
+		}
 		choice, found, reason := chooseResetCredit(readings, time.Now(), rules)
 		if !found {
-			decision.Message = reason
+			if reason != "" {
+				decision.Message = reason
+			}
 			return nil
 		}
 		pending := pendingReset{choice.account.Folder, choice.account.AccountID, choice.credit.ID, uuid.NewString()}
@@ -388,9 +400,29 @@ func spendResetCredit(ctx context.Context, directory string, origin *url.URL, cl
 		if err := writeUnconfirmedReset(directory, unconfirmedReset{choice.account.Key, choice.credit.ID, time.Now().UTC()}); err != nil {
 			return err
 		}
-		return completeReset(ctx, directory, origin, client, pendingPath, pending, choice.why, &decision)
+		if err := completeReset(ctx, directory, origin, client, pendingPath, pending, choice.why, &decision); err != nil {
+			return err
+		}
+		if choice.poolOut && !decision.Spent {
+			return os.WriteFile(filepath.Join(directory, poolResetRefusedFilename), nil, 0o600)
+		}
+		return nil
 	})
 	return
+}
+
+// poolResetRefusedFilename marks when OpenAI last spent nothing for a pool
+// that was out. Until poolRefillWait has passed the need is not asked again:
+// asking every few seconds would keep work waiting for a reset OpenAI will not
+// make, when it could draw usage credits.
+const poolResetRefusedFilename = "pool-reset-refused"
+
+func poolResetRefusedAt(directory string, now time.Time) (time.Time, bool) {
+	info, err := os.Stat(filepath.Join(directory, poolResetRefusedFilename))
+	if err != nil || now.Sub(info.ModTime()) >= poolRefillWait {
+		return time.Time{}, false
+	}
+	return info.ModTime(), true
 }
 
 // readCodexAccountsForReset reads every Codex account's credits and allowance

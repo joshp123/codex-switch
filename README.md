@@ -290,13 +290,15 @@ with `codex-switch auto-reset codex on` on a Mac that is always on, and on no ot
 a spend cannot be undone, and proxies on two Macs deciding alone could each
 spend a credit for the same need. `codex-switch status` shows whether it is on;
 `codex-switch auto-reset codex off` turns it off. When that Mac is off, no credit is
-spent by itself, and work waits for an account to refill.
+spent by itself.
 
 The proxy with automatic resets on spends a credit in two cases:
 
-- Work is waiting, no Codex account can take it, and none refills within 30
-  minutes. The credit goes to the account with the most of its week left,
-  using that account's credit that expires first.
+- Work is waiting on this Mac, no Codex account has included allowance left,
+  and none refills within 30 minutes. The credit goes to the account with the
+  most of its week left, using that account's credit that expires first. If
+  OpenAI finds nothing to reset, the proxy keeps the credit, lets the work
+  draw usage credits, and asks again after 30 minutes.
 - A credit is in its last hour, and its account has used more of its week
   than the share of its week that has passed. If OpenAI finds nothing to
   reset, it keeps the credit.
@@ -309,6 +311,25 @@ takes. The log says when the reading is late.
 `codex-switch reset codex` spends a credit by the first rule, without waiting
 work, on any Mac. If the response is lost, run the same command again to
 resolve it.
+
+### Codex usage credits
+
+OpenAI draws an account's usage credits once its included allowance is used
+up. The proxy sends work to such an account only as a last resort:
+
+- no Codex account has included allowance left, and
+- on the Mac with automatic resets on, no reset credit is about to be spent.
+  A Mac with them off spends no reset, so its work draws usage credits at
+  once.
+
+The proxy sends no new work to draw an account's credits once it reads a
+balance of 2,000 or less; requests already sent still draw. An account whose
+balance this Mac has read below 1,000 draws none until its weekly reset,
+whatever it reports later; work still goes to it on its included allowance. Status shows each balance and which account is drawing.
+
+The proxy sees only a balance. It cannot tell granted credits from bought
+ones, or whether OpenAI tops the balance up automatically: keep automatic
+reload off if the credits must not cost money.
 
 The proxy never spends a Claude reset: spend one in Claude's own Settings >
 Usage. A Fable reset gives back what Fable models used of the account's week,
