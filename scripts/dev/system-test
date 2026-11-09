@@ -597,8 +597,9 @@ def exhausted_task_moves_on_its_next_turn(system):
 
 def websocket_age_limit_does_not_interrupt_work(system):
     """When OpenAI ends a WebSocket at its one-hour limit during a tool call, the goal carries on over a new connection: no replay, no error shown"""
-    with simulating(system, 'websocket-age-limit 1.5'):
-        goal = rig.Goal('age-limit-goal', SLEEPING_GOAL)
+    goal = rig.Goal('age-limit-goal', SLEEPING_GOAL)
+    rig.wait_for(lambda: goal.effect_file.exists() and 'START' in goal.effect_file.read_text(), "the goal's tool call to start")
+    with simulating(system, 'websocket-age-limit'):
         rig.wait_for(lambda: rig.fake_provider_events('websocket-age-limit', thread=goal.thread), "OpenAI to end the goal's WebSocket at its age limit")
     (rig.RUN / 'work/age-limit-goal-release').touch()
     errors = goal.finish()

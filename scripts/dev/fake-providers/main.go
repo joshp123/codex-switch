@@ -175,7 +175,7 @@ type providers struct {
 //	hold-usage-reads                usage reads wait, unanswered
 //	claude-throttle COUNT           the next COUNT Claude model requests receive a 429 that names no usage limit
 //	claude-limited account-N        the Claude account's five-hour allowance has run out
-//	websocket-age-limit SECONDS     a WebSocket opened now gets OpenAI's one-hour limit error after SECONDS, then closes
+//	websocket-age-limit             the next idle Codex WebSocket gets OpenAI's one-hour limit error and closes, once
 //	credit account-N ID UNIX        the account holds reset credit ID, which expires at UNIX seconds
 //	reset-soon                      a limited account-2 refills five minutes from each read
 //	reset-drop                      the first request to spend a credit spends it, but its reply is lost
@@ -192,25 +192,24 @@ type providers struct {
 // Fast-mode Claude requests are always refused, as for an account without usage credits.
 // Claude login refreshes are always refused, as for a refresh token Anthropic has retired.
 type controls struct {
-	weeklyUsed        map[string]float64
-	weeklyResets      map[string]int64
-	weeklyIdle        map[string]bool
-	limited           map[string]bool
-	httpOnly          bool
-	holdResponses     map[string]bool
-	breakResponses    bool
-	providerError     bool
-	usageError        bool
-	holdUsageReads    bool
-	claudeThrottle    bool
-	claudeLimited     map[string]bool
-	credits           map[string][]fakeCredit
-	resetSoon         bool
-	resetDrop         bool
-	resetRefuse       bool
-	holdResets        bool
-	claudeGrant       bool
-	webSocketAgeLimit time.Duration
+	weeklyUsed     map[string]float64
+	weeklyResets   map[string]int64
+	weeklyIdle     map[string]bool
+	limited        map[string]bool
+	httpOnly       bool
+	holdResponses  map[string]bool
+	breakResponses bool
+	providerError  bool
+	usageError     bool
+	holdUsageReads bool
+	claudeThrottle bool
+	claudeLimited  map[string]bool
+	credits        map[string][]fakeCredit
+	resetSoon      bool
+	resetDrop      bool
+	resetRefuse    bool
+	holdResets     bool
+	claudeGrant    bool
 }
 
 type fakeCredit struct {
@@ -278,12 +277,6 @@ func (providers *providers) readControls() (controls, error) {
 				return controls{}, fmt.Errorf("invalid control line %q", scanner.Text())
 			}
 			parsed.claudeThrottle = count > 0
-		case len(fields) == 2 && fields[0] == "websocket-age-limit":
-			seconds, err := strconv.ParseFloat(fields[1], 64)
-			if err != nil || seconds <= 0 {
-				return controls{}, fmt.Errorf("invalid control line %q", scanner.Text())
-			}
-			parsed.webSocketAgeLimit = time.Duration(seconds * float64(time.Second))
 		case len(fields) == 3 && fields[0] == "exhaust-after" && providers.knownAlias(fields[1]):
 			if count, err := strconv.Atoi(fields[2]); err != nil || count < 0 {
 				return controls{}, fmt.Errorf("invalid control line %q", scanner.Text())
@@ -369,7 +362,7 @@ func (providers *providers) ServeHTTP(writer http.ResponseWriter, request *http.
 		providers.logRequest("rejected-usage-limit", request, http.StatusTooManyRequests)
 		writeJSON(writer, http.StatusTooManyRequests, usageLimitError())
 	case webSocket:
-		providers.serveCodexWebSocket(writer, request, controls.webSocketAgeLimit)
+		providers.serveCodexWebSocket(writer, request)
 	default:
 		providers.serveCodexHTTP(writer, request)
 	}
@@ -580,6 +573,24 @@ func (providers *providers) holdWhileControlled(ctx context.Context, request *ht
 func (providers *providers) holding(request *http.Request) bool {
 	controls, err := providers.readControls()
 	return err == nil && controls.holdResponses[request.Header.Get("Originator")]
+}
+
+// takeControlLine removes a one-time control line and reports whether it was there.
+func (providers *providers) takeControlLine(control string) bool {
+	providers.controlMu.Lock()
+	defer providers.controlMu.Unlock()
+	data, err := os.ReadFile(providers.controlPath)
+	if err != nil {
+		return false
+	}
+	lines := strings.Split(string(data), "\n")
+	for index, line := range lines {
+		if strings.TrimSpace(line) == control {
+			lines = append(lines[:index], lines[index+1:]...)
+			return os.WriteFile(providers.controlPath, []byte(strings.Join(lines, "\n")), 0o600) == nil
+		}
+	}
+	return false
 }
 
 // takeCountedControl uses up one request of a counted control line, such as
@@ -820,7 +831,7 @@ func (providers *providers) serveCodexHTTP(writer http.ResponseWriter, request *
 // Messages are read on their own goroutine, so a client that goes away cancels
 // a held reply. A simulated limit lands between two model requests, as a real
 // limit would.
-func (providers *providers) serveCodexWebSocket(writer http.ResponseWriter, request *http.Request, ageLimit time.Duration) {
+func (providers *providers) serveCodexWebSocket(writer http.ResponseWriter, request *http.Request) {
 	client, err := websocket.Accept(writer, request, &websocket.AcceptOptions{CompressionMode: websocket.CompressionContextTakeover})
 	if err != nil {
 		return
@@ -846,21 +857,23 @@ func (providers *providers) serveCodexWebSocket(writer http.ResponseWriter, requ
 		}
 	}()
 	// OpenAI ends a connection at its age limit even while it is idle, as it
-	// did to Codex's idle connections in October 2026.
-	var ageLimitReached <-chan time.Time
-	if ageLimit > 0 {
-		ageLimitReached = time.After(ageLimit)
-	}
+	// did to Codex's idle connections in October 2026. The test sets the
+	// limit when it sees the connection idle, such as during a tool call.
+	ageLimitCheck := time.NewTicker(20 * time.Millisecond)
+	defer ageLimitCheck.Stop()
 	forwarded := 0
 	for {
 		var payload []byte
 		select {
 		case payload = <-messages:
-		case <-ageLimitReached:
-			providers.logRequest("websocket-age-limit", request, http.StatusBadRequest)
-			_ = client.Write(ctx, websocket.MessageText, webSocketAgeLimitError())
-			client.Close(websocket.StatusNormalClosure, "")
-			return
+		case <-ageLimitCheck.C:
+			if providers.takeControlLine("websocket-age-limit") {
+				providers.logRequest("websocket-age-limit", request, http.StatusBadRequest)
+				_ = client.Write(ctx, websocket.MessageText, webSocketAgeLimitError())
+				client.Close(websocket.StatusNormalClosure, "")
+				return
+			}
+			continue
 		case <-ctx.Done():
 			return
 		}

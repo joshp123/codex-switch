@@ -520,9 +520,8 @@ class Goal(AppServer):
         self.thread = self.request('thread/start', {'cwd': str(RUN / 'work'), 'model': MODEL, 'sandbox': 'workspace-write',
                                                     'approvalPolicy': 'never'})['thread']['id']
         objective = objective.format(effect=self.effect_file.name, result=self.result_file.name, release=f'{name}-release')
-        self.request('thread/goal/set', {'threadId': self.thread, 'objective': objective, 'tokenBudget': 200000})
-        # The first turn is the person pressing send; every later turn belongs to the goal.
-        self.request('turn/start', {'threadId': self.thread, 'input': [{'type': 'text', 'text': 'Work on the active goal.'}]})
+        # As the Codex app sends /goal. Codex starts the goal's first turn itself, with the objective.
+        self.request('thread/goal/set', {'threadId': self.thread, 'origin': 'user', 'objective': objective, 'status': 'active', 'tokenBudget': 200000})
 
     def ended(self):
         """The goal's final status, once it has one and its last turn has finished."""

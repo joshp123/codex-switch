@@ -1,4 +1,4 @@
-<!-- Written by AI on 2026.10.11 by model claude-opus-5.5; updated on 2026.10.29 by model GPT-6.1 Terra; rewritten on 2026.11.01 by model claude-opus-5.5; updated on 2026.11.08 by model claude-opus-5.5. -->
+<!-- Written by AI on 2026.10.11 by model claude-opus-5.5; updated on 2026.10.29 by model GPT-6.1 Terra; rewritten on 2026.11.01 by model claude-opus-5.5; updated on 2026.11.08 and 2026.11.09 by model claude-opus-5.5. -->
 
 # System test
 
@@ -40,6 +40,7 @@ Before a release, also run the smoke test (see below).
 | routing | New Codex tasks and Pi sessions go to an account whose week has not started, then to the weekly allowance that resets first. They and their Codex forks stay on their account when another account becomes first, and move for a hard reserve. |
 | routing | A request without a task ID is served. |
 | exhaustion | When a task's account runs out, its next turn moves to another account. No model work is replayed, no tool effect repeats, and Codex shows no error. |
+| websocket-age-limit | When OpenAI ends a goal's WebSocket at its one-hour limit during a tool call, the goal carries on over a new connection. No model work is replayed and Codex shows no error. |
 | outage-goal | With every account out of allowance, a running goal continues by itself when one account comes back. |
 | claude | Claude Code gets a reply through the HTTPS proxy, recorded once with its tokens. |
 | claude-throttle | When Anthropic throttles a Claude request without naming a usage limit, the account is held for the throttle's Retry-After and no longer, then serves the task. |
@@ -63,7 +64,8 @@ The command exits 0 only if every outcome held and nothing is left running.
 - The official Codex client: the one inside the desktop app
   (`/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex`), or
   `codex` on `PATH`. It runs `codex exec` tasks and `/goal` through
-  `codex app-server`, and runs the scripted model's tool calls itself.
+  `codex app-server`, and runs the scripted model's tool calls itself. A goal
+  is set as the Codex app sets one, and Codex starts its first turn.
 - Pi in sessions, if `pi` is on `PATH`.
 - A second proxy, built from this tree, for the groups that test two Macs. It
   has its own data directory, Codex home and launchd job, and is signed in to
@@ -82,7 +84,7 @@ that word. The accounts are fake logins only it accepts.
 
 Its control file simulates what a test cannot otherwise arrange: weekly
 allowance levels, exhausted accounts, an account that runs out after a given
-number of requests, refused WebSockets, held or malformed responses, provider
+number of requests, refused WebSockets, a WebSocket ended at OpenAI's one-hour limit, held or malformed responses, provider
 and usage-read errors, a Claude throttle with a one-second Retry-After as
 Anthropic sent on 31 October 2026, and a Claude five-hour limit. It refuses
 every fast-mode Claude request as Anthropic does for an account without usage
@@ -145,4 +147,4 @@ The failure line says what happened instead. Each group's evidence is in
 | `home/sessions/` | Codex's own record of each response it received |
 | `system-test.out` | The group's own output |
 
-The next run moves this directory to the Trash.
+The next run deletes this directory.
