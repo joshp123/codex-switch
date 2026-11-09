@@ -17,6 +17,7 @@ import (
 	accountapi "github.com/joshp123/codex-switch/internal/accounts"
 	"github.com/joshp123/codex-switch/internal/clientcapability"
 	"github.com/joshp123/codex-switch/internal/codexstate"
+	"github.com/joshp123/codex-switch/internal/heldcredentials"
 	"github.com/joshp123/codex-switch/internal/menupb"
 	"github.com/joshp123/codex-switch/internal/relay"
 	"github.com/joshp123/codex-switch/internal/routing"
@@ -38,9 +39,8 @@ const menuSnapshotURLFilename = "menu-snapshot-url"
 // work after a quiet spell shows within seconds while continuous work costs
 // no more than one snapshot a minute.
 const (
-	menuSnapshotInterval     = time.Minute
-	menuSnapshotAfterWork    = 5 * time.Second
-	menuSnapshotWorkInterval = time.Minute
+	menuSnapshotInterval  = time.Minute
+	menuSnapshotAfterWork = 5 * time.Second
 	// A menu waiting for a newer snapshot is answered within this, so it learns
 	// the snapshot is still current.
 	menuSnapshotLongestWait = 55 * time.Second
@@ -57,6 +57,8 @@ type menuSnapshots struct {
 	database     *store.StoreDatabase
 	usageLedger  *usage.UsageLedger
 	codex        *codexstate.LocalReader
+	// interval is menuSnapshotInterval, which the system test shortens.
+	interval time.Duration
 
 	mutex   sync.Mutex
 	encoded []byte
@@ -96,8 +98,8 @@ type codexTaskTitles struct {
 func newMenuSnapshots(dataDirectory string, router *routing.TaskRouter, database *store.StoreDatabase, usageLedger *usage.UsageLedger, codex *codexstate.LocalReader) *menuSnapshots {
 	return &menuSnapshots{
 		dataDirectory: dataDirectory, router: router, database: database, usageLedger: usageLedger, codex: codex,
-		generation: time.Now().UnixNano(),
-		changed:    make(chan struct{}), stopping: make(chan struct{}), workDone: make(chan struct{}, 1),
+		generation: time.Now().UnixNano(), interval: menuSnapshotInterval,
+		changed: make(chan struct{}), stopping: make(chan struct{}), workDone: make(chan struct{}, 1),
 	}
 }
 
@@ -137,7 +139,7 @@ func (snapshots *menuSnapshots) StopWaiting() {
 
 func (snapshots *menuSnapshots) Run(ctx context.Context) {
 	for {
-		wait := time.After(menuSnapshotInterval)
+		wait := time.After(snapshots.interval)
 		started := time.Now()
 		err := snapshots.compose(ctx)
 		if took := time.Since(started); took > 10*time.Second {
@@ -153,7 +155,7 @@ func (snapshots *menuSnapshots) Run(ctx context.Context) {
 			return
 		case <-wait:
 		case <-snapshots.workDone:
-			delay := max(menuSnapshotAfterWork, time.Until(started.Add(menuSnapshotWorkInterval)))
+			delay := max(menuSnapshotAfterWork, time.Until(started.Add(snapshots.interval)))
 			select {
 			case <-ctx.Done():
 				return
@@ -198,6 +200,8 @@ func (snapshots *menuSnapshots) compose(ctx context.Context) error {
 		}
 	}
 	keepShownTaskRows(snapshot)
+	// Status and the menu show what providers report, which may quote a credential.
+	heldcredentials.RemoveFromMessage(snapshot)
 	deterministic := proto.MarshalOptions{Deterministic: true}
 	composedAt := snapshot.GeneratedAt
 	snapshot.GeneratedAt = nil

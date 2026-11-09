@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/joshp123/codex-switch/internal/heldcredentials"
 )
 
 const (
@@ -67,41 +69,6 @@ func temporary(cause error) error {
 type Credentials struct {
 	AccessToken string
 	AccountID   string
-}
-
-// WithoutSecrets replaces every secret in text, so text a provider sends back
-// can be logged whatever it quotes.
-func WithoutSecrets(text string, secrets ...string) string {
-	for _, secret := range secrets {
-		if secret != "" {
-			text = strings.ReplaceAll(text, secret, "[secret removed]")
-		}
-	}
-	return text
-}
-
-// WithoutCutSecret drops the start of a secret from the end of head, the first
-// bytes of a longer body. A secret the cut splits no longer matches the whole
-// secret, so WithoutSecrets would leave its start.
-func WithoutCutSecret(head []byte, secrets ...string) []byte {
-	for _, secret := range secrets {
-		if secret == "" {
-			continue
-		}
-		// Only bytes after the last whole secret, and within one secret's
-		// length of the end, can start a cut one.
-		from := max(0, len(head)-len(secret)+1)
-		if last := bytes.LastIndex(head, []byte(secret)); last >= 0 {
-			from = max(from, last+len(secret))
-		}
-		for start := from; start < len(head); start++ {
-			if strings.HasPrefix(secret, string(head[start:])) {
-				head = head[:start]
-				break
-			}
-		}
-	}
-	return head
 }
 
 // savedLogin reads one account's auth.json and refreshes its tokens.
@@ -224,6 +191,10 @@ func (s *savedLogin) read() (authFile, error) {
 	if err := json.Unmarshal(data, &auth); err != nil {
 		return authFile{}, signInRequired(err)
 	}
+	heldcredentials.Remember(auth.Tokens.AccessToken, auth.Tokens.RefreshToken, auth.Tokens.IDToken)
+	if auth.APIKey != nil {
+		heldcredentials.Remember(*auth.APIKey)
+	}
 	if auth.Tokens.AccessToken == "" || auth.Tokens.RefreshToken == "" || auth.Tokens.AccountID == "" {
 		return authFile{}, signInRequired(errors.New("incomplete ChatGPT credentials"))
 	}
@@ -271,6 +242,7 @@ func (s *savedLogin) refresh(ctx context.Context, auth *authFile) error {
 	if err := json.Unmarshal(encoded, &result); err != nil {
 		return temporary(fmt.Errorf("refresh credentials: %w", err))
 	}
+	heldcredentials.Remember(result.AccessToken, result.RefreshToken, result.IDToken)
 	if result.AccessToken == "" {
 		return temporary(errors.New("refresh credentials: response has no access token"))
 	}

@@ -26,14 +26,11 @@ type terminalResponseObserver struct {
 	client             string
 	accountKey         store.AccountKey
 	accountDisplayName string
-	// accessToken is the token the account's requests carry, removed from any
-	// reason OpenAI gives.
-	accessToken      string
-	taskRouter       TaskRouter
-	completionLedger CompletionLedger
-	activeResponses  int
-	admittedRequests int
-	modelSlug        string
+	taskRouter         TaskRouter
+	completionLedger   CompletionLedger
+	activeResponses    int
+	admittedRequests   int
+	modelSlug          string
 	// serviceTier is the speed the client requested. OpenAI's completed
 	// response reports "default" even for Fast work it bills as Fast.
 	serviceTier     string
@@ -221,7 +218,7 @@ func (observer *terminalResponseObserver) logProviderFailure(providerError *prov
 	}
 	reason := ""
 	if providerError != nil {
-		reason = withoutTokenShortened(describeProviderReason(httpJSONResponseWire{Error: providerError}), observer.accessToken)
+		reason = shortened(describeProviderReason(httpJSONResponseWire{Error: providerError}))
 	}
 	log.Printf("%s: OpenAI failed the %s response%s", subject, observer.modelSlug, reason)
 	return false

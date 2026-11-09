@@ -13,6 +13,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/joshp123/codex-switch/internal/heldcredentials"
 )
 
 const (
@@ -70,6 +72,7 @@ func (s *savedLogin) readClaudeAuth() (claudeAuthFile, error) {
 	if err := json.Unmarshal(data, &auth); err != nil {
 		return auth, signInRequired(err)
 	}
+	heldcredentials.Remember(auth.AccessToken, auth.RefreshToken)
 	if auth.AccessToken == "" || auth.RefreshToken == "" || auth.AccountID == "" || auth.OrganizationID == "" || auth.ExpiresAt.IsZero() {
 		return auth, signInRequired(errors.New("incomplete Claude credentials"))
 	}
@@ -107,7 +110,7 @@ func (s *savedLogin) claudeCredentials(ctx context.Context, rejected Credentials
 			if err := postClaudeOAuth(ctx, s.client, s.token, map[string]string{
 				"grant_type": "refresh_token", "client_id": claudeOAuthClientID,
 				"refresh_token": auth.RefreshToken, "scope": claudeOAuthScopes,
-			}, &refreshed, auth.AccessToken); err != nil {
+			}, &refreshed); err != nil {
 				return err
 			}
 			if refreshed.AccessToken == "" || refreshed.RefreshToken == "" || refreshed.ExpiresIn <= 0 {
@@ -146,9 +149,14 @@ type claudeTokenResponse struct {
 var claudeOAuthPublicFields = []string{"grant_type", "client_id", "scope", "redirect_uri"}
 
 // postClaudeOAuth sends a token request. When Anthropic refuses it, the error
-// gives Anthropic's status, code and message with every secret the request
-// sent, and every other secret held, removed.
-func postClaudeOAuth(ctx context.Context, client *http.Client, tokenURL string, body map[string]string, result any, heldSecrets ...string) error {
+// gives Anthropic's status, code and message. Every secret the request sends
+// and every token it receives is remembered, so no output shows one.
+func postClaudeOAuth(ctx context.Context, client *http.Client, tokenURL string, body map[string]string, result *claudeTokenResponse) error {
+	for field, value := range body {
+		if !slices.Contains(claudeOAuthPublicFields, field) {
+			heldcredentials.Remember(value)
+		}
+	}
 	encoded, err := json.Marshal(body)
 	if err != nil {
 		return err
@@ -165,19 +173,17 @@ func postClaudeOAuth(ctx context.Context, client *http.Client, tokenURL string, 
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		refusal, _ := io.ReadAll(io.LimitReader(response.Body, maximumRefreshResponseBytes))
-		secrets := heldSecrets
-		for field, value := range body {
-			if !slices.Contains(claudeOAuthPublicFields, field) {
-				secrets = append(secrets, value)
-			}
-		}
-		err := fmt.Errorf("Anthropic refused the token request with HTTP %d%s", response.StatusCode, WithoutSecrets(describeClaudeTokenRefusal(refusal), secrets...))
+		err := fmt.Errorf("Anthropic refused the token request with HTTP %d%s", response.StatusCode, describeClaudeTokenRefusal(refusal))
 		if response.StatusCode == 400 || response.StatusCode == 401 || response.StatusCode == 403 {
 			return signInRequired(err)
 		}
 		return temporary(err)
 	}
-	return json.NewDecoder(io.LimitReader(response.Body, maximumRefreshResponseBytes)).Decode(result)
+	if err := json.NewDecoder(io.LimitReader(response.Body, maximumRefreshResponseBytes)).Decode(result); err != nil {
+		return err
+	}
+	heldcredentials.Remember(result.AccessToken, result.RefreshToken)
+	return nil
 }
 
 // describeClaudeTokenRefusal is Anthropic's reason for refusing a token

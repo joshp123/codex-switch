@@ -22,7 +22,7 @@ func loginCommand(args []string) {
 	target := flags.Arg(0)
 	var replacing store.AccountKey
 	if target == "" {
-		fmt.Println("Sign in to the account you want to add")
+		fmt.Fprintln(stdout, "Sign in to the account you want to add")
 	} else {
 		pool, err := accountapi.ReadPool(dataDir())
 		if err != nil {
@@ -31,7 +31,7 @@ func loginCommand(args []string) {
 		for _, account := range pool {
 			if target == string(account.Key) || target == account.DisplayName {
 				replacing = account.Key
-				fmt.Printf("Sign in again to %s\n", account.DisplayName)
+				fmt.Fprintf(stdout, "Sign in again to %s\n", account.DisplayName)
 				break
 			}
 		}
@@ -55,10 +55,10 @@ func loginCommand(args []string) {
 	}
 	displayName, _ := accountapi.AccountDisplayName(pool, published.Key)
 	if target != "" {
-		fmt.Printf("Updated %s  %s\n", displayName, published.Email)
+		fmt.Fprintf(stdout, "Updated %s  %s\n", displayName, published.Email)
 		return
 	}
-	fmt.Printf("Added %s  %s\n", displayName, published.Email)
+	fmt.Fprintf(stdout, "Added %s  %s\n", displayName, published.Email)
 }
 
 func accountsCommand(args []string) {
@@ -70,11 +70,11 @@ func accountsCommand(args []string) {
 		log.Fatal(err)
 	}
 	if len(pool) == 0 {
-		fmt.Println("No accounts. Run codex-switch login.")
+		fmt.Fprintln(stdout, "No accounts. Run codex-switch login.")
 		return
 	}
 	for _, account := range pool {
-		fmt.Printf("%s\t%s\n", account.DisplayName, account.Key)
+		fmt.Fprintf(stdout, "%s\t%s\n", account.DisplayName, account.Key)
 	}
 }
 
@@ -86,7 +86,7 @@ func removeCommand(args []string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("Removed %s (%s) and %d thread pins.\n", removed.DisplayName, removed.Email, removedPins)
+	fmt.Fprintf(stdout, "Removed %s (%s) and %d thread pins.\n", removed.DisplayName, removed.Email, removedPins)
 }
 
 func reserveCommand(args []string) {
@@ -108,8 +108,8 @@ func reserveCommand(args []string) {
 		log.Fatal(err)
 	}
 	if reserve == (accountapi.AccountReserve{}) {
-		fmt.Printf("%s: reserve off\n", account.DisplayName)
+		fmt.Fprintf(stdout, "%s: reserve off\n", account.DisplayName)
 	} else {
-		fmt.Printf("%s: soft reserve %d%%; hard reserve %d%%\n", account.DisplayName, reserve.SoftPercent, reserve.HardPercent)
+		fmt.Fprintf(stdout, "%s: soft reserve %d%%; hard reserve %d%%\n", account.DisplayName, reserve.SoftPercent, reserve.HardPercent)
 	}
 }

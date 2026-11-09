@@ -22,6 +22,6 @@ func printT3ConfigCommand(args []string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println("In T3 Code, open Settings → Providers → Usage providers → Add hub.")
-	fmt.Printf("Hub URL: http://%s\nManagement key: %s\n", address, capability)
+	fmt.Fprintln(stdout, "In T3 Code, open Settings → Providers → Usage providers → Add hub.")
+	fmt.Fprintf(stdout, "Hub URL: http://%s\nManagement key: %s\n", address, capability)
 }

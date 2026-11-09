@@ -11,6 +11,7 @@ from pathlib import Path
 import plistlib
 import queue
 import re
+import secrets
 import select
 import shlex
 import shutil
@@ -50,7 +51,7 @@ CODEX_ACCOUNTS = ['account-1', 'account-2', 'account-3']
 CLAUDE_ACCOUNTS = ['account-4', 'account-5', 'account-6']
 # Proxy timers, shortened as the installer's are in system-test. The fake
 # providers answer at once, so they can be this short.
-ACCOUNT_READ_SECONDS, CONNECTION_DRAIN_SECONDS = 1, 1
+ACCOUNT_READ_SECONDS, CONNECTION_DRAIN_SECONDS, MENU_SNAPSHOT_SECONDS = 1, 1, 1
 MODEL = 'gpt-6-luna'
 LABEL = 'dev.codex-switch.system-test-' + hashlib.sha256(str(RUN).encode()).hexdigest()[:10]
 # A second proxy, as on Josh's other Mac, signed in to the same accounts.
@@ -162,7 +163,7 @@ def prepare_real_services():
 
 def fake_jwt(claims):
     encode = lambda value: base64.urlsafe_b64encode(json.dumps(value).encode()).decode().rstrip('=')
-    return f'{encode({"alg": "none"})}.{encode(claims)}.fake'
+    return f'{encode({"alg": "none"})}.{encode(claims)}.{secrets.token_urlsafe(32)}'
 
 
 def fake_codex_login(number):
@@ -170,13 +171,13 @@ def fake_codex_login(number):
     auth = {'chatgpt_account_id': f'system-test-account-{number}', 'chatgpt_user_id': f'system-test-user-{number}', 'chatgpt_plan_type': 'pro'}
     claims = {'exp': int(time.time()) + 365 * 86400, 'email': f'codex-{number}@system-test.invalid', 'https://api.openai.com/auth': auth}
     return {'auth_mode': 'chatgpt', 'OPENAI_API_KEY': None, 'last_refresh': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
-            'tokens': {'access_token': fake_jwt(claims), 'id_token': fake_jwt(claims), 'refresh_token': 'system-test-no-refresh',
+            'tokens': {'access_token': fake_jwt(claims), 'id_token': fake_jwt(claims), 'refresh_token': 'rt_' + secrets.token_urlsafe(32),
                        'account_id': auth['chatgpt_account_id']}}
 
 
 def fake_claude_login(number):
     """A Claude login only the fake providers accept, valid for a year."""
-    return {'provider': 'claude', 'access_token': f'system-test-claude-token-{number}', 'refresh_token': 'system-test-no-refresh',
+    return {'provider': 'claude', 'access_token': 'sk-ant-oat01-' + secrets.token_urlsafe(32), 'refresh_token': 'sk-ant-ort01-' + secrets.token_urlsafe(32),
             'expires_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(time.time() + 365 * 86400)),
             'account_id': f'system-test-claude-account-{number}', 'organization_id': f'system-test-claude-organization-{number}',
             'email': f'claude-{number}@system-test.invalid', 'plan': 'Max 20x'}
@@ -294,7 +295,8 @@ def proxy_environment():
         environment.update({'CODEX_SWITCH_UPSTREAM_ORIGIN': read('fake-providers-origin'), 'CODEX_SWITCH_CLAUDE_UPSTREAM_ORIGIN': read('fake-providers-origin'),
                             'CODEX_SWITCH_CLAUDE_TOKEN_ORIGIN': read('fake-providers-origin'),
                             'CODEX_SWITCH_ACCOUNT_READ_SECONDS': str(ACCOUNT_READ_SECONDS),
-                            'CODEX_SWITCH_CONNECTION_DRAIN_SECONDS': str(CONNECTION_DRAIN_SECONDS)})
+                            'CODEX_SWITCH_CONNECTION_DRAIN_SECONDS': str(CONNECTION_DRAIN_SECONDS),
+                            'CODEX_SWITCH_MENU_SNAPSHOT_SECONDS': str(MENU_SNAPSHOT_SECONDS)})
     return environment
 
 
@@ -800,6 +802,44 @@ def usage_reads(account, used):
 
 def proxy_log():
     return read('data/proxy.log')
+
+
+# The proxy removes a credential from what it logs and shows wherever this many of its characters, from its start,
+# appear. No real credential is shorter, and fewer are at most its public start, such as "sk-ant-oat01-" or a JWT header.
+CREDENTIAL_PIECE = 16
+
+
+def held_credentials():
+    """Every credential in this run's saved logins, on every proxy, by where it is saved."""
+    found = {}
+    for path in RUN.glob('**/auth.json'):
+        try:
+            auth = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        tokens = auth.get('tokens') or auth
+        for name in ('access_token', 'refresh_token', 'id_token'):
+            if isinstance(tokens.get(name), str) and len(tokens[name]) >= CREDENTIAL_PIECE:
+                found[tokens[name]] = f'the {name} in {path.relative_to(RUN)}'
+    return found
+
+
+def credential_pieces(text, credentials):
+    """(line, credential) for each line of text that holds a part of a credential: CREDENTIAL_PIECE characters of it."""
+    pieces = {credential[start:start + CREDENTIAL_PIECE]: credential for credential in credentials
+              for start in range(len(credential) - CREDENTIAL_PIECE + 1)}
+    found = []
+    for line in text.splitlines():
+        if any(line[start:start + CREDENTIAL_PIECE] in pieces for start in range(len(line) - CREDENTIAL_PIECE + 1)):
+            # Tokens can share a start, such as a JWT header: name the one the line holds most of.
+            found.append((line, max(credentials, key=lambda credential: sum(
+                credential[start:start + CREDENTIAL_PIECE] in line for start in range(len(credential) - CREDENTIAL_PIECE + 1)))))
+    return found
+
+
+def proxy_output_files():
+    """Every proxy log and launchd output file in this run, on every proxy."""
+    return sorted({*RUN.glob('**/proxy.log'), *RUN.glob('**/*launchd.log')})
 
 
 def menu_snapshot_served(data=RUN / 'data'):

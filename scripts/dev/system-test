@@ -57,6 +57,7 @@ class System:
         self.resets = {account: int(time.time()) + number * 86400 for number, account in enumerate(accounts, 1)}
         self.limited, self.idle, self.extra, self.records, self.taskless_usage = set(), set(), [], [], []
         self.credits = []  # reset credits, as `credit account-N ID UNIX` lines
+        self.credentials = rig.held_credentials()  # as saved at the start, before any outcome changes a login
         self.records.append(('requests without a task ID', '', lambda: self.taskless_usage,
                              lambda: rig.forwarded_requests(thread='', session='', client='')))
 
@@ -130,7 +131,7 @@ def main():
     for name, process in groups.items():
         path = rig.ROOT / name / 'results.jsonl'
         reported = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
-        expected = len(next(outcomes for group, _, outcomes in GROUPS if group == name)) + 1
+        expected = len(next(outcomes for group, _, outcomes in GROUPS if group == name)) + len(EVERY_GROUP)
         outcomes_reported = [result for result in reported if 'leftovers' not in result]
         if not any('leftovers' in result for result in reported):
             cleanup = subprocess.run([sys.executable, __file__, '--clean-up', name], capture_output=True, text=True,
@@ -170,7 +171,7 @@ def run_group(name):
         if name == "resets":
             system.extra = ["claude-grant"]
         # The proxy reads credits every five minutes, so the credits these groups test are there from the start.
-        if name in ("resets", "auto-reset", "cold-reset", "authority-off", "authority-rollback"):
+        if name in ("resets", "auto-reset", "cold-reset", "authority-off", "authority-rollback", "secrets"):
             system.credits = reset_credits()
         if name == "routing":
             system.credits = [f'credit account-1 routing-credit {int(time.time()) + 20 * DAY}']
@@ -181,7 +182,7 @@ def run_group(name):
         system.apply()  # before the proxy's first allowance read
         rig.start_fake_providers()
         system.base = rig.start_proxy()
-        for outcome in [*outcomes, every_response_recorded_once]:
+        for outcome in [*outcomes, *EVERY_GROUP]:
             results.write(json.dumps(run_outcome(outcome, system)) + '\n')
             results.flush()
     except Failure as failure:
@@ -1495,8 +1496,8 @@ def rollback_and_back_spends_no_second_credit(system):
 
 
 def no_part_of_a_token_reaches_the_log(system):
-    """When OpenAI's reason for refusing a request quotes the request's access token where the proxy shortens what it
-    logs, the proxy log holds no part of the token"""
+    """When OpenAI's reason for refusing or failing a request quotes the request's access token where the proxy shortens
+    what it logs, the proxy log holds no part of the token"""
     with simulating(system, 'token-quoting-error'):
         try:
             rig.post_without_task_id(system.base, 'Reply with the word refused.')
@@ -1508,10 +1509,116 @@ def no_part_of_a_token_reaches_the_log(system):
             refused.read()
         quoted = rig.wait_for(lambda: [line for line in rig.proxy_log().splitlines() if 'with HTTP 503' in line and 'Rejected Bearer' in line]
                               if len(rig.fake_provider_events('token-quoting-error')) >= 2 else None, 'the proxy to log both refusals')
-    tokens = [json.loads((rig.RUN / 'data' / account / 'auth.json').read_text())['tokens']['access_token'] for account in rig.CODEX_ACCOUNTS]
-    if len(quoted) < 2 or any('Bearer ' + token[:3] in rig.proxy_log() for token in tokens):
-        raise Failure('The proxy logged a token, or part of one:\n' + '\n'.join(quoted))
-    return 'OpenAI quoted the access token across the 300 bytes of a reason the log keeps, and across the 4096 bytes the proxy reads of another body. The proxy logged:\n' + '\n'.join(line.split(' ', 1)[1] for line in quoted)
+    with simulating(system, 'token-quoting-failure'):
+        rig.post_without_task_id(system.base, 'Reply with the word failed.')
+        quoted += rig.wait_for(lambda: [line for line in rig.proxy_log().splitlines() if 'OpenAI failed the' in line and 'Rejected' in line],
+                               'the proxy to log the failed response')
+    leaked = rig.credential_pieces(rig.proxy_log(), system.credentials)
+    if len(quoted) < 3 or leaked:
+        raise Failure('The proxy logged a token, or part of one:\n' + '\n'.join(line for line, _ in leaked))
+    return ('OpenAI quoted the access token across the 300 bytes of a reason the log keeps, across the 4096 bytes the proxy reads of '
+            'another body, and in the reason it failed a response. The proxy logged:\n' + '\n'.join(line.split(' ', 1)[1] for line in quoted))
+
+
+def a_reset_result_quoting_the_token_is_neither_logged_nor_printed(system):
+    """When OpenAI answers a request to spend a reset credit with a result that is the request's access token, neither
+    the automatic reset nor the reset command logs or prints any part of it"""
+    automatic_resets(True)
+    system.limited = set(system.accounts)
+    system.extra = ['reset-token-code', 'usage-lag']
+    system.apply()
+    wait_until_every_account_reads_limited()
+    system.waiting = rig.CodexTask('waiting-for-a-reset', 'Reply with the word reset.')
+    logged = rig.wait_for(lambda: [line for line in rig.proxy_log().splitlines() if 'Automatic reset: reset outcome unknown' in line]
+                          if rig.fake_provider_events('reset-token-code') else None, 'the proxy to ask for a credit and log the reply it cannot read')
+    command = reset_command('cli', 'reset', 'codex')
+    if command.returncode == 0 or 'outcome unknown' not in command.stderr:
+        raise Failure(f'The reset command, answered with the access token: {command.stdout} {command.stderr}')
+    leaked = rig.credential_pieces('\n'.join((rig.proxy_log(), command.stdout, command.stderr)), system.credentials)
+    if leaked:
+        raise Failure('The proxy log or the reset command holds a token, or part of one:\n' + '\n'.join(line for line, _ in leaked))
+    return (f'OpenAI answered each request to spend {CHOSEN_CREDIT["cli"][1]} with the access token as its result. The proxy logged:\n'
+            f'{logged[0].split(" ", 1)[1]}\nThe reset command printed: {command.stderr.strip()}')
+
+
+SPENDING_PAUSED = 'so spending reset credits is paused'
+
+
+def a_signed_out_account_pauses_resets_and_says_why_once(system):
+    """While the account a credit reset is signed out, so OpenAI's usage reading cannot show the reset, no credit is
+    spent, and the log says once that spending is paused and why. Work resumes on that account once it signs in again"""
+    system.extra = ['usage-lag']
+    system.apply()
+    rig.wait_for(lambda: spends() and READING_LAGS in rig.proxy_log(), 'the proxy to spend a credit, then wait for OpenAI\'s reading to show it')
+    account = CHOSEN_CREDIT['cli'][0]
+    path = rig.RUN / 'data' / account / 'auth.json'
+    signed_in = path.read_text()
+    auth = json.loads(signed_in)
+    auth['tokens']['access_token'] = ''
+    path.with_name('auth.json.next').write_text(json.dumps(auth))
+    os.replace(path.with_name('auth.json.next'), path)
+    paused = lambda: [line for line in rig.proxy_log().splitlines() if SPENDING_PAUSED in line]
+    rig.wait_for(paused, f'the proxy to log that spending is paused while {account} is signed out')
+    # Each reset decision reads every signed-in account afresh.
+    reads = len(rig.fake_provider_events('usage-read', account='account-1'))
+    rig.wait_for(lambda: len(rig.fake_provider_events('usage-read', account='account-1')) >= reads + 5, 'more reset decisions')
+    said = paused()
+    if len(said) != 1 or spends() != [CHOSEN_CREDIT['cli']]:
+        raise Failure(f'Expected one spend, of {CHOSEN_CREDIT["cli"][1]}, and one line saying spending is paused; OpenAI spent {spends()} '
+                      f'and the proxy logged:\n' + '\n'.join(said))
+    path.with_name('auth.json.next').write_text(signed_in)
+    os.replace(path.with_name('auth.json.next'), path)
+    system.extra = []
+    system.apply()
+    resumed_on_the_reset_account(system.waiting)
+    system.record_codex_task('work waiting for a reset', system.waiting.thread)
+    return (f'The proxy spent {CHOSEN_CREDIT["cli"][1]}; then {account} was signed out while OpenAI\'s reading still lagged. '
+            f'Over the next reset decisions it spent nothing and logged once:\n{said[0].split(" ", 1)[1]}\n'
+            f'Once {account} was signed in again and the reading caught up, the waiting work finished there.')
+
+
+def a_claude_refresh_failure_quoting_the_refresh_token_is_not_shown(system):
+    """When Anthropic fails to refresh a Claude login with a message that quotes the refresh token, status shows why
+    without any part of a credential"""
+    require_available_claude_accounts(1)
+    account = rig.CLAUDE_ACCOUNTS[-1]
+    path = rig.RUN / 'data' / account / 'auth.json'
+    auth = json.loads(path.read_text())
+    auth['expires_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(time.time() - 60))
+    path.with_name('auth.json.next').write_text(json.dumps(auth))
+    with simulating(system, 'claude-refresh-unavailable'):
+        os.replace(path.with_name('auth.json.next'), path)
+        status = rig.wait_for(lambda: next((shown for shown in [rig.proxy_command('status')] if 'not found or invalid' in shown), None),
+                              f'status to show why {account} cannot be used', timeout=30, fail=False)
+    if not status:
+        raise Failure(f'Status did not show why {account} cannot be used:\n{rig.proxy_command("status")}')
+    leaked = rig.credential_pieces(status, system.credentials)
+    if leaked:
+        raise Failure('Status shows a token, or part of one:\n' + '\n'.join(line for line, _ in leaked))
+    return 'Anthropic failed the refresh with HTTP 503, quoting the refresh token. Status showed:\n' + next(
+        line.strip() for line in status.splitlines() if 'not found or invalid' in line)
+
+
+PUBLISHED_RELEASE_LINE = re.compile(r'\d{4}/\d\d/\d\d \d\d:\d\d:\d\d ')
+
+
+def no_credential_reaches_the_proxy_output(system):
+    """No proxy log or launchd output holds any part of a credential in the run's logins"""
+    credentials = {**system.credentials, **rig.held_credentials()}
+    files, found = rig.proxy_output_files(), []
+    for path in files:
+        # The published releases a group updates from predate this check, and wrote their lines with times such as
+        # 2026/11/09 18:45:42; this tree's builds write RFC 3339 times.
+        text = '\n'.join(line for line in path.read_text(errors='replace').splitlines() if not PUBLISHED_RELEASE_LINE.match(line))
+        found += [f'{path.relative_to(rig.RUN)} holds part of {credentials[credential]}: {line[:400]}'
+                  for line, credential in rig.credential_pieces(text, credentials)]
+    if found:
+        raise Failure('\n'.join(found[:10]) + (f'\n...and {len(found) - 10} more lines' if len(found) > 10 else ''))
+    return f'{len(files)} proxy logs and launchd output files hold no part of the {len(credentials)} credentials in this run\'s logins.'
+
+
+# Every group ends with these.
+EVERY_GROUP = [every_response_recorded_once, no_credential_reaches_the_proxy_output]
 
 
 # Each group shares one isolated system and runs at once with every other group. The first update and the rollback
@@ -1527,7 +1634,8 @@ GROUPS = [
     ('authority-off', 'cli', [no_credit_is_spent_while_the_authority_is_off]),
     ('expiry-reset', 'cli', [expiring_credit_is_spent_once_by_the_authority]),
     ('authority-rollback', 'published-release', [rollback_and_back_spends_no_second_credit]),
-    ('secrets', 'cli', [no_part_of_a_token_reaches_the_log]),
+    ('secrets', 'cli', [no_part_of_a_token_reaches_the_log, a_reset_result_quoting_the_token_is_neither_logged_nor_printed,
+                        a_signed_out_account_pauses_resets_and_says_why_once, a_claude_refresh_failure_quoting_the_refresh_token_is_not_shown]),
     ('routing', 'cli', [t3_reads_the_account_pool, new_work_goes_to_the_allowance_that_resets_first, request_without_task_id_is_served]),
     ('exhaustion', 'cli', [exhausted_task_moves_on_its_next_turn]),
     ('outage-goal', 'cli', [goal_continues_when_an_account_returns]),

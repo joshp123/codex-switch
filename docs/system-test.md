@@ -39,7 +39,10 @@ Before a release, also run the smoke test (see below).
 | authority-off | With automatic resets off and every Codex account out, no credit is spent; the work waits and resumes when an account refills. |
 | expiry-reset | Of two proxies, only the one with automatic resets on spends a credit in its last hour. It keeps the credit while its account has used no more of its week than the share of the week that has passed, or when OpenAI finds nothing to reset; a later attempt, under a new request ID, spends it once, and the account's second credit is then kept. |
 | authority-rollback | The proxy with automatic resets on spends a credit and loses the reply. `deploy/deploy.sh back` restores the published release, which spends nothing by itself, and its reset command finishes the pending reset. After the next update the proxy spends no second credit while the reading lags, and the work resumes on the reset account once it catches up. |
-| secrets | When OpenAI's reason for refusing a model request, or another request, quotes the access token across the 300 bytes of a reason the log keeps or the 4096 bytes the proxy reads, the proxy log holds no part of the token. |
+| secrets | When OpenAI's reason for refusing a model request, or another request, or for failing a response, quotes the access token across the 300 bytes of a reason the log keeps or the 4096 bytes the proxy reads, the proxy log holds no part of the token. |
+| secrets | When OpenAI answers a request to spend a reset credit with the access token as its result, neither the automatic reset nor the reset command logs or prints any part of it. |
+| secrets | While the account a credit reset is signed out, so OpenAI's usage reading cannot show the reset, no credit is spent, and the log says once that spending is paused and why. Work resumes on that account once it signs in again. |
+| secrets | When Anthropic fails to refresh a Claude login with a message that quotes the refresh token, status shows why without any part of a credential. |
 | routing | New Codex tasks and Pi sessions go to an account whose week has not started, then to the weekly allowance that resets first. They and their Codex forks stay on their account when another account becomes first, and move for a hard reserve. |
 | routing | A request without a task ID is served. |
 | exhaustion | When a task's account runs out, its next turn moves to another account. No model work is replayed, no tool effect repeats, and Codex shows no error. |
@@ -56,6 +59,7 @@ Before a release, also run the smoke test (see below).
 | failed-release | Provider errors and client cancellations do not count against a candidate. Malformed upstream responses do: the candidate steps aside and status shows the skipped build. |
 | queue | Two releases queued during a switch converge on the newest, with at most two proxy processes and no downgrade. |
 | every group | Each completed response is recorded once, with its account, task and tokens. |
+| every group | No proxy log or launchd output holds any part of a credential in the run's logins: 16 characters of one in a row. Lines the published releases wrote, which predate this check, are left out. |
 
 The command exits 0 only if every outcome held and nothing is left running.
 
@@ -91,16 +95,20 @@ number of requests, refused WebSockets, a WebSocket ended at OpenAI's one-hour l
 and usage-read errors, a Claude throttle with a one-second Retry-After as
 Anthropic sent on 31 October 2026, and a Claude five-hour limit. It refuses
 every fast-mode Claude request as Anthropic does for an account without usage
-credits. It refuses every Claude login refresh with Anthropic's error, and its
-message quotes the refresh token sent. It holds reset credits and spends them
+credits. It refuses every Claude login refresh with Anthropic's error, or
+with HTTP 503 when the test asks. Every error it returns quotes the
+credentials of the request it answers, as a careless provider might: the
+Authorization header, or the refresh token sent. Its logins have random
+tokens, so a test can find any part of one in what the proxy writes. It holds reset credits and spends them
 as OpenAI does: once per request ID, and `no_credit` for a credit spent by
 another request, expired or never held. A request ID names one attempt, as
 Codex's own client treats it, so a repeat gets the attempt's first answer. It answers `nothing_to_reset` for an
 account under 20% used; OpenAI documents no such level, so the test picks one
 to make that answer happen. It can hold requests to spend a credit, lose
 every reply to one, and make its usage reading lag behind a spend. It can
-refuse requests with a reason that quotes their access token where the proxy
-shortens what it logs. It logs every model request with a fingerprint of its bytes, so the
+refuse requests, or fail a response, with a reason that quotes their access
+token where the proxy shortens what it logs, and answer a request to spend a
+credit with the access token as its result. It logs every model request with a fingerprint of its bytes, so the
 test can see that none was sent twice, and every usage read with the level it
 reported, so the test can wait until the proxy has read a level.
 
@@ -124,6 +132,7 @@ Timers are shortened; their live values are unchanged:
 | Installer switch limit | 30 minutes | 15 seconds |
 | Account reads (`CODEX_SWITCH_ACCOUNT_READ_SECONDS`) | 1 minute | 1 second |
 | Idle Claude connection grace on retiring (`CODEX_SWITCH_CONNECTION_DRAIN_SECONDS`) | 1 minute | 1 second |
+| Menu snapshot (`CODEX_SWITCH_MENU_SNAPSHOT_SECONDS`) | 1 minute | 1 second |
 | launchd's wait before restarting a job that exited | 10 seconds | 1 second |
 
 The switch limit counts the candidate's start and proof. In the test, as live, it

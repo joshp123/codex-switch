@@ -175,6 +175,8 @@ type providers struct {
 //	token-quoting-error             Codex model and model-list requests receive a provider HTTP error quoting the request's
 //	                                access token where the proxy shortens what it logs: after 260 bytes of a model
 //	                                request's reason, and across the 4096 bytes it reads of any other body
+//	token-quoting-failure           Codex model requests over HTTP start, then OpenAI fails the response with a message
+//	                                quoting the request's access token after 260 bytes
 //	usage-error                     usage reads receive a provider HTTP error
 //	hold-usage-reads                usage reads wait, unanswered
 //	claude-throttle COUNT           the next COUNT Claude model requests receive a 429 that names no usage limit
@@ -184,9 +186,12 @@ type providers struct {
 //	reset-soon                      a limited account-2 refills five minutes from each read
 //	reset-drop                      requests to spend a credit are answered as usual, but the replies are lost
 //	reset-refuse                    requests to spend a credit receive a provider HTTP error
+//	reset-token-code                requests to spend a credit are answered with the request's access token as the code,
+//	                                and spend nothing
 //	hold-resets                     requests to spend a credit wait, unanswered and not yet applied
 //	usage-lag                       usage reads report each account as it was before a credit reset it
 //	claude-grant                    Claude usage reads report reset grants
+//	claude-refresh-unavailable      Claude login refreshes receive HTTP 503 instead of invalid_grant, with the same message
 //
 // A credit is spent as OpenAI spends one: once, for one redeem_request_id; a
 // repeat of that request is already_redeemed, and any other request for it, or
@@ -202,29 +207,36 @@ type providers struct {
 //
 // Fast-mode Claude requests are always refused, as for an account without usage credits.
 // Claude login refreshes are always refused, as for a refresh token Anthropic has
-// retired, with Anthropic's error and message; the message also quotes the
-// refresh token sent, so a test can see the proxy never logs it.
+// retired, with Anthropic's error and message.
+//
+// Every error these fakes return quotes the credentials of the request it
+// answers: an error's message or body quotes its Authorization header, and a
+// refused Claude refresh quotes the refresh token sent. So every test can see
+// that the proxy never logs or shows a credential, whatever a provider sends.
 type controls struct {
-	weeklyUsed     map[string]float64
-	weeklyResets   map[string]int64
-	weeklyIdle     map[string]bool
-	limited        map[string]bool
-	httpOnly       bool
-	holdResponses  map[string]bool
-	breakResponses bool
-	providerError  bool
-	quoteToken     bool
-	usageError     bool
-	holdUsageReads bool
-	claudeThrottle bool
-	claudeLimited  map[string]bool
-	credits        map[string][]fakeCredit
-	resetSoon      bool
-	resetDrop      bool
-	resetRefuse    bool
-	holdResets     bool
-	usageLag       bool
-	claudeGrant    bool
+	weeklyUsed       map[string]float64
+	weeklyResets     map[string]int64
+	weeklyIdle       map[string]bool
+	limited          map[string]bool
+	httpOnly         bool
+	holdResponses    map[string]bool
+	breakResponses   bool
+	providerError    bool
+	quoteToken       bool
+	quoteInFailure   bool
+	usageError       bool
+	holdUsageReads   bool
+	claudeThrottle   bool
+	claudeLimited    map[string]bool
+	credits          map[string][]fakeCredit
+	resetSoon        bool
+	resetDrop        bool
+	resetRefuse      bool
+	resetTokenCode   bool
+	holdResets       bool
+	usageLag         bool
+	claudeGrant      bool
+	claudeRefresh503 bool
 }
 
 type fakeCredit struct {
@@ -257,6 +269,12 @@ func (providers *providers) readControls() (controls, error) {
 			parsed.resetDrop = true
 		case len(fields) == 1 && fields[0] == "reset-refuse":
 			parsed.resetRefuse = true
+		case len(fields) == 1 && fields[0] == "reset-token-code":
+			parsed.resetTokenCode = true
+		case len(fields) == 1 && fields[0] == "claude-refresh-unavailable":
+			parsed.claudeRefresh503 = true
+		case len(fields) == 1 && fields[0] == "token-quoting-failure":
+			parsed.quoteInFailure = true
 		case len(fields) == 1 && fields[0] == "hold-resets":
 			parsed.holdResets = true
 		case len(fields) == 1 && fields[0] == "usage-lag":
@@ -354,7 +372,7 @@ func (providers *providers) ServeHTTP(writer http.ResponseWriter, request *http.
 		providers.spendResetCredit(writer, request, controls, alias)
 	case request.URL.Path == usagePath && controls.usageError:
 		providers.logRequest("usage-error", request, http.StatusServiceUnavailable)
-		http.Error(writer, "provider unavailable (simulation)", http.StatusServiceUnavailable)
+		http.Error(writer, "provider unavailable (simulation)"+quotedCredentials(request), http.StatusServiceUnavailable)
 	case request.URL.Path == usagePath:
 		for controls.holdUsageReads {
 			select {
@@ -372,10 +390,13 @@ func (providers *providers) ServeHTTP(writer http.ResponseWriter, request *http.
 		writeJSON(writer, http.StatusOK, body)
 	case request.URL.Path != responsesPath:
 		providers.logRequest("not-found", request, http.StatusNotFound)
-		http.NotFound(writer, request)
+		http.Error(writer, "404 page not found"+quotedCredentials(request), http.StatusNotFound)
+	case controls.quoteInFailure && !webSocket:
+		providers.logRequest("token-quoting-failure", request, http.StatusOK)
+		providers.failCodexResponse(writer, request)
 	case controls.providerError:
 		providers.logRequest("provider-error", request, http.StatusServiceUnavailable)
-		http.Error(writer, "provider unavailable (simulation)", http.StatusServiceUnavailable)
+		http.Error(writer, "provider unavailable (simulation)"+quotedCredentials(request), http.StatusServiceUnavailable)
 	case controls.breakResponses:
 		providers.logRequest("malformed-response", request, 0)
 		if connection, _, err := writer.(http.Hijacker).Hijack(); err == nil {
@@ -384,10 +405,10 @@ func (providers *providers) ServeHTTP(writer http.ResponseWriter, request *http.
 		}
 	case webSocket && controls.httpOnly:
 		providers.logRequest("websocket-refused", request, http.StatusUpgradeRequired)
-		http.Error(writer, "WebSocket refused (simulation)", http.StatusUpgradeRequired)
+		http.Error(writer, "WebSocket refused (simulation)"+quotedCredentials(request), http.StatusUpgradeRequired)
 	case controls.limited[alias] && !providers.accountReset(alias):
 		providers.logRequest("rejected-usage-limit", request, http.StatusTooManyRequests)
-		writeJSON(writer, http.StatusTooManyRequests, usageLimitError())
+		writeJSON(writer, http.StatusTooManyRequests, usageLimitError(request))
 	case webSocket:
 		providers.serveCodexWebSocket(writer, request)
 	default:
@@ -445,7 +466,12 @@ func (providers *providers) spendResetCredit(writer http.ResponseWriter, request
 	_ = json.NewDecoder(request.Body).Decode(&claim)
 	if controls.resetRefuse {
 		log.Printf("event=reset-refused account=%s credit=%s", alias, claim.CreditID)
-		http.Error(writer, "provider unavailable (simulation)", http.StatusServiceUnavailable)
+		http.Error(writer, "provider unavailable (simulation)"+quotedCredentials(request), http.StatusServiceUnavailable)
+		return
+	}
+	if controls.resetTokenCode {
+		log.Printf("event=reset-token-code account=%s credit=%s request=%s", alias, claim.CreditID, claim.RequestID)
+		writeJSON(writer, http.StatusOK, fmt.Appendf(nil, `{"code":%q}`, strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer ")))
 		return
 	}
 	log.Printf("event=reset-claim account=%s credit=%s request=%s", alias, claim.CreditID, claim.RequestID)
@@ -548,12 +574,20 @@ func accountsCheck(accountID string) []byte {
 
 // webSocketAgeLimitError is what OpenAI sends when a Responses WebSocket has
 // been open an hour, as Codex's own tests reproduce it.
-func webSocketAgeLimitError() []byte {
-	return []byte(`{"type":"error","status":400,"error":{"type":"invalid_request_error","code":"websocket_connection_limit_reached","message":"Responses websocket connection limit reached (60 minutes). Create a new websocket connection to continue."}}`)
+func webSocketAgeLimitError(request *http.Request) []byte {
+	return fmt.Appendf(nil, `{"type":"error","status":400,"error":{"type":"invalid_request_error","code":"websocket_connection_limit_reached","message":%q}}`,
+		"Responses websocket connection limit reached (60 minutes). Create a new websocket connection to continue."+quotedCredentials(request))
 }
 
-func usageLimitError() []byte {
-	return fmt.Appendf(nil, `{"type":"error","status":429,"error":{"type":"usage_limit_reached","message":"Usage limit reached (simulation)","plan_type":"pro","resets_at":%d}}`, time.Now().Add(time.Hour).Unix())
+func usageLimitError(request *http.Request) []byte {
+	return fmt.Appendf(nil, `{"type":"error","status":429,"error":{"type":"usage_limit_reached","message":%q,"plan_type":"pro","resets_at":%d}}`,
+		"Usage limit reached (simulation)"+quotedCredentials(request), time.Now().Add(time.Hour).Unix())
+}
+
+// quotedCredentials is the request's credentials as a provider might quote
+// them back in an error; see controls.
+func quotedCredentials(request *http.Request) string {
+	return " (sent with Authorization: " + request.Header.Get("Authorization") + ")"
 }
 
 func (providers *providers) alias(request *http.Request) string {
@@ -860,6 +894,25 @@ func (providers *providers) serveCodexHTTP(writer http.ResponseWriter, request *
 	}
 }
 
+// failCodexResponse starts a response, then fails it as OpenAI does, with a
+// message that quotes the request's access token after 260 bytes.
+func (providers *providers) failCodexResponse(writer http.ResponseWriter, request *http.Request) {
+	_, _ = io.Copy(io.Discard, request.Body)
+	id := fmt.Sprintf("resp_fake_%d", providers.sequence.Add(1))
+	message := strings.Repeat("x", 260) + " Rejected " + request.Header.Get("Authorization")
+	events := []map[string]any{
+		{"type": "response.created", "response": map[string]any{"id": id, "status": "in_progress", "output": []any{}}},
+		{"type": "response.failed", "response": map[string]any{"id": id, "status": "failed", "output": []any{},
+			"error": map[string]any{"type": "server_error", "code": "server_error", "message": message}}},
+	}
+	writer.Header().Set("Content-Type", "text/event-stream")
+	writer.WriteHeader(http.StatusOK)
+	for _, event := range events {
+		encoded, _ := json.Marshal(event)
+		fmt.Fprintf(writer, "event: %s\ndata: %s\n\n", event["type"], encoded)
+	}
+}
+
 // serveCodexWebSocket answers each response.create message on the connection.
 // Messages are read on their own goroutine, so a client that goes away cancels
 // a held reply. A simulated limit lands between two model requests, as a real
@@ -902,7 +955,7 @@ func (providers *providers) serveCodexWebSocket(writer http.ResponseWriter, requ
 		case <-ageLimitCheck.C:
 			if providers.takeControlLine("websocket-age-limit") {
 				providers.logRequest("websocket-age-limit", request, http.StatusBadRequest)
-				_ = client.Write(ctx, websocket.MessageText, webSocketAgeLimitError())
+				_ = client.Write(ctx, websocket.MessageText, webSocketAgeLimitError(request))
 				client.Close(websocket.StatusNormalClosure, "")
 				return
 			}
@@ -913,7 +966,7 @@ func (providers *providers) serveCodexWebSocket(writer http.ResponseWriter, requ
 		if isModelRequest(payload) {
 			if providers.takeCountedControl("exhaust-after", providers.alias(request), forwarded) {
 				providers.logRequest("websocket-rejected-usage-limit", request, http.StatusTooManyRequests)
-				if client.Write(ctx, websocket.MessageText, usageLimitError()) != nil {
+				if client.Write(ctx, websocket.MessageText, usageLimitError(request)) != nil {
 					return
 				}
 				continue
@@ -943,9 +996,13 @@ func (providers *providers) serveAnthropic(writer http.ResponseWriter, request *
 			RefreshToken string `json:"refresh_token"`
 		}
 		_ = json.NewDecoder(request.Body).Decode(&refresh)
-		providers.logRequest("claude-refresh-refused", request, http.StatusBadRequest)
+		status := http.StatusBadRequest
+		if controls.claudeRefresh503 {
+			status = http.StatusServiceUnavailable
+		}
+		providers.logRequest("claude-refresh-refused", request, status)
 		refusal, _ := json.Marshal(map[string]string{"error": "invalid_grant", "error_description": "Refresh token " + refresh.RefreshToken + " not found or invalid"})
-		writeJSON(writer, http.StatusBadRequest, refusal)
+		writeJSON(writer, status, refusal)
 	case request.URL.Path == claudeUsagePath && controls.claudeGrant:
 		writeJSON(writer, http.StatusOK, fmt.Appendf(nil, `{"five_hour":{"utilization":10,"resets_at":%q},"cedar_ember":{"eligible":true,"grants":[{"resets_left":2},{"resets_left":1,"ends_at":%q}]}}`, time.Now().Add(3*time.Hour).Format(time.RFC3339), time.Now().Add(-time.Hour).Format(time.RFC3339)))
 	case request.URL.Path == claudeUsagePath && controls.claudeLimited[alias]:
@@ -967,13 +1024,13 @@ func (providers *providers) serveAnthropic(writer http.ResponseWriter, request *
 		case controls.claudeLimited[alias]:
 			providers.logRequest("claude-rejected-usage-limit", request, http.StatusTooManyRequests)
 			reset := strconv.FormatInt(claudeLimitReset().Unix(), 10)
-			writeClaudeRejection(writer, map[string]string{"status": "rejected", "reset": reset, "representative-claim": "five_hour",
+			writeClaudeRejection(writer, request, map[string]string{"status": "rejected", "reset": reset, "representative-claim": "five_hour",
 				"5h-status": "rejected", "5h-utilization": "1.0", "5h-reset": reset}, "Rate limited (simulation)")
 		case message.Speed == "fast":
 			// What Anthropic answers an account without usage credits, which pay
 			// for fast mode on a subscription.
 			providers.logRequest("claude-fast-mode-refused", request, http.StatusTooManyRequests)
-			writeClaudeRejection(writer, map[string]string{"overage-disabled-reason": "org_level_disabled",
+			writeClaudeRejection(writer, request, map[string]string{"overage-disabled-reason": "org_level_disabled",
 				"reset": strconv.FormatInt(time.Now().AddDate(0, 1, 0).Unix(), 10)}, "Usage credits are required for fast mode.")
 		case controls.claudeThrottle && providers.takeCountedControl("claude-throttle", alias, 0):
 			// What Anthropic sent on 31 October 2026: a 429 naming no exhausted
@@ -981,7 +1038,7 @@ func (providers *providers) serveAnthropic(writer http.ResponseWriter, request *
 			// the account's five-hour nor its weekly window.
 			providers.logRequest("claude-throttled", request, http.StatusTooManyRequests)
 			writer.Header().Set("Retry-After", "1")
-			writeClaudeRejection(writer, map[string]string{"status": "rejected", "reset": strconv.FormatInt(time.Now().Add(7*time.Hour).Unix(), 10),
+			writeClaudeRejection(writer, request, map[string]string{"status": "rejected", "reset": strconv.FormatInt(time.Now().Add(7*time.Hour).Unix(), 10),
 				"5h-status": "allowed", "5h-utilization": "0.15", "5h-reset": strconv.FormatInt(time.Now().Add(3*time.Hour).Unix(), 10)}, "Rate limited (simulation)")
 		default:
 			providers.logRequest("claude-forwarded", request, http.StatusOK)
@@ -1068,11 +1125,11 @@ func claudeAlias(accessToken string) string {
 // claudeLimitReset is an hour from now, as usageLimitError's reset is.
 func claudeLimitReset() time.Time { return time.Now().Add(time.Hour).Truncate(time.Second) }
 
-func writeClaudeRejection(writer http.ResponseWriter, limits map[string]string, message string) {
+func writeClaudeRejection(writer http.ResponseWriter, request *http.Request, limits map[string]string, message string) {
 	for name, value := range limits {
 		writer.Header().Set("Anthropic-Ratelimit-Unified-"+name, value)
 	}
-	body, _ := json.Marshal(map[string]any{"type": "error", "error": map[string]string{"type": "rate_limit_error", "message": message}})
+	body, _ := json.Marshal(map[string]any{"type": "error", "error": map[string]string{"type": "rate_limit_error", "message": message + quotedCredentials(request)}})
 	writeJSON(writer, http.StatusTooManyRequests, body)
 }
 

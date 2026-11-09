@@ -18,7 +18,7 @@ func resetCommand(args []string) {
 		log.Fatal("usage: codex-switch reset <codex|claude>")
 	}
 	if args[0] == "claude" {
-		fmt.Println("Claude resets are not supported yet.")
+		fmt.Fprintln(stdout, "Claude resets are not supported yet.")
 		return
 	}
 	originValue := strings.TrimSpace(os.Getenv("CODEX_SWITCH_UPSTREAM_ORIGIN"))
@@ -34,7 +34,7 @@ func resetCommand(args []string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println(result.Message)
+	fmt.Fprintln(stdout, result.Message)
 }
 
 // autoResetCommand turns this installation's automatic resets on or off; see
@@ -48,8 +48,8 @@ func autoResetCommand(args []string) {
 		log.Fatal(err)
 	}
 	if args[0] == "on" {
-		fmt.Println("Automatic resets on: this Mac's proxy spends a Codex reset credit when the pool is out, or before a credit expires. Keep them on for one Mac only.")
+		fmt.Fprintln(stdout, "Automatic resets on: this Mac's proxy spends a Codex reset credit when the pool is out, or before a credit expires. Keep them on for one Mac only.")
 		return
 	}
-	fmt.Println("Automatic resets off: this Mac's proxy spends no reset credit by itself. `codex-switch reset codex` still spends one.")
+	fmt.Fprintln(stdout, "Automatic resets off: this Mac's proxy spends no reset credit by itself. `codex-switch reset codex` still spends one.")
 }

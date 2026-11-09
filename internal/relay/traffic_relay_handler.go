@@ -308,7 +308,6 @@ func (handler *TrafficRelayHandler) serveAuthenticatedTraffic(response http.Resp
 	if workKind == store.ModelTurnWorkKind {
 		observer := newTerminalResponseObserver(taskID, client, routeDecision.AccountKey, handler.taskRouter, handler.completionLedger)
 		observer.accountDisplayName = routeDecision.DisplayName
-		observer.accessToken = routeDecision.Credentials.AccessToken
 		if provider == accounts.ProviderClaude {
 			observer.claudeUsage = usage.NewClaudeResponseUsage(modelSlug, serviceTier, inferenceGeo)
 		}

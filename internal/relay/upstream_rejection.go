@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/joshp123/codex-switch/internal/accounts"
 	"github.com/joshp123/codex-switch/internal/store"
 )
 
@@ -28,7 +27,7 @@ func (handler *TrafficRelayHandler) observeRejectedResponse(routedRequest *route
 			io.Reader
 			io.Closer
 		}{io.MultiReader(bytes.NewReader(head), upstreamResponse.Body), upstreamResponse.Body}
-		log.Printf("%s: OpenAI answered %s %s with HTTP %d%s", subject, upstreamResponse.Request.Method, upstreamResponse.Request.URL.Path, upstreamResponse.StatusCode, describeRejection(upstreamResponse.Header, head, routedRequest.routeDecision.Credentials.AccessToken))
+		log.Printf("%s: OpenAI answered %s %s with HTTP %d%s", subject, upstreamResponse.Request.Method, upstreamResponse.Request.URL.Path, upstreamResponse.StatusCode, describeRejection(upstreamResponse.Header, head))
 		return nil
 	}
 	if upstreamResponse.StatusCode == http.StatusUnauthorized {
@@ -55,24 +54,21 @@ func (handler *TrafficRelayHandler) observeRejectedResponse(routedRequest *route
 		log.Printf("%s: OpenAI says this account does not offer %s; Codex retries, and the retry goes to an account that offers it or waits for one", subject, routedRequest.modelSlug)
 		return errUpstreamRejectedBeforeAdmission
 	}
-	log.Printf("%s: OpenAI rejected %s with HTTP %d%s", subject, routedRequest.modelSlug, upstreamResponse.StatusCode, describeRejection(upstreamResponse.Header, body, routedRequest.routeDecision.Credentials.AccessToken))
+	log.Printf("%s: OpenAI rejected %s with HTTP %d%s", subject, routedRequest.modelSlug, upstreamResponse.StatusCode, describeRejection(upstreamResponse.Header, body))
 	return nil
 }
 
 // describeRejection quotes why a request was refused: Cloudflare's challenge
 // when Cloudflare stopped it before OpenAI, OpenAI's API error when the body is
-// one, otherwise the page title or the start of the text, on one line. body
-// may be only the start of the response. The access token the request carried
-// is removed, whatever the provider quoted.
-func describeRejection(header http.Header, body []byte, accessToken string) string {
-	return withoutTokenShortened(describeRejectionText(header, accounts.WithoutCutSecret(body, accessToken)), accessToken)
+// one, otherwise the page title or the start of the text, on one line,
+// shortened to 300 bytes. body may be only the start of the response.
+func describeRejection(header http.Header, body []byte) string {
+	return shortened(describeRejectionText(header, body))
 }
 
-// withoutTokenShortened removes the access token from a provider's reason,
-// then shortens it to 300 bytes. In the other order a token the cut splits
-// would no longer match, and its start would be logged.
-func withoutTokenShortened(reason, accessToken string) string {
-	reason = accounts.WithoutSecrets(reason, accessToken)
+// shortened keeps the first 300 bytes of a provider's reason. The proxy log
+// removes a credential the cut splits; see heldcredentials.
+func shortened(reason string) string {
 	if len(reason) > 300 {
 		reason = reason[:300] + "..."
 	}
@@ -100,7 +96,7 @@ func describeRejectionText(header http.Header, body []byte) string {
 }
 
 // describeProviderReason quotes the error OpenAI returned, on one line, in
-// full; see withoutTokenShortened.
+// full; see shortened.
 func describeProviderReason(rejected httpJSONResponseWire) string {
 	reason := rejected.Detail
 	if rejected.Error != nil {

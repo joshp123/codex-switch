@@ -72,8 +72,10 @@ func (reset unconfirmedReset) waitingFor(readings []codexAccountReading, now tim
 		name := reading.account.DisplayName
 		switch {
 		case reading.signedOut:
-			return fmt.Sprintf("No reset: %s, whose reset credit %s was spent at %s, is signed out, so OpenAI's usage reading cannot show the reset.",
-				name, reset.CreditID, logtime.Format(reset.AskedAt))
+			return fmt.Sprintf("No reset: %s is signed out, and its reset credit %s, spent at %s, is not confirmed yet. OpenAI's usage reading "+
+				"cannot show the reset while the account is signed out, and a credit spent before it does could be wasted, so spending reset "+
+				"credits is paused, automatically and by `codex-switch reset codex`, until %s is signed in again (codex-switch login %q) or removed.",
+				name, reset.CreditID, logtime.Format(reset.AskedAt), name, name)
 		case readingShowsReset(reading.allowance, reset.AskedAt):
 			return ""
 		case now.Sub(reset.AskedAt) >= readingLagWarning:
