@@ -34,9 +34,9 @@ func status(args []string) {
 	if err != nil {
 		log.Fatalf("cannot read current Codex Switch status: %v", err)
 	}
-	writeDeploymentStatus(stdout, dataDir())
-	writeCurrentStatus(stdout, snapshot)
-	fmt.Fprintf(stdout, "\nProxy log: %s\n", proxyLogPath(dataDir()))
+	writeDeploymentStatus(os.Stdout, dataDir())
+	writeCurrentStatus(os.Stdout, snapshot)
+	fmt.Printf("\nProxy log: %s\n", proxyLogPath(dataDir()))
 }
 
 func writeDeploymentStatus(output io.Writer, dataDirectory string) {

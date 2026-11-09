@@ -220,7 +220,7 @@ def installer_environment():
 
 
 def start_installer(candidate, name):
-    return rig.start_client([str(rig.REPO / 'deploy/install-proxy.sh'), str(rig.RUN / candidate)], name, env=installer_environment())
+    return rig.start_command([str(rig.REPO / 'deploy/install-proxy.sh'), str(rig.RUN / candidate)], name, env=installer_environment())
 
 
 def wait_for_candidate(old):
@@ -525,7 +525,8 @@ def claude_limit_reaches_the_client_at_once(system):
 
 
 def claude_sign_out_logs_what_anthropic_said(system):
-    """When Anthropic refuses to refresh a Claude login, the proxy log says what Anthropic answered, and no token, even one Anthropic quotes"""
+    """When Anthropic refuses to refresh a Claude login, the proxy log gives its HTTP status, its code and what the code
+    means, and no part of a credential, even one Anthropic quotes"""
     require_available_claude_accounts(1)
     account = rig.CLAUDE_ACCOUNTS[-1]
     path = rig.RUN / 'data' / account / 'auth.json'
@@ -539,10 +540,10 @@ def claude_sign_out_logs_what_anthropic_said(system):
     line = signed_out[0]
     if not rig.fake_provider_events('claude-refresh-refused'):
         raise Failure(f'The proxy logged {account} as signed out without asking Anthropic to refresh it: {line}')
-    missing = [part for part in ('HTTP 400', 'invalid_grant', 'Refresh token', 'not found or invalid') if part not in line]
-    shown = [name for name in ('refresh_token', 'access_token') if auth[name] in rig.proxy_log()]
+    missing = [part for part in ('HTTP 400 invalid_grant', 'the refresh token is invalid, expired or revoked') if part not in line]
+    shown = rig.credential_pieces(rig.proxy_log(), rig.held_credentials())
     if missing or shown:
-        raise Failure(f'The sign-out line lacks {missing}, or the proxy log shows the {shown}: {line}')
+        raise Failure(f'The sign-out line lacks {missing}, or the proxy log shows part of a credential: {line}')
     return (f'Anthropic refused the refresh with HTTP 400 and invalid_grant, quoting the refresh token in its message; the proxy logged:\n'
             f'{line.split(" ", 1)[1]}')
 
@@ -850,7 +851,7 @@ def rollback_keeps_tasks_on_their_accounts(system):
     system.weekly[runner_up] = 0
     system.apply()
     rig.wait_for(lambda: rig.usage_reads(runner_up, 0) >= 2, 'the proxy to read the idle week')
-    rollback = rig.start_client([str(rig.REPO / 'deploy/deploy.sh'), 'back'], 'rollback', env=installer_environment())
+    rollback = rig.start_command([str(rig.REPO / 'deploy/deploy.sh'), 'back'], 'rollback', env=installer_environment())
     if rollback.wait(timeout=120):
         raise Failure(f'deploy.sh back failed: {rig.read("logs/rollback.err")[-400:]}')
     serving = rig.deploy_status()
@@ -1195,7 +1196,7 @@ BUILD_DESCRIPTIONS = {'cli': 'This build', 'published-release': 'The published r
 def reset_command(build, *args):
     """Runs the CLI of build ('cli' for this tree's build, or the published release's proxy) against the fake providers."""
     executable = rig.PUBLISHED_RELEASE_PROXY if build == 'published-release' else rig.RUN / build
-    return subprocess.run([str(executable), *args], env=dict(os.environ, **rig.proxy_environment()), capture_output=True, text=True, timeout=15)
+    return rig.run_command([str(executable), *args], env=dict(os.environ, **rig.proxy_environment()), timeout=15)
 
 
 def reset_credits():
@@ -1279,8 +1280,8 @@ def stored_resets(system):
 
 def automatic_resets(on, data=None):
     """Turns automatic resets on or off for the installation in data, this Mac's by default, as a person does."""
-    result = subprocess.run([str(rig.RUN / 'cli'), 'auto-reset', 'on' if on else 'off'], capture_output=True, text=True, timeout=15,
-                            env=dict(rig.client_environment(), CODEX_SWITCH_DATA_DIR=str(data or rig.RUN / 'data')))
+    result = rig.run_command([str(rig.RUN / 'cli'), 'auto-reset', 'on' if on else 'off'], timeout=15,
+                             env=dict(rig.client_environment(), CODEX_SWITCH_DATA_DIR=str(data or rig.RUN / 'data')))
     if result.returncode:
         raise Failure(f'codex-switch auto-reset failed: {result.stderr}')
 
@@ -1456,7 +1457,7 @@ def rollback_and_back_spends_no_second_credit(system):
     rig.wait_for(lambda: len(rig.fake_provider_events('reset-claim')) >= 2 and 'outcome unknown' in rig.proxy_log(),
                  'the updated build to spend a credit, lose the reply, and retry')
     rig.stop_process_group(waiting.process)
-    rollback = rig.start_client([str(rig.REPO / 'deploy/deploy.sh'), 'back'], 'authority-rollback', env=installer_environment())
+    rollback = rig.start_command([str(rig.REPO / 'deploy/deploy.sh'), 'back'], 'authority-rollback', env=installer_environment())
     if rollback.wait(timeout=120):
         raise Failure(f'deploy.sh back failed: {rig.read("logs/authority-rollback.err")[-400:]}')
     if int(rig.deploy_status()['build']) != published_build:
@@ -1495,9 +1496,9 @@ def rollback_and_back_spends_no_second_credit(system):
             f'next update the build logged:\n{said.split(" ", 1)[1]}\nOpenAI spent one credit; the work finished on account-3 once the reading caught up.')
 
 
-def no_part_of_a_token_reaches_the_log(system):
-    """When OpenAI's reason for refusing or failing a request quotes the request's access token where the proxy shortens
-    what it logs, the proxy log holds no part of the token"""
+def a_refusal_or_failure_quoting_credentials_logs_only_its_status_and_codes(system):
+    """When OpenAI refuses a model request or another request, or fails a response, with every field of its error
+    quoting the request's credentials, the proxy logs the HTTP status and nothing of the error but a short code"""
     with simulating(system, 'token-quoting-error'):
         try:
             rig.post_without_task_id(system.base, 'Reply with the word refused.')
@@ -1507,22 +1508,21 @@ def no_part_of_a_token_reaches_the_log(system):
             urllib.request.urlopen(f'{system.base}/models?client_version=1.0.0', timeout=30).read()
         except urllib.error.HTTPError as refused:
             refused.read()
-        quoted = rig.wait_for(lambda: [line for line in rig.proxy_log().splitlines() if 'with HTTP 503' in line and 'Rejected Bearer' in line]
+        logged = rig.wait_for(lambda: [line for line in rig.proxy_log().splitlines() if 'with HTTP 503' in line and ('rejected gpt-6-luna' in line or 'answered GET' in line)]
                               if len(rig.fake_provider_events('token-quoting-error')) >= 2 else None, 'the proxy to log both refusals')
     with simulating(system, 'token-quoting-failure'):
         rig.post_without_task_id(system.base, 'Reply with the word failed.')
-        quoted += rig.wait_for(lambda: [line for line in rig.proxy_log().splitlines() if 'OpenAI failed the' in line and 'Rejected' in line],
-                               'the proxy to log the failed response')
-    leaked = rig.credential_pieces(rig.proxy_log(), system.credentials)
-    if len(quoted) < 3 or leaked:
-        raise Failure('The proxy logged a token, or part of one:\n' + '\n'.join(line for line, _ in leaked))
-    return ('OpenAI quoted the access token across the 300 bytes of a reason the log keeps, across the 4096 bytes the proxy reads of '
-            'another body, and in the reason it failed a response. The proxy logged:\n' + '\n'.join(line.split(' ', 1)[1] for line in quoted))
+        logged += rig.wait_for(lambda: [line for line in rig.proxy_log().splitlines() if 'OpenAI failed the' in line], 'the proxy to log the failed response')
+    leaked = rig.credential_pieces(rig.proxy_log(), rig.held_credentials())
+    if len(logged) < 3 or leaked:
+        raise Failure('The proxy logged a credential, or part of one:\n' + '\n'.join(line[:400] for line, _ in leaked))
+    return ('OpenAI quoted the access token and a token no login holds, whole, base64-encoded, URL-encoded, split across lines '
+            'and without their start, in every field of its errors. The proxy logged:\n' + '\n'.join(line.split(' ', 1)[1] for line in logged))
 
 
 def a_reset_result_quoting_the_token_is_neither_logged_nor_printed(system):
-    """When OpenAI answers a request to spend a reset credit with a result that is the request's access token, neither
-    the automatic reset nor the reset command logs or prints any part of it"""
+    """When OpenAI answers a request to spend a reset credit with a result that quotes the request's credentials, neither
+    the automatic reset nor the reset command logs or prints any part of them"""
     automatic_resets(True)
     system.limited = set(system.accounts)
     system.extra = ['reset-token-code', 'usage-lag']
@@ -1534,10 +1534,10 @@ def a_reset_result_quoting_the_token_is_neither_logged_nor_printed(system):
     command = reset_command('cli', 'reset', 'codex')
     if command.returncode == 0 or 'outcome unknown' not in command.stderr:
         raise Failure(f'The reset command, answered with the access token: {command.stdout} {command.stderr}')
-    leaked = rig.credential_pieces('\n'.join((rig.proxy_log(), command.stdout, command.stderr)), system.credentials)
+    leaked = rig.credential_pieces('\n'.join((rig.proxy_log(), command.stdout, command.stderr)), rig.held_credentials())
     if leaked:
         raise Failure('The proxy log or the reset command holds a token, or part of one:\n' + '\n'.join(line for line, _ in leaked))
-    return (f'OpenAI answered each request to spend {CHOSEN_CREDIT["cli"][1]} with the access token as its result. The proxy logged:\n'
+    return (f'OpenAI answered each request to spend {CHOSEN_CREDIT["cli"][1]} with the credentials quoted as its result. The proxy logged:\n'
             f'{logged[0].split(" ", 1)[1]}\nThe reset command printed: {command.stderr.strip()}')
 
 
@@ -1578,8 +1578,8 @@ def a_signed_out_account_pauses_resets_and_says_why_once(system):
 
 
 def a_claude_refresh_failure_quoting_the_refresh_token_is_not_shown(system):
-    """When Anthropic fails to refresh a Claude login with a message that quotes the refresh token, status shows why
-    without any part of a credential"""
+    """When Anthropic fails to refresh a Claude login with a message that quotes the refresh token, status shows its
+    HTTP status and code, and no part of a credential"""
     require_available_claude_accounts(1)
     account = rig.CLAUDE_ACCOUNTS[-1]
     path = rig.RUN / 'data' / account / 'auth.json'
@@ -1588,37 +1588,41 @@ def a_claude_refresh_failure_quoting_the_refresh_token_is_not_shown(system):
     path.with_name('auth.json.next').write_text(json.dumps(auth))
     with simulating(system, 'claude-refresh-unavailable'):
         os.replace(path.with_name('auth.json.next'), path)
-        status = rig.wait_for(lambda: next((shown for shown in [rig.proxy_command('status')] if 'not found or invalid' in shown), None),
+        status = rig.wait_for(lambda: next((shown for shown in [rig.proxy_command('status')] if 'HTTP 503 invalid_grant' in shown), None),
                               f'status to show why {account} cannot be used', timeout=30, fail=False)
     if not status:
         raise Failure(f'Status did not show why {account} cannot be used:\n{rig.proxy_command("status")}')
-    leaked = rig.credential_pieces(status, system.credentials)
+    leaked = rig.credential_pieces(status, rig.held_credentials())
     if leaked:
-        raise Failure('Status shows a token, or part of one:\n' + '\n'.join(line for line, _ in leaked))
+        raise Failure('Status shows a credential, or part of one:\n' + '\n'.join(line[:400] for line, _ in leaked))
     return 'Anthropic failed the refresh with HTTP 503, quoting the refresh token. Status showed:\n' + next(
-        line.strip() for line in status.splitlines() if 'not found or invalid' in line)
+        line.strip() for line in status.splitlines() if 'invalid_grant' in line)
 
 
 PUBLISHED_RELEASE_LINE = re.compile(r'\d{4}/\d\d/\d\d \d\d:\d\d:\d\d ')
 
 
-def no_credential_reaches_the_proxy_output(system):
-    """No proxy log or launchd output holds any part of a credential in the run's logins"""
+def no_credential_reaches_what_the_proxy_writes(system):
+    """No proxy log, launchd output, command output, status or menu snapshot holds 16 characters in a row of a credential
+    in the run's logins, or of a token no login holds, whole, base64-encoded or URL-encoded, even split across lines"""
     credentials = {**system.credentials, **rig.held_credentials()}
-    files, found = rig.proxy_output_files(), []
+    files, found = rig.output_files(), []
     for path in files:
         # The published releases a group updates from predate this check, and wrote their lines with times such as
         # 2026/11/09 18:45:42; this tree's builds write RFC 3339 times.
         text = '\n'.join(line for line in path.read_text(errors='replace').splitlines() if not PUBLISHED_RELEASE_LINE.match(line))
         found += [f'{path.relative_to(rig.RUN)} holds part of {credentials[credential]}: {line[:400]}'
                   for line, credential in rig.credential_pieces(text, credentials)]
+    for name, text in (('status', rig.proxy_command('status')), ('the menu snapshot', rig.menu_snapshot().decode('latin-1'))):
+        found += [f'{name} holds part of {credentials[credential]}: {line[:400]}' for line, credential in rig.credential_pieces(text, credentials)]
     if found:
         raise Failure('\n'.join(found[:10]) + (f'\n...and {len(found) - 10} more lines' if len(found) > 10 else ''))
-    return f'{len(files)} proxy logs and launchd output files hold no part of the {len(credentials)} credentials in this run\'s logins.'
+    return (f'{len(files)} logs and command outputs, status and the menu snapshot hold no part of the {len(credentials)} credentials '
+            'in this run\'s logins and the token no login holds.')
 
 
 # Every group ends with these.
-EVERY_GROUP = [every_response_recorded_once, no_credential_reaches_the_proxy_output]
+EVERY_GROUP = [every_response_recorded_once, no_credential_reaches_what_the_proxy_writes]
 
 
 # Each group shares one isolated system and runs at once with every other group. The first update and the rollback
@@ -1634,7 +1638,7 @@ GROUPS = [
     ('authority-off', 'cli', [no_credit_is_spent_while_the_authority_is_off]),
     ('expiry-reset', 'cli', [expiring_credit_is_spent_once_by_the_authority]),
     ('authority-rollback', 'published-release', [rollback_and_back_spends_no_second_credit]),
-    ('secrets', 'cli', [no_part_of_a_token_reaches_the_log, a_reset_result_quoting_the_token_is_neither_logged_nor_printed,
+    ('secrets', 'cli', [a_refusal_or_failure_quoting_credentials_logs_only_its_status_and_codes, a_reset_result_quoting_the_token_is_neither_logged_nor_printed,
                         a_signed_out_account_pauses_resets_and_says_why_once, a_claude_refresh_failure_quoting_the_refresh_token_is_not_shown]),
     ('routing', 'cli', [t3_reads_the_account_pool, new_work_goes_to_the_allowance_that_resets_first, request_without_task_id_is_served]),
     ('exhaustion', 'cli', [exhausted_task_moves_on_its_next_turn]),

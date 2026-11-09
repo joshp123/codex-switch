@@ -3,29 +3,18 @@ package main
 import (
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/joshp123/codex-switch/internal/heldcredentials"
 )
 
 const listenAddress = "127.0.0.1:2455"
 
-// The command line writes only through these and the standard logger, so its
-// output never shows a credential it holds, whatever a provider sent back.
-var (
-	stdout io.Writer = heldcredentials.RemovingWriter{Output: os.Stdout}
-	stderr io.Writer = heldcredentials.RemovingWriter{Output: os.Stderr}
-)
-
 func main() {
 	log.SetFlags(0)
-	log.SetOutput(stderr)
 	// Codex Switch is the proxy: it reaches providers directly even when the
 	// shell that started it routes through it with HTTPS_PROXY.
 	http.DefaultTransport.(*http.Transport).Proxy = nil
@@ -52,7 +41,7 @@ func main() {
 	case "print-t3-config":
 		printT3ConfigCommand(args)
 	case "print-build":
-		fmt.Fprintln(stdout, buildNumberValue())
+		fmt.Println(buildNumberValue())
 	case "print-revision":
 		printBinaryRevision(args)
 	default:

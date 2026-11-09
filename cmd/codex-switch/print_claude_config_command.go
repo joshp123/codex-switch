@@ -54,5 +54,5 @@ func printClaudeConfigCommand(args []string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Fprintln(stdout, string(encoded))
+	fmt.Println(string(encoded))
 }

@@ -61,7 +61,7 @@ it, or remove the feature.
 | `internal/relay/` | Forwarding HTTP, SSE and WebSocket traffic byte for byte, recording completed responses, draining on update. |
 | `internal/usage/` | Tokens and API-equivalent cost per account and per task, for Today, 7 Days and 30 Days. |
 | `internal/store/` | The one SQLite database. Imports nothing of ours. |
-| `internal/heldcredentials/` | Every credential the process has held. The proxy log, command output and menu snapshot remove them, so no log line or error needs to. |
+| `internal/providerreply/` | What OpenAI and Anthropic send back, in words this program wrote: HTTP status, short error codes and their meanings. No provider message, body or header reaches the log, status, menu or command output. |
 | `internal/codexstate/` | Reading task titles and model settings from the installed Codex. |
 | `internal/clientcapability/` | The private URL path that stops web pages from using the proxy. |
 | `internal/taskidentity/` | The task ID a Pi session is routed and counted under. |

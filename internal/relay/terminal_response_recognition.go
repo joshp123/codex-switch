@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/joshp123/codex-switch/internal/providerreply"
 	"github.com/joshp123/codex-switch/internal/routing"
 	"github.com/joshp123/codex-switch/internal/store"
 	"github.com/joshp123/codex-switch/internal/usage"
@@ -200,16 +201,17 @@ func (observer *terminalResponseObserver) observeHTTPJSONBody(bodyBytes []byte) 
 }
 
 // failureReason is OpenAI's error for a failed response, or the reason it ended
-// the response incomplete.
+// the response incomplete, such as max_output_tokens.
 func (response completedResponseWire) failureReason() *providerErrorWire {
 	if response.Error == nil && response.IncompleteDetails != nil {
-		return &providerErrorWire{Type: "incomplete", Message: response.IncompleteDetails.Reason}
+		return &providerErrorWire{Type: "incomplete", Code: response.IncompleteDetails.Reason}
 	}
 	return response.Error
 }
 
-// logProviderFailure logs a model response OpenAI failed, with its reason, and
-// reports a usage limit to routing. It returns whether a usage limit moved the work.
+// logProviderFailure logs a model response OpenAI failed, with its error
+// codes, and reports a usage limit to routing. It returns whether a usage
+// limit moved the work.
 func (observer *terminalResponseObserver) logProviderFailure(providerError *providerErrorWire) bool {
 	subject := observer.describe()
 	if limitOutcome, limited := observer.reportProviderUsageLimit(providerError); limited {
@@ -218,7 +220,9 @@ func (observer *terminalResponseObserver) logProviderFailure(providerError *prov
 	}
 	reason := ""
 	if providerError != nil {
-		reason = shortened(describeProviderReason(httpJSONResponseWire{Error: providerError}))
+		if codes := providerreply.Codes(providerError.Type, providerError.Code); codes != "" {
+			reason = " with " + codes
+		}
 	}
 	log.Printf("%s: OpenAI failed the %s response%s", subject, observer.modelSlug, reason)
 	return false
@@ -262,7 +266,7 @@ func (observer *terminalResponseObserver) logReadError(err error) {
 	case errors.Is(err, context.Canceled):
 		log.Printf("%s: the client closed the stream before the %s response completed", observer.describe(), modelSlug)
 	default:
-		log.Printf("%s: reading the %s response stream failed: %v; the proxy did not resend it", observer.describe(), modelSlug, err)
+		log.Printf("%s: reading the %s response stream failed: %s; the proxy did not resend it", observer.describe(), modelSlug, providerreply.Failure(err))
 	}
 }
 
@@ -286,7 +290,7 @@ func (observer *terminalResponseObserver) recordCompletedResponse(response compl
 	// Codex requires response.id when decoding response.completed: https://github.com/openai/codex/blob/400ee190c30d5e4a88549c070a2335311f0baa91/codex-rs/codex-api/src/sse/responses.rs#L112-L120
 	if response.ID == "" || response.Model == "" || response.Usage == nil ||
 		response.Usage.InputTokens == nil || response.Usage.OutputTokens == nil {
-		log.Printf("%s: OpenAI completed response %q without complete token usage; its usage is not recorded", observer.describe(), response.ID)
+		log.Printf("%s: OpenAI completed a response without complete token usage; its usage is not recorded", observer.describe())
 		return
 	}
 	taskID := observer.taskID
@@ -307,7 +311,7 @@ func (observer *terminalResponseObserver) recordCompletedResponse(response compl
 		CompletedAt:           time.Now().UTC(),
 	}
 	if err := observer.completionLedger.RecordCompletedResponse(record); err != nil {
-		log.Printf("%s: could not record the usage of response %q: %v", observer.describe(), response.ID, err)
+		log.Printf("%s: could not record the usage of a completed response: %v", observer.describe(), err)
 	}
 }
 

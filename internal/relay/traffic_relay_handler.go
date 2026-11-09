@@ -16,6 +16,7 @@ import (
 
 	"github.com/joshp123/codex-switch/internal/accounts"
 	"github.com/joshp123/codex-switch/internal/clientcapability"
+	"github.com/joshp123/codex-switch/internal/providerreply"
 	"github.com/joshp123/codex-switch/internal/routing"
 	"github.com/joshp123/codex-switch/internal/store"
 	"github.com/joshp123/codex-switch/internal/usage"
@@ -442,7 +443,7 @@ func (handler *TrafficRelayHandler) createBytePreservingReverseProxy() *httputil
 				if isUpstreamProtocolFailure(err) && handler.onFailure != nil {
 					handler.onFailure()
 				}
-				log.Printf("%s: the upstream request failed: %v; the proxy did not resend this attempt", subject, err)
+				log.Printf("%s: the upstream request failed: %s; the proxy did not resend this attempt", subject, providerreply.Failure(err))
 			}
 			http.Error(response, "upstream service unavailable", http.StatusBadGateway)
 		},
@@ -504,5 +505,5 @@ var _ http.Handler = (*TrafficRelayHandler)(nil)
 // Protocol errors identify a response the relay could not interpret, unlike a
 // network failure or an HTTP error returned by the provider.
 func isUpstreamProtocolFailure(err error) bool {
-	return strings.Contains(err.Error(), "malformed HTTP ") || strings.Contains(err.Error(), "server gave HTTP response to HTTPS client")
+	return providerreply.NotHTTP(err)
 }

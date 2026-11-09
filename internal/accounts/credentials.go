@@ -11,11 +11,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/joshp123/codex-switch/internal/heldcredentials"
+	"github.com/joshp123/codex-switch/internal/providerreply"
 )
 
 const (
@@ -191,10 +192,6 @@ func (s *savedLogin) read() (authFile, error) {
 	if err := json.Unmarshal(data, &auth); err != nil {
 		return authFile{}, signInRequired(err)
 	}
-	heldcredentials.Remember(auth.Tokens.AccessToken, auth.Tokens.RefreshToken, auth.Tokens.IDToken)
-	if auth.APIKey != nil {
-		heldcredentials.Remember(*auth.APIKey)
-	}
 	if auth.Tokens.AccessToken == "" || auth.Tokens.RefreshToken == "" || auth.Tokens.AccountID == "" {
 		return authFile{}, signInRequired(errors.New("incomplete ChatGPT credentials"))
 	}
@@ -213,23 +210,26 @@ func (s *savedLogin) refresh(ctx context.Context, auth *authFile) error {
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return temporary(fmt.Errorf("refresh credentials: %w", err))
+		return temporary(errors.New("refresh credentials: " + providerreply.Failure(err)))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
 		failureBody, _ := io.ReadAll(io.LimitReader(resp.Body, maximumRefreshResponseBytes))
-		var failure struct {
-			Error string `json:"error"`
+		refused := errors.New("OpenAI refused to refresh the login with " + providerreply.Refusal(resp.StatusCode, failureBody))
+		// Codex treats these as a login that must sign in again.
+		codes := providerreply.ReplyCodes(failureBody)
+		invalidGrant := resp.StatusCode == http.StatusBadRequest && slices.Contains(codes, "invalid_grant")
+		retired := slices.ContainsFunc(codes, func(code string) bool {
+			return code == "refresh_token_expired" || code == "refresh_token_reused" || code == "refresh_token_invalidated"
+		})
+		if resp.StatusCode == http.StatusUnauthorized || invalidGrant || retired {
+			return signInRequired(refused)
 		}
-		invalidGrant := resp.StatusCode == http.StatusBadRequest && json.Unmarshal(failureBody, &failure) == nil && failure.Error == "invalid_grant"
-		if resp.StatusCode == http.StatusUnauthorized || invalidGrant {
-			return signInRequired(fmt.Errorf("refresh credentials: status %d", resp.StatusCode))
-		}
-		return temporary(fmt.Errorf("refresh credentials: status %d", resp.StatusCode))
+		return temporary(refused)
 	}
 	encoded, err := io.ReadAll(io.LimitReader(resp.Body, maximumRefreshResponseBytes+1))
 	if err != nil {
-		return temporary(fmt.Errorf("refresh credentials: %w", err))
+		return temporary(errors.New("refresh credentials: " + providerreply.Failure(err)))
 	}
 	if len(encoded) > maximumRefreshResponseBytes {
 		return temporary(errors.New("refresh credentials: response is too large"))
@@ -239,10 +239,9 @@ func (s *savedLogin) refresh(ctx context.Context, auth *authFile) error {
 		RefreshToken string `json:"refresh_token"`
 		IDToken      string `json:"id_token"`
 	}
-	if err := json.Unmarshal(encoded, &result); err != nil {
+	if err := providerreply.Decode(bytes.NewReader(encoded), &result); err != nil {
 		return temporary(fmt.Errorf("refresh credentials: %w", err))
 	}
-	heldcredentials.Remember(result.AccessToken, result.RefreshToken, result.IDToken)
 	if result.AccessToken == "" {
 		return temporary(errors.New("refresh credentials: response has no access token"))
 	}

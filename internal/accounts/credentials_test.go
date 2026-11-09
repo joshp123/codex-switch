@@ -359,6 +359,7 @@ func TestRefreshInvalidGrantRequiresSignInAndOtherBadRequestsRemainTemporary(t *
 	}{
 		{"invalid grant", `{"error":"invalid_grant","error_description":"secret detail"}`, http.StatusBadRequest, true},
 		{"bad client request", `{"error":"invalid_request","error_description":"secret detail"}`, http.StatusBadRequest, false},
+		{"reused refresh token", `{"error":{"type":"invalid_request_error","code":"refresh_token_reused","message":"secret detail"}}`, http.StatusBadRequest, true},
 		{"provider outage", `{"error":"invalid_grant","error_description":"secret detail"}`, http.StatusBadGateway, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {

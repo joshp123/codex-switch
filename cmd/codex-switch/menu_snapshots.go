@@ -17,7 +17,6 @@ import (
 	accountapi "github.com/joshp123/codex-switch/internal/accounts"
 	"github.com/joshp123/codex-switch/internal/clientcapability"
 	"github.com/joshp123/codex-switch/internal/codexstate"
-	"github.com/joshp123/codex-switch/internal/heldcredentials"
 	"github.com/joshp123/codex-switch/internal/menupb"
 	"github.com/joshp123/codex-switch/internal/relay"
 	"github.com/joshp123/codex-switch/internal/routing"
@@ -57,7 +56,8 @@ type menuSnapshots struct {
 	database     *store.StoreDatabase
 	usageLedger  *usage.UsageLedger
 	codex        *codexstate.LocalReader
-	// interval is menuSnapshotInterval, which the system test shortens.
+	// interval is menuSnapshotInterval; only the system test shortens it, with
+	// CODEX_SWITCH_MENU_SNAPSHOT_SECONDS, so status shows a change at once.
 	interval time.Duration
 
 	mutex   sync.Mutex
@@ -200,8 +200,6 @@ func (snapshots *menuSnapshots) compose(ctx context.Context) error {
 		}
 	}
 	keepShownTaskRows(snapshot)
-	// Status and the menu show what providers report, which may quote a credential.
-	heldcredentials.RemoveFromMessage(snapshot)
 	deterministic := proto.MarshalOptions{Deterministic: true}
 	composedAt := snapshot.GeneratedAt
 	snapshot.GeneratedAt = nil

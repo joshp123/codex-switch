@@ -27,5 +27,5 @@ func printCodexConfigCommand(args []string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Fprintf(stdout, "openai_base_url = %q\n", "http://"+*address+clientcapability.PathPrefix(capability)+"/backend-api/codex")
+	fmt.Printf("openai_base_url = %q\n", "http://"+*address+clientcapability.PathPrefix(capability)+"/backend-api/codex")
 }
