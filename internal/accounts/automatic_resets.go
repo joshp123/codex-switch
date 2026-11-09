@@ -127,3 +127,46 @@ func (monitor *Monitor) creditMayExpireWithinTheHour(now time.Time) bool {
 	}
 	return false
 }
+
+// ResetCreditComesFirst reports whether a reset credit is about to be spent,
+// so no account may draw its usage credits yet: reset credits expire sooner.
+// That is when a spend from this installation awaits its outcome or OpenAI's
+// reading of it, or when automatic resets are on here and the latest readings
+// show the pool out with a credit to spend; see choosePoolOutCredit. It reads
+// no network, so routing can ask it.
+func (monitor *Monitor) ResetCreditComesFirst() bool {
+	if _, err := os.Stat(filepath.Join(monitor.dataDirectory, "pending-reset.json")); err == nil {
+		return true
+	}
+	now := time.Now()
+	readings := monitor.latestCodexReadings()
+	if unconfirmed, err := readUnconfirmedReset(monitor.dataDirectory); err != nil || (unconfirmed != nil && unconfirmed.waitingFor(readings, now) != "") {
+		return true
+	}
+	if on, err := AutomaticResetsOn(monitor.dataDirectory); err != nil || !on {
+		return false
+	}
+	_, found, _ := choosePoolOutCredit(readings, now)
+	return found
+}
+
+// latestCodexReadings is every Codex account as the monitor last read it.
+func (monitor *Monitor) latestCodexReadings() []codexAccountReading {
+	pool, err := ReadPool(monitor.dataDirectory)
+	if err != nil {
+		return nil
+	}
+	monitor.mutex.Lock()
+	defer monitor.mutex.Unlock()
+	var readings []codexAccountReading
+	for _, account := range pool {
+		monitored, known := monitor.accounts[account.Key]
+		if account.Provider != ProviderCodex || !known {
+			continue
+		}
+		fact := monitored.fact
+		readings = append(readings, codexAccountReading{account: account, signedOut: fact.AccountState == AccountSignInRequired,
+			allowance: fact.AllowanceSample, credits: fact.ResetCredits})
+	}
+	return readings
+}

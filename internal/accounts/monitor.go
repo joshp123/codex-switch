@@ -16,7 +16,8 @@ import (
 )
 
 // Healthy accounts are read once a minute; waiting work asks for a read at
-// most every five seconds. Model lists change only when a provider ships or
+// most every five seconds. Accounts using overflow credits are read every five
+// seconds. Model lists change only when a provider ships or
 // withdraws a model, so they are read every 15 minutes, and again whenever
 // waiting work asks, which covers a model no account was known to offer.
 // Network reads never run on the routing path.
@@ -29,18 +30,19 @@ const (
 
 // AccountRoutingFact keeps provider eligibility and its matching credentials in one selection unit.
 type AccountRoutingFact struct {
-	Provider           Provider
-	ClaudeRestrictions map[string]ClaudeRestriction
-	AccountKey         store.AccountKey
-	DisplayName        string
-	Reserve            AccountReserve
-	Credentials        Credentials
-	AccountState       AccountState
-	AccountStateCause  error
-	AllowanceSample    AllowanceSample
-	ResetCredits       []ResetCredit
-	ResetCreditsReadAt time.Time
-	RefreshedAt        time.Time
+	Provider                  Provider
+	ClaudeRestrictions        map[string]ClaudeRestriction
+	AccountKey                store.AccountKey
+	DisplayName               string
+	Reserve                   AccountReserve
+	Credentials               Credentials
+	AccountState              AccountState
+	AccountStateCause         error
+	AllowanceSample           AllowanceSample
+	CreditBalanceBlockedUntil time.Time
+	ResetCredits              []ResetCredit
+	ResetCreditsReadAt        time.Time
+	RefreshedAt               time.Time
 	// Nil means the catalogue has not been observed; an empty slice means no models.
 	SupportedModelSlugs []string
 	// ModelListCause is why the latest model-list read failed; nil after a successful read.
@@ -66,6 +68,7 @@ type Monitor struct {
 
 	mutex         sync.Mutex
 	accounts      map[store.AccountKey]*monitoredAccount
+	readCompleted chan struct{}
 	readRequested chan struct{}
 	firstReadDone chan struct{}
 
@@ -100,6 +103,7 @@ func NewMonitor(dataDirectory string, upstreamOrigin *url.URL, codexExecutable s
 		readInterval:    accountReadInterval,
 		accounts:        map[store.AccountKey]*monitoredAccount{},
 		readRequested:   make(chan struct{}, 1),
+		readCompleted:   make(chan struct{}, 1),
 		firstReadDone:   make(chan struct{}),
 
 		resetCheckRequested: make(chan struct{}, 1),
@@ -133,6 +137,7 @@ func (monitor *Monitor) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-timer.C:
+		case <-monitor.readCompleted:
 		case <-monitor.readRequested:
 			readRequested = true
 		}
@@ -154,18 +159,18 @@ func (monitor *Monitor) startDueReads(ctx context.Context, reads *sync.WaitGroup
 	} else if synced > 0 {
 		log.Printf("set the account key on %d records an earlier build wrote or moved", synced)
 	}
-	interval := monitor.readInterval
-	if readRequested {
-		interval = requestedAccountReadInterval
-	}
 	monitor.mutex.Lock()
 	defer monitor.mutex.Unlock()
 	for _, account := range pool {
 		monitored := monitor.monitoredAccountLocked(account)
+		interval := monitor.readInterval
+		if readRequested || (monitored.fact.AllowanceSample.CreditBalance != nil && *monitored.fact.AllowanceSample.CreditBalance > 2000 && !IncludedAllowanceLeft(monitored.fact.AllowanceSample, now)) {
+			interval = min(interval, requestedAccountReadInterval)
+		}
 		if monitored.reading || now.Sub(monitored.lastReadStarted) < interval {
-			dueAt := monitored.lastReadStarted.Add(monitor.readInterval)
+			dueAt := monitored.lastReadStarted.Add(interval)
 			if monitored.reading && !dueAt.After(now) {
-				dueAt = now.Add(monitor.readInterval)
+				dueAt = now.Add(interval)
 			}
 			if nextRead.IsZero() || dueAt.Before(nextRead) {
 				nextRead = dueAt
@@ -174,7 +179,7 @@ func (monitor *Monitor) startDueReads(ctx context.Context, reads *sync.WaitGroup
 		}
 		monitored.reading = true
 		monitored.lastReadStarted = now
-		dueAt := now.Add(monitor.readInterval)
+		dueAt := now.Add(interval)
 		if nextRead.IsZero() || dueAt.Before(nextRead) {
 			nextRead = dueAt
 		}
@@ -211,6 +216,10 @@ func (monitor *Monitor) readAccount(ctx context.Context, account PoolAccount, mo
 	monitored.fact = read
 	monitored.reading = false
 	monitor.mutex.Unlock()
+	select {
+	case monitor.readCompleted <- struct{}{}:
+	default:
+	}
 	if availabilityChange != "" && ctx.Err() == nil {
 		log.Print(availabilityChange)
 	}

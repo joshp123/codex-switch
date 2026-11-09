@@ -175,7 +175,7 @@ func choosePoolOutCredit(readings []codexAccountReading, now time.Time) (resetCh
 		}
 		signedIn++
 		name := reading.account.DisplayName
-		if reading.allowance.Allowed && !reading.allowance.LimitReached {
+		if IncludedAllowanceLeft(reading.allowance, now) {
 			return resetChoice{}, false, fmt.Sprintf("No reset: %s can take work.", name)
 		}
 		refillsAt, known := refillTime(reading.allowance)

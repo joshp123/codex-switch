@@ -3,7 +3,9 @@ package routing
 import (
 	"fmt"
 	"log"
+	"math"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,7 +21,13 @@ import (
 type AccountUnavailability struct {
 	Reason string
 	Until  time.Time
+	// DrawsCredits means the account can take the work although its included
+	// allowance is used up, because OpenAI draws its usage credits for it.
+	DrawsCredits bool
 }
+
+// usageCreditFloor stops new work; in-flight work can finish below this balance.
+const usageCreditFloor = 2000
 
 // LogText is the reason as the proxy log writes it.
 func (unavailability AccountUnavailability) LogText() string {
@@ -27,30 +35,71 @@ func (unavailability AccountUnavailability) LogText() string {
 }
 
 // accountUnavailability is the one rule for whether an account may take new
-// model work for modelSlug.
+// model work for modelSlug. It logs when an account work was sent to while it
+// drew its usage credits may no longer draw them.
 func (router *TaskRouter) accountUnavailability(fact accounts.AccountRoutingFact, modelSlug string) (AccountUnavailability, error) {
+	unavailability, credits, err := router.allowanceRule(fact, modelSlug, true)
+	if err == nil && fact.Provider != accounts.ProviderClaude {
+		router.logCreditDrawStop(fact, credits)
+	}
+	return unavailability, err
+}
+
+// creditDraw is whether an account's allowance lets it draw its usage
+// credits, apart from whether it offers the model, and why not.
+type creditDraw struct {
+	draws         bool
+	whyNotDrawing string
+}
+
+// allowanceRule is accountUnavailability. With creditsAllowed false, an
+// account whose included allowance is used up never draws its usage credits.
+func (router *TaskRouter) allowanceRule(fact accounts.AccountRoutingFact, modelSlug string, creditsAllowed bool) (AccountUnavailability, creditDraw, error) {
 	if problem := accountAccessProblem(fact); problem.Reason != "" {
-		return problem, nil
+		return problem, creditDraw{whyNotDrawing: problem.Reason}, nil
 	}
 	now := router.currentTime().UTC()
+	if fact.CreditBalanceBlockedUntil.After(now) {
+		reason := "usage credit balance fell below 1,000"
+		return AccountUnavailability{Reason: reason, Until: fact.CreditBalanceBlockedUntil}, creditDraw{whyNotDrawing: reason}, nil
+	}
 	if reason := accounts.ReserveUnavailableReason(fact, now); reason != "" {
-		return AccountUnavailability{Reason: reason}, nil
+		return AccountUnavailability{Reason: reason}, creditDraw{whyNotDrawing: reason}, nil
 	}
 	if fact.Provider == accounts.ProviderClaude {
 		reason, resetsAt := accounts.ClaudeUnavailableReason(fact, modelSlug, now)
-		return AccountUnavailability{Reason: reason, Until: resetsAt}, nil
+		return AccountUnavailability{Reason: reason, Until: resetsAt}, creditDraw{}, nil
 	}
+	if !fact.AllowanceSample.ObservedAt.IsZero() {
+		// OpenAI reports an account allowed while it draws usage credits, so
+		// only the weekly window says whether included allowance is left.
+		if _, known := accounts.AnalyseAllowance(fact.AllowanceSample, fact.AccountState, now, accounts.Weekly); !known {
+			reason := "OpenAI's allowance reading gives no current weekly allowance"
+			return AccountUnavailability{Reason: reason}, creditDraw{whyNotDrawing: reason}, nil
+		}
+	}
+	credits := creditDraw{whyNotDrawing: "its included allowance is available again"}
 	for _, kind := range []accounts.AllowanceWindowKind{accounts.FiveHours, accounts.Weekly} {
 		window, known := accounts.AnalyseAllowance(fact.AllowanceSample, fact.AccountState, now, kind)
-		if known && window.FreePercent <= 0 {
-			return AccountUnavailability{Reason: fmt.Sprintf("%s allowance used up", kind), Until: window.ResetsAt}, nil
+		if !known || window.FreePercent > 0 {
+			continue
 		}
+		usedUp := AccountUnavailability{Reason: fmt.Sprintf("%s allowance used up", kind), Until: window.ResetsAt}
+		if !creditsAllowed {
+			return usedUp, creditDraw{whyNotDrawing: usedUp.Reason}, nil
+		}
+		problem, err := router.creditDrawProblem(fact, modelSlug)
+		if err != nil || problem != "" {
+			return usedUp, creditDraw{whyNotDrawing: problem}, err
+		}
+		credits = creditDraw{draws: true}
+		break
 	}
 	if fact.AccountState == accounts.AccountReady && fact.AllowanceSample.Allowed && !fact.AllowanceSample.LimitReached {
 		// A provider read begun before exhaustion cannot supersede that exhaustion.
 		cleared, err := router.storeDatabase.ClearAccountExhaustionBefore(fact.AccountKey, fact.RefreshedAt)
 		if err != nil {
-			return AccountUnavailability{}, err
+			return AccountUnavailability{}, credits, err
 		}
 		if cleared {
 			log.Printf("%s can take new work again: OpenAI's allowance reading at %s shows it is no longer limited",
@@ -59,18 +108,113 @@ func (router *TaskRouter) accountUnavailability(fact accounts.AccountRoutingFact
 	}
 	resetsAt, exhausted, err := router.storeDatabase.ReadAccountReportedReset(fact.AccountKey)
 	if err != nil {
-		return AccountUnavailability{}, err
+		return AccountUnavailability{}, credits, err
 	}
 	if exhausted {
-		return AccountUnavailability{Reason: "hit its usage limit", Until: resetsAt}, nil
+		return AccountUnavailability{Reason: "hit its usage limit", Until: resetsAt}, creditDraw{whyNotDrawing: "it hit its usage limit"}, nil
 	}
 	if modelSlug != "" && fact.SupportedModelSlugs == nil {
-		return AccountUnavailability{Reason: "its model list has not been read yet"}, nil
+		return AccountUnavailability{Reason: "its model list has not been read yet"}, credits, nil
 	}
 	if !accountSupportsModel(fact, modelSlug) {
-		return AccountUnavailability{Reason: "does not offer " + modelSlug}, nil
+		return AccountUnavailability{Reason: "does not offer " + modelSlug}, credits, nil
 	}
-	return AccountUnavailability{}, nil
+	return AccountUnavailability{DrawsCredits: credits.draws}, credits, nil
+}
+
+// creditDrawProblem says why a Codex account whose included allowance is
+// used up may not draw its usage credits, or "" when it may. Credits are the
+// last resort: while another account can take the work on included
+// allowance, or a reset credit is about to be spent, the work goes there or
+// waits. New work stops when the observed balance reaches usageCreditFloor.
+func (router *TaskRouter) creditDrawProblem(fact accounts.AccountRoutingFact, modelSlug string) (string, error) {
+	balance := fact.AllowanceSample.CreditBalance
+	if balance == nil {
+		return "OpenAI reports no usage credits for it", nil
+	}
+	facts, err := router.accountFacts.ReadAccountRoutingFacts()
+	if err != nil {
+		return "", fmt.Errorf("read account routing facts: %w", err)
+	}
+	for _, other := range factsForProvider(facts, fact.Provider) {
+		if other.AccountKey == fact.AccountKey {
+			continue
+		}
+		unavailability, _, err := router.allowanceRule(other, modelSlug, false)
+		if err != nil {
+			return "", err
+		}
+		if unavailability.Reason == "" {
+			return other.DisplayName + " can take the work on its included allowance", nil
+		}
+	}
+	if router.accountFacts.ResetCreditComesFirst() {
+		return "a reset credit is about to be spent, and reset credits expire sooner", nil
+	}
+	if *balance <= usageCreditFloor {
+		return fmt.Sprintf("the balance reached the %s cutoff", formatCredits(usageCreditFloor)), nil
+	}
+	return "", nil
+}
+
+// logCreditDrawStop logs when an account that work was sent to while it drew
+// its usage credits may no longer draw them.
+func (router *TaskRouter) logCreditDrawStop(fact accounts.AccountRoutingFact, credits creditDraw) {
+	if credits.draws {
+		return
+	}
+	router.creditDrawMutex.Lock()
+	drew := router.drawingCredits[fact.AccountKey]
+	delete(router.drawingCredits, fact.AccountKey)
+	router.creditDrawMutex.Unlock()
+	if !drew {
+		return
+	}
+	at := ""
+	if balance := fact.AllowanceSample.CreditBalance; balance != nil {
+		at = " at " + formatCredits(*balance)
+	}
+	log.Printf("%s stops drawing its usage credits%s: %s.", fact.DisplayName, at, credits.whyNotDrawing)
+}
+
+// noteCreditDrawStart logs when model work first goes to an account that
+// draws its usage credits for it.
+func (router *TaskRouter) noteCreditDrawStart(accountKey store.AccountKey, modelSlug string) error {
+	facts, err := router.accountFacts.ReadAccountRoutingFacts()
+	if err != nil {
+		return err
+	}
+	fact, found := factForAccount(facts, accountKey)
+	if !found || fact.Provider == accounts.ProviderClaude {
+		return nil
+	}
+	_, credits, err := router.allowanceRule(fact, modelSlug, true)
+	if err != nil || !credits.draws {
+		return err
+	}
+	router.creditDrawMutex.Lock()
+	drew := router.drawingCredits[accountKey]
+	router.drawingCredits[accountKey] = true
+	router.creditDrawMutex.Unlock()
+	if !drew {
+		log.Printf("%s starts drawing its usage credits at %s: no account has included allowance left and no reset credit is about to be spent. New work stops at %s.",
+			fact.DisplayName, formatCredits(*fact.AllowanceSample.CreditBalance), formatCredits(usageCreditFloor))
+	}
+	return nil
+}
+
+// formatCredits writes a credit amount as OpenAI's Codex client does: whole
+// credits, here with thousands separated.
+func formatCredits(credits float64) string {
+	whole := strconv.FormatFloat(math.Round(credits), 'f', 0, 64)
+	sign := ""
+	if strings.HasPrefix(whole, "-") {
+		sign, whole = "-", whole[1:]
+	}
+	for index := len(whole) - 3; index > 0; index -= 3 {
+		whole = whole[:index] + "," + whole[index:]
+	}
+	return sign + whole
 }
 
 // accountAccessProblem covers what no allowance reset fixes, and the OpenAI

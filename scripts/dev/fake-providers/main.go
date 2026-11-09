@@ -76,7 +76,7 @@ func main() {
 		log.Fatal(err)
 	}
 	providers := &providers{controlPath: *controlPath, aliases: aliases, requestsDirectory: *requestsDirectory,
-		redeemedBy: map[string]string{}, resetAccounts: map[string]bool{}, resetAnswers: map[string]string{}}
+		redeemedBy: map[string]string{}, resetAccounts: map[string]bool{}, resetAnswers: map[string]string{}, creditsDrawn: map[string]float64{}}
 	if _, err := providers.readControls(); err != nil {
 		log.Fatal(err)
 	}
@@ -159,6 +159,9 @@ type providers struct {
 	redeemedBy    map[string]string
 	resetAccounts map[string]bool
 	resetAnswers  map[string]string
+	// creditsDrawn is how many usage credits each account's model requests
+	// have drawn.
+	creditsDrawn map[string]float64
 }
 
 // controls is one reading of the simulation file:
@@ -183,7 +186,7 @@ type providers struct {
 //	claude-limited account-N        the Claude account's five-hour allowance has run out
 //	websocket-age-limit             the next idle Codex WebSocket gets OpenAI's one-hour limit error and closes, once
 //	credit account-N ID UNIX        the account holds reset credit ID, which expires at UNIX seconds
-//	usage-credits account-N BALANCE the account reports BALANCE usage credits
+//	usage-credits account-N BALANCE the account starts with BALANCE usage credits; see below
 //	reset-soon                      a limited account-2 refills five minutes from each read
 //	reset-drop                      requests to spend a credit are answered as usual, but the replies are lost
 //	reset-refuse                    requests to spend a credit receive a provider HTTP error
@@ -205,6 +208,13 @@ type providers struct {
 // spent credit resets its account at once: nothing used, and a week that has
 // not started. With usage-lag, usage reads do not show it yet, as when
 // OpenAI's usage reading lags behind a spend.
+//
+// Usage credits are drawn as OpenAI draws them: once an account's included
+// allowance is used up (limited), each model request draws
+// creditsPerModelRequest while the balance is above zero, and the balance can
+// go below zero. While it is above zero, usage reads report the account
+// allowed and not at its limit, with the weekly window used up. An account
+// without a usage-credits line reports no balance.
 //
 // Fast-mode Claude requests are always refused, as for an account without usage credits.
 // Claude login refreshes are always refused, as for a refresh token Anthropic has
@@ -419,7 +429,7 @@ func (providers *providers) ServeHTTP(writer http.ResponseWriter, request *http.
 	case webSocket && controls.httpOnly:
 		providers.logRequest("websocket-refused", request, http.StatusUpgradeRequired)
 		http.Error(writer, "WebSocket refused (simulation)"+quotedCredentials(request), http.StatusUpgradeRequired)
-	case controls.limited[alias] && !providers.accountReset(alias):
+	case controls.limited[alias] && !providers.accountReset(alias) && !providers.drawsUsageCredits(controls, alias):
 		providers.logRequest("rejected-usage-limit", request, http.StatusTooManyRequests)
 		writeJSON(writer, http.StatusTooManyRequests, usageLimitError(request))
 	case webSocket:
@@ -429,13 +439,47 @@ func (providers *providers) ServeHTTP(writer http.ResponseWriter, request *http.
 	}
 }
 
-// usageCreditBalance is the balance the provider reports, or nil when absent.
+// usageCreditBalance is the account's usage credit balance, or nil when it
+// has no usage-credits line.
 func (providers *providers) usageCreditBalance(controls controls, alias string) *float64 {
-	balance, present := controls.usageCredits[alias]
-	if !present {
+	start, held := controls.usageCredits[alias]
+	if !held {
 		return nil
 	}
+	providers.resetMu.Lock()
+	defer providers.resetMu.Unlock()
+	balance := start - providers.creditsDrawn[alias]
 	return &balance
+}
+
+// drawsUsageCredits reports whether OpenAI serves a model request on an
+// account whose included allowance is used up, from its usage credits.
+func (providers *providers) drawsUsageCredits(controls controls, alias string) bool {
+	balance := providers.usageCreditBalance(controls, alias)
+	return balance != nil && *balance > 0
+}
+
+// creditsPerModelRequest is what one model request draws from an account
+// whose included allowance is used up.
+const creditsPerModelRequest = 100
+
+func (providers *providers) drawsUsageCreditsNow(alias string) bool {
+	controls, err := providers.readControls()
+	return err == nil && providers.drawsUsageCredits(controls, alias)
+}
+
+// drawUsageCredits charges a model request about to be answered to the
+// account's usage credits when its included allowance is used up.
+func (providers *providers) drawUsageCredits(alias string) {
+	controls, err := providers.readControls()
+	if err != nil || !controls.limited[alias] || providers.accountReset(alias) || !providers.drawsUsageCredits(controls, alias) {
+		return
+	}
+	providers.resetMu.Lock()
+	providers.creditsDrawn[alias] += creditsPerModelRequest
+	balance := controls.usageCredits[alias] - providers.creditsDrawn[alias]
+	providers.resetMu.Unlock()
+	log.Printf("event=usage-credits-drawn account=%s credits=%d balance=%g", alias, creditsPerModelRequest, balance)
 }
 
 func (providers *providers) accountReset(alias string) bool {
@@ -892,6 +936,7 @@ func (providers *providers) serveCodexHTTP(writer http.ResponseWriter, request *
 		return
 	}
 	providers.logForwarded(request, payload)
+	providers.drawUsageCredits(providers.alias(request))
 	// Codex compresses the requests it sends over HTTP.
 	if strings.EqualFold(request.Header.Get("Content-Encoding"), "zstd") {
 		decoder, err := zstd.NewReader(nil)
@@ -992,7 +1037,7 @@ func (providers *providers) serveCodexWebSocket(writer http.ResponseWriter, requ
 			return
 		}
 		if isModelRequest(payload) {
-			if providers.takeCountedControl("exhaust-after", providers.alias(request), forwarded) {
+			if providers.takeCountedControl("exhaust-after", providers.alias(request), forwarded) && !providers.drawsUsageCreditsNow(providers.alias(request)) {
 				providers.logRequest("websocket-rejected-usage-limit", request, http.StatusTooManyRequests)
 				if client.Write(ctx, websocket.MessageText, usageLimitError(request)) != nil {
 					return
@@ -1001,6 +1046,7 @@ func (providers *providers) serveCodexWebSocket(writer http.ResponseWriter, requ
 			}
 			forwarded++
 			providers.logForwarded(request, payload)
+			providers.drawUsageCredits(providers.alias(request))
 		}
 		for index, event := range providers.codexEvents(payload) {
 			encoded, _ := json.Marshal(event)

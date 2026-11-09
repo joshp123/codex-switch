@@ -413,6 +413,7 @@ func readServingMenuSnapshot(dataDirectory string, router *routing.TaskRouter, m
 		}
 		if account.Usable {
 			account.ReserveStatus = accountapi.ReserveStatus(fact, snapshot.GeneratedAt.AsTime())
+			account.DrawsCredits = unavailability[fact.AccountKey].DrawsCredits
 		}
 		account.Provider = menupb.Provider_PROVIDER_CHATGPT
 		if identity.Provider == accountapi.ProviderClaude {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/joshp123/codex-switch/internal/accounts"
@@ -47,11 +48,17 @@ type TaskRouter struct {
 	storeDatabase *store.StoreDatabase
 	accountFacts  AccountRoutingFactsSource
 	currentTime   func() time.Time
+
+	// drawingCredits holds each account model work went to while it drew its
+	// usage credits, until it may no longer draw them, so the log says once
+	// when an account starts and stops.
+	creditDrawMutex sync.Mutex
+	drawingCredits  map[store.AccountKey]bool
 }
 
 // CreateTaskRouter keeps allowance refresh ownership outside routing's single selection rule.
 func CreateTaskRouter(storeDatabase *store.StoreDatabase, accountFacts AccountRoutingFactsSource) *TaskRouter {
-	return &TaskRouter{storeDatabase: storeDatabase, accountFacts: accountFacts, currentTime: time.Now}
+	return &TaskRouter{storeDatabase: storeDatabase, accountFacts: accountFacts, currentTime: time.Now, drawingCredits: map[store.AccountKey]bool{}}
 }
 
 // RouteForTask keeps model work on its task's account while that account is
@@ -69,6 +76,14 @@ const claudePromptCacheLifetime = time.Hour
 // RouteForProviderTask uses the same placement rule for each provider. A new fork
 // first inherits its parent account when that account can serve this model.
 func (router *TaskRouter) RouteForProviderTask(taskID store.TaskID, workKind store.WorkKind, modelSlug string, provider accounts.Provider, parentTaskID store.TaskID) (RouteDecision, error) {
+	decision, err := router.routeForProviderTask(taskID, workKind, modelSlug, provider, parentTaskID)
+	if err == nil && workKind == store.ModelTurnWorkKind {
+		err = router.noteCreditDrawStart(decision.AccountKey, modelSlug)
+	}
+	return decision, err
+}
+
+func (router *TaskRouter) routeForProviderTask(taskID store.TaskID, workKind store.WorkKind, modelSlug string, provider accounts.Provider, parentTaskID store.TaskID) (RouteDecision, error) {
 	facts, err := router.accountFacts.ReadAccountRoutingFacts()
 	if err != nil {
 		return RouteDecision{}, fmt.Errorf("read account routing facts: %w", err)
@@ -255,7 +270,8 @@ func (router *TaskRouter) reportExhaustedTaskPin(taskID store.TaskID, servedAcco
 }
 
 // selectAccountForNewWork ranks the accounts that can take new work. Accounts
-// that have not reached their soft reserve come first. Then an OpenAI account
+// that draw usage credits come last, the largest balance first. Of the rest,
+// accounts that have not reached their soft reserve come first. Then an OpenAI account
 // whose week has not started, so that its weekly clock runs and its allowance
 // refills a week later. Then the weekly allowance that resets soonest, because
 // allowance left at a reset is lost and allowance that resets later keeps.
@@ -275,7 +291,10 @@ func (router *TaskRouter) selectAccountForNewWork(facts []accounts.AccountRoutin
 			continue
 		}
 		weekly, weeklyKnown := router.weeklyAllowance(fact, modelSlug)
-		rank := newWorkRank{softReserveReached: accounts.SoftReserveReached(fact, router.currentTime().UTC()), weekly: weekly, weeklyKnown: weeklyKnown}
+		rank := newWorkRank{softReserveReached: accounts.SoftReserveReached(fact, router.currentTime().UTC()), weekly: weekly, weeklyKnown: weeklyKnown, drawsCredits: problem.DrawsCredits}
+		if rank.drawsCredits {
+			rank.creditBalance = *fact.AllowanceSample.CreditBalance
+		}
 		if selected.AccountKey == "" || rank.before(selectedRank) {
 			selected, selectedRank = fact, rank
 		}
@@ -287,10 +306,16 @@ type newWorkRank struct {
 	softReserveReached bool
 	weekly             accounts.AllowanceWindow
 	weeklyKnown        bool
+	drawsCredits       bool
+	creditBalance      float64
 }
 
 func (rank newWorkRank) before(other newWorkRank) bool {
 	switch {
+	case rank.drawsCredits != other.drawsCredits:
+		return other.drawsCredits
+	case rank.drawsCredits:
+		return rank.creditBalance > other.creditBalance
 	case rank.softReserveReached != other.softReserveReached:
 		return other.softReserveReached
 	case rank.weeklyKnown != other.weeklyKnown:
@@ -307,6 +332,8 @@ func (rank newWorkRank) before(other newWorkRank) bool {
 func (router *TaskRouter) describeChoice(selected accounts.AccountRoutingFact, modelSlug string) string {
 	weekly, reported := router.weeklyAllowance(selected, modelSlug)
 	switch {
+	case reported && weekly.FreePercent <= 0 && selected.AllowanceSample.CreditBalance != nil:
+		return fmt.Sprintf("%s, drawing its usage credits, %s left", selected.DisplayName, formatCredits(*selected.AllowanceSample.CreditBalance))
 	case !reported:
 		return fmt.Sprintf("%s, which reports no weekly allowance", selected.DisplayName)
 	case weekly.NotStarted:

@@ -57,7 +57,7 @@ class System:
         self.resets = {account: int(time.time()) + number * 86400 for number, account in enumerate(accounts, 1)}
         self.limited, self.idle, self.extra, self.records, self.taskless_usage = set(), set(), [], [], []
         self.credits = []  # reset credits, as `credit account-N ID UNIX` lines
-        self.usage_credits = {}  # each account's reported usage credit balance
+        self.usage_credits = {}  # each account's starting usage credit balance; the fake providers subtract what work draws
         self.credentials = rig.held_credentials()  # as saved at the start, before any outcome changes a login
         self.records.append(('requests without a task ID', '', lambda: self.taskless_usage,
                              lambda: rig.forwarded_requests(thread='', session='', client='')))
@@ -1503,6 +1503,37 @@ def rollback_and_back_spends_no_second_credit(system):
 # Each Codex account's usage credits at the start: OpenAI's free grant of 62,500, one account having drawn a little, and
 # one near the 2,000 floor.
 USAGE_CREDITS = {'account-1': 62500, 'account-2': 62427.76, 'account-3': 2350}
+STARTS_DRAWING, STOPS_DRAWING = 'starts drawing its usage credits', 'stops drawing its usage credits'
+
+
+def credit_balance(account):
+    """The account's usage credit balance as OpenAI last reported it."""
+    reads = [event for event in rig.fake_provider_events('usage-read', account=account) if 'credits' in event]
+    return float(reads[-1]['credits'])
+
+
+def draws(account=None):
+    """The usage credits OpenAI drew for model requests, as (account, balance after) pairs."""
+    return [(event['account'], float(event['balance'])) for event in rig.fake_provider_events('usage-credits-drawn')
+            if account in (None, event['account'])]
+
+
+def wait_until_the_proxy_reads(*accounts, balance=None, used=100):
+    """Waits until the proxy has applied a usage read of each account, answered from now on, at this weekly level and
+    credit balance: the read after the first one OpenAI answered with them."""
+    earlier = {account: len(rig.fake_provider_events('usage-read', account=account)) for account in accounts}
+    def read(account):
+        return len([event for event in rig.fake_provider_events('usage-read', account=account)[earlier[account]:] if float(event['used']) == used
+                    and (balance is None or float(event.get('credits', 'nan')) == balance)]) >= 2
+    rig.wait_for(lambda: all(read(account) for account in accounts), f'the proxy to read {", ".join(accounts)} at {used}% used'
+                 + ('' if balance is None else f' with {balance:g} usage credits'))
+
+
+def proxy_log_lines(text):
+    """The proxy log's lines that hold text, without their times."""
+    return [line.split(' ', 1)[1] for line in rig.proxy_log().splitlines() if text in line]
+
+
 def status_shows_each_accounts_usage_credits(system):
     """Status shows each Codex account's usage credit balance"""
     status = rig.proxy_command('status')
@@ -1510,6 +1541,119 @@ def status_shows_each_accounts_usage_credits(system):
     if any(line not in status for line in shown):
         raise Failure(f'Status did not show {shown}:\n{status}')
     return 'Status showed ' + ', '.join(f'"{line}"' for line in shown) + ' for the three Codex accounts.'
+
+
+def usage_credits_wait_while_an_account_has_included_allowance(system):
+    """While one Codex account has included allowance left, work goes to it, and no account draws its usage credits,
+    although OpenAI would let the others"""
+    system.limited = {'account-1', 'account-2'}
+    system.apply()
+    wait_until_the_proxy_reads(*system.limited)
+    task = rig.CodexTask('included-allowance-first', 'Reply with the word included.').finish()
+    system.record_codex_task('work on included allowance', task.thread)
+    if rig.pinned_account(task.thread) != 'account-3' or draws() or STARTS_DRAWING in rig.proxy_log():
+        raise Failure(f'The task went to {rig.pinned_account(task.thread)}; OpenAI drew usage credits {draws()}.')
+    return ('account-1 and account-2 used up their weekly allowance; OpenAI still reported both allowed, as it does while an '
+            'account holds usage credits. The task went to account-3, which had allowance left, and no usage credits were drawn.')
+
+
+def usage_credits_are_drawn_when_every_allowance_is_out(system):
+    """With every Codex account's included allowance used up, on a Mac with automatic resets off, work draws the usage
+    credits of the account with the largest balance, the log says so, and status shows the account drawing"""
+    system.limited = set(system.accounts)
+    system.apply()
+    wait_until_the_proxy_reads(*system.accounts)
+    task = rig.CodexTask('usage-credits-drawn', 'Reply with the word drawn.').finish()
+    system.record_codex_task('work on usage credits', task.thread)
+    drawn = draws()
+    if rig.pinned_account(task.thread) != 'account-1' or not drawn or {account for account, _ in drawn} != {'account-1'}:
+        raise Failure(f'The task went to {rig.pinned_account(task.thread)}; OpenAI drew usage credits {drawn}.')
+    started = proxy_log_lines(STARTS_DRAWING)
+    if len(started) != 1 or not started[0].startswith('Codex 1 starts drawing its usage credits at 62,500'):
+        raise Failure(f'The proxy logged {started} for the start of drawing.')
+    wait_until_the_proxy_reads('account-1', balance=drawn[-1][1])
+    status = rig.wait_for(lambda: next((text for text in [rig.proxy_command('status')] if 'available, drawing its usage credits' in text), None),
+                          'status to show account-1 drawing its usage credits')
+    if rig.fake_provider_events('reset-claim'):
+        raise Failure('A reset credit was spent on a Mac with automatic resets off.')
+    shown = next(line for line in status.splitlines() if 'drawing its usage credits' in line)
+    return (f'The task went to account-1, the largest balance; OpenAI drew {len(drawn)} model request(s) from it. The proxy logged:\n'
+            f'{started[0]}\nStatus showed: {shown.strip()}')
+
+
+def usage_credits_stop_at_the_floor(system):
+    """New work stops when the observed balance reaches 2,000; in-flight work stays above 1,000"""
+    # Only account-3 holds usage credits now, 2,350 of them.
+    system.usage_credits = {'account-3': USAGE_CREDITS['account-3']}
+    system.apply()
+    wait_until_the_proxy_reads('account-1', 'account-2')
+    wait_until_the_proxy_reads('account-3', balance=2350)
+    with simulating(system, 'hold-usage-reads'):
+        for number in range(5):
+            task = rig.CodexTask(f'floor-burst-{number}', 'Reply with the word floor.').finish()
+            system.record_codex_task(f'burst work {number}', task.thread)
+    served = 5
+    wait_until_the_proxy_reads('account-3', balance=1850)
+    waits_before = rig.proxy_log().count('no account can take this work')
+    drawn_before = len(draws('account-3'))
+    task = rig.CodexTask('after-credit-floor', 'Reply with the word waiting.')
+    rig.wait_for(lambda: rig.proxy_log().count('no account can take this work') > waits_before,
+                 'new work to wait at the credit floor')
+    if len(draws('account-3')) != drawn_before:
+        raise Failure('New work drew credits after the balance was read below the cutoff.')
+    stopped = rig.wait_for(lambda: proxy_log_lines('Codex 3 ' + STOPS_DRAWING), 'the proxy to log that account-3 stops drawing')[0]
+    final = credit_balance('account-3')
+    system.limited.discard('account-2')
+    system.apply()
+    task.finish()
+    system.record_codex_task('work after the floor', task.thread)
+    if final <= 1000 or any(balance <= 1000 for _, balance in draws('account-3')) or rig.pinned_account(task.thread) != 'account-2':
+        raise Failure(f'account-3\'s usage credits went to {[balance for _, balance in draws("account-3")]}; the work that waited '
+                      f'went to {rig.pinned_account(task.thread)}.')
+    return (f'account-3 drew from 2,350 to {final:,.0f} over {served} task(s); the next task waited until account-2 refilled, '
+            f'and finished there. The proxy logged:\n{stopped}')
+
+
+def low_credit_balance_blocks_until_weekly_reset(system):
+    """A balance below 1,000 blocks an account even if it later reports enough credit and allowed work"""
+    system.limited = set(system.accounts)
+    system.usage_credits = {'account-3': 900}
+    system.apply()
+    wait_until_the_proxy_reads('account-3', balance=900)
+    rig.wait_for(lambda: 'usage credit balance 900 is below 1,000' in rig.proxy_log(), 'the low balance warning')
+    system.usage_credits = {'account-3': 4000}
+    system.apply()
+    wait_until_the_proxy_reads('account-3', balance=4000)
+    before = len(draws())
+    task = rig.CodexTask('low-credit-lockout', 'Reply with the word waiting.')
+    rig.wait_for(lambda: 'usage credit balance fell below 1,000' in rig.proxy_log(), 'work to wait for the weekly reset')
+    if len(draws()) != before:
+        raise Failure('The locked account drew more credits.')
+    system.limited.discard('account-2')
+    system.apply()
+    task.finish()
+    system.record_codex_task('work during low-credit lockout', task.thread)
+    if rig.pinned_account(task.thread) != 'account-2':
+        raise Failure('Work went to the locked account.')
+    return 'At 900 credits the account was blocked until its weekly reset. A later 4,000-credit reading did not unblock it; work resumed on account-2.'
+
+
+def reset_credits_come_first(system):
+    """On the Mac with automatic resets on, with every Codex account's included allowance used up, a reset credit is
+    spent before any account draws its usage credits"""
+    drawn_before = len(draws())
+    system.limited = set(system.accounts)
+    system.usage_credits = dict(USAGE_CREDITS)
+    system.apply()
+    wait_until_the_proxy_reads(*system.accounts)
+    automatic_resets(True)
+    task = rig.CodexTask('reset-before-usage-credits', 'Reply with the word reset.').finish()
+    system.record_codex_task('work after the reset', task.thread)
+    if spends() != [('account-3', 'credit-account-3')] or len(draws()) != drawn_before or rig.pinned_account(task.thread) != 'account-3':
+        raise Failure(f'OpenAI spent reset credits {spends()} and drew usage credits {draws()[drawn_before:]}; '
+                      f'the task went to {rig.pinned_account(task.thread)}.')
+    return ('With every account out, account-1 holding 62,400 usage credits and account-3 a reset credit, the proxy spent the '
+            'reset credit and the task went to account-3. No usage credits were drawn.')
 
 
 def no_part_of_a_token_reaches_the_log(system):
@@ -1653,7 +1797,9 @@ GROUPS = [
     ('authority-rollback', 'published-release', [rollback_and_back_spends_no_second_credit]),
     ('secrets', 'cli', [no_part_of_a_token_reaches_the_log, a_reset_result_quoting_the_token_is_neither_logged_nor_printed,
                         a_signed_out_account_pauses_resets_and_says_why_once, a_claude_refresh_failure_quoting_the_refresh_token_is_not_shown]),
-    ('usage-credits', 'cli', [status_shows_each_accounts_usage_credits]),
+    ('low-credit-balance', 'cli', [low_credit_balance_blocks_until_weekly_reset]),
+    ('usage-credits', 'cli', [status_shows_each_accounts_usage_credits, usage_credits_wait_while_an_account_has_included_allowance,
+                              usage_credits_are_drawn_when_every_allowance_is_out, usage_credits_stop_at_the_floor, reset_credits_come_first]),
     ('routing', 'cli', [t3_reads_the_account_pool, new_work_goes_to_the_allowance_that_resets_first, request_without_task_id_is_served]),
     ('exhaustion', 'cli', [exhausted_task_moves_on_its_next_turn]),
     ('outage-goal', 'cli', [goal_continues_when_an_account_returns]),

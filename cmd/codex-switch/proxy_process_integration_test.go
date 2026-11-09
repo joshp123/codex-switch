@@ -209,7 +209,7 @@ func (u *webSocketRecordingUpstream) serveHTTP(output http.ResponseWriter, reque
 	if request.URL.Path == "/backend-api/wham/usage" {
 		u.usage <- struct{}{}
 		output.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(output, `{"plan_type":"pro","rate_limit":{"allowed":true,"limit_reached":false}}`)
+		_, _ = io.WriteString(output, weeklyAllowanceReply())
 		return
 	}
 	connection, err := websocket.Accept(output, request, nil)
@@ -376,7 +376,7 @@ func (u *recordingUpstream) serveHTTP(output http.ResponseWriter, request *http.
 	if request.URL.Path == "/backend-api/wham/usage" {
 		u.usage <- struct{}{}
 		output.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(output, `{"plan_type":"pro","rate_limit":{"allowed":true,"limit_reached":false}}`)
+		_, _ = io.WriteString(output, weeklyAllowanceReply())
 		return
 	}
 	var input struct {
@@ -557,4 +557,11 @@ func (process *realBinaryProxyProcess) stop(t *testing.T) {
 			t.Errorf("temporary proxy did not exit after forced termination\n%s", process.stderr.Bytes())
 		}
 	}
+}
+
+// weeklyAllowanceReply is wham/usage for a Pro account with most of its week
+// left, as OpenAI reports it.
+func weeklyAllowanceReply() string {
+	return fmt.Sprintf(`{"plan_type":"pro","rate_limit":{"allowed":true,"limit_reached":false,"primary_window":{"used_percent":10,"limit_window_seconds":604800,"reset_at":%d}}}`,
+		time.Now().Add(4*24*time.Hour).Unix())
 }

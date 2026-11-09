@@ -573,8 +573,11 @@ type Account struct {
 	// Why new work goes elsewhere while the account remains usable.
 	ReserveStatus    string                 `protobuf:"bytes,11,opt,name=reserve_status,json=reserveStatus,proto3" json:"reserve_status,omitempty"`
 	UnavailableUntil *timestamppb.Timestamp `protobuf:"bytes,12,opt,name=unavailable_until,json=unavailableUntil,proto3" json:"unavailable_until,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// The account takes new work although its included allowance is used up:
+	// OpenAI draws its usage credits for it.
+	DrawsCredits  bool `protobuf:"varint,13,opt,name=draws_credits,json=drawsCredits,proto3" json:"draws_credits,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Account) Reset() {
@@ -689,6 +692,13 @@ func (x *Account) GetUnavailableUntil() *timestamppb.Timestamp {
 		return x.UnavailableUntil
 	}
 	return nil
+}
+
+func (x *Account) GetDrawsCredits() bool {
+	if x != nil {
+		return x.DrawsCredits
+	}
+	return false
 }
 
 type AllowanceObservation struct {
@@ -1257,7 +1267,7 @@ const file_menu_snapshot_proto_rawDesc = "" +
 	"successful\x18\x02 \x01(\x03R\n" +
 	"successful\x12\x16\n" +
 	"\x06failed\x18\x03 \x01(\x03R\x06failed\x12 \n" +
-	"\vinterrupted\x18\x04 \x01(\x03R\vinterrupted\"\x92\x04\n" +
+	"\vinterrupted\x18\x04 \x01(\x03R\vinterrupted\"\xb7\x04\n" +
 	"\aAccount\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05email\x18\x02 \x01(\tR\x05email\x12\x12\n" +
@@ -1271,7 +1281,8 @@ const file_menu_snapshot_proto_rawDesc = "" +
 	"\bprovider\x18\n" +
 	" \x01(\x0e2\x1b.codex_switch.menu.ProviderR\bprovider\x12%\n" +
 	"\x0ereserve_status\x18\v \x01(\tR\rreserveStatus\x12G\n" +
-	"\x11unavailable_until\x18\f \x01(\v2\x1a.google.protobuf.TimestampR\x10unavailableUntil\"\xe8\x02\n" +
+	"\x11unavailable_until\x18\f \x01(\v2\x1a.google.protobuf.TimestampR\x10unavailableUntil\x12#\n" +
+	"\rdraws_credits\x18\r \x01(\bR\fdrawsCredits\"\xe8\x02\n" +
 	"\x14AllowanceObservation\x12;\n" +
 	"\vobserved_at\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
 	"observedAt\x12\x18\n" +

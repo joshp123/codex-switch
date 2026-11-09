@@ -58,6 +58,9 @@ message Account {
   // Why new work goes elsewhere while the account remains usable.
   string reserve_status = 11;
   google.protobuf.Timestamp unavailable_until = 12;
+  // The account takes new work although its included allowance is used up:
+  // OpenAI draws its usage credits for it.
+  bool draws_credits = 13;
 }
 enum Provider {
   PROVIDER_UNSPECIFIED = 0;
