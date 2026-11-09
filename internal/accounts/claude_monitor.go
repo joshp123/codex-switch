@@ -13,8 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"time"
-
-	"github.com/joshp123/codex-switch/internal/providerreply"
 )
 
 const claudeUsageReadInterval = 5 * time.Minute
@@ -114,7 +112,7 @@ func (monitor *Monitor) readClaudeAllowance(ctx context.Context, account PoolAcc
 	request.Header.Set("User-Agent", "claude-code/2.1.273")
 	response, err := monitor.httpClient.Do(request)
 	if err != nil {
-		return AllowanceSample{}, time.Time{}, errors.New("Claude usage: " + providerreply.Failure(err))
+		return AllowanceSample{}, time.Time{}, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
@@ -129,8 +127,8 @@ func (monitor *Monitor) readClaudeAllowance(ctx context.Context, account PoolAcc
 		return AllowanceSample{}, claudeRetryAfter(response.Header, time.Now()), err
 	}
 	var usage claudeUsageResponse
-	if err := providerreply.Decode(io.LimitReader(response.Body, maximumRefreshResponseBytes), &usage); err != nil {
-		return AllowanceSample{}, time.Time{}, fmt.Errorf("Claude usage: %w", err)
+	if err := json.NewDecoder(io.LimitReader(response.Body, maximumRefreshResponseBytes)).Decode(&usage); err != nil {
+		return AllowanceSample{}, time.Time{}, err
 	}
 	sample, err := usage.sample(account, time.Now())
 	if err == nil {

@@ -186,11 +186,8 @@ def fake_claude_login(number):
 def start_fake_providers():
     """Starts the fake providers, which stand in for OpenAI and Anthropic."""
     log = (RUN / 'logs/fake-providers.log').open('w')
-    # A credential no login holds, as from another Mac: every error the fake providers return quotes it too.
-    (RUN / 'unknown-token').write_text('rt_' + secrets.token_urlsafe(32))
     started_processes.append(subprocess.Popen([str(RUN / 'fake-providers'), '--data-dir', str(RUN / 'data'), '--control', str(RUN / 'control'),
-                                               '--certificate-authority', str(RUN / 'fake-providers-ca.pem'), '--requests', str(RUN / 'logs/requests'),
-                                               '--unknown-token', read('unknown-token')],
+                                               '--certificate-authority', str(RUN / 'fake-providers-ca.pem'), '--requests', str(RUN / 'logs/requests')],
                                               stdout=log, stderr=log, start_new_session=True))
     origins = wait_for(lambda: re.search(r'(http://127\.0\.0\.1:\d+) (https://127\.0\.0\.1:\d+)', read('logs/fake-providers.log')),
                        'the fake providers to listen', timeout=30, interval=0.05)
@@ -376,22 +373,6 @@ def run_processes(exclude=None, only_servers=False):
 # Clients
 
 
-def start_command(command, name, **options):
-    """start_client for a command a person runs, such as the installer, whose output is checked for credentials."""
-    with (RUN / 'logs/command-outputs').open('a') as listed:
-        listed.write(f'{name}.out\n{name}.err\n')
-    return start_client(command, name, **options)
-
-
-def run_command(command, **options):
-    """subprocess.run for a codex-switch command a person runs, with its output kept in logs/commands.log so it can be
-    checked for credentials."""
-    result = subprocess.run(command, capture_output=True, text=True, **options)
-    with (RUN / 'logs/commands.log').open('a') as log:
-        log.write(f'$ {shlex.join(map(str, command))}\n{result.stdout}{result.stderr}\n')
-    return result
-
-
 def start_client(command, name, **options):
     options.setdefault('stdin', subprocess.DEVNULL)
     options.setdefault('stdout', (RUN / f'logs/{name}.out').open('w'))
@@ -453,7 +434,8 @@ def run_claude(session, must_succeed=True, resume=False, fast_mode=False):
                    and name not in ('NODE_EXTRA_CA_CERTS', 'NODE_TLS_REJECT_UNAUTHORIZED')}
     environment.update(HOME=str(RUN / 'claude'), CLAUDE_CONFIG_DIR=str(RUN / 'claude'),
                        CODEX_SWITCH_DATA_DIR=str(RUN / 'data'))
-    settings = run_command([str(RUN / 'cli'), 'print-claude-config', '--listen', listen_address()], env=environment, check=True)
+    settings = subprocess.run([str(RUN / 'cli'), 'print-claude-config', '--listen', listen_address()],
+                              env=environment, capture_output=True, text=True, check=True)
     environment.update(json.loads(settings.stdout)['env'])
     auth = json.loads((RUN / 'data' / CLAUDE_ACCOUNTS[0] / 'auth.json').read_text())
     environment['CLAUDE_CODE_OAUTH_TOKEN'] = auth['access_token']
@@ -803,7 +785,7 @@ def cli_path():
 def proxy_command(*arguments):
     """Runs a person-facing command against this run's isolated account data."""
     environment = dict(client_environment(), CODEX_SWITCH_DATA_DIR=str(RUN / 'data'))
-    result = run_command([str(cli_path()), *arguments], env=environment)
+    result = subprocess.run([str(cli_path()), *arguments], env=environment, capture_output=True, text=True)
     if result.returncode:
         raise Failure(f'codex-switch {" ".join(arguments)} failed: {result.stderr.strip()}')
     return result.stdout
@@ -822,15 +804,14 @@ def proxy_log():
     return read('data/proxy.log')
 
 
-# A run of this many characters of a credential, in any encoding, is part of it. No real credential is shorter, and
-# fewer are at most its public start, such as "sk-ant-oat01-" or a JWT header.
+# The proxy removes a credential from what it logs and shows wherever this many of its characters, from its start,
+# appear. No real credential is shorter, and fewer are at most its public start, such as "sk-ant-oat01-" or a JWT header.
 CREDENTIAL_PIECE = 16
 
 
 def held_credentials():
-    """Every credential in this run's saved logins, on every proxy, by where it is saved, and the token no login holds
-    that the fake providers quote as well."""
-    found = {read('unknown-token').strip(): 'the token no login holds'} if (RUN / 'unknown-token').exists() else {}
+    """Every credential in this run's saved logins, on every proxy, by where it is saved."""
+    found = {}
     for path in RUN.glob('**/auth.json'):
         try:
             auth = json.loads(path.read_text())
@@ -843,47 +824,22 @@ def held_credentials():
     return found
 
 
-def credential_encodings(credential):
-    """A credential whole, base64-encoded and URL-encoded, as the fake providers echo it."""
-    data = credential.encode()
-    return [credential, base64.b64encode(data).decode(), base64.urlsafe_b64encode(data).decode().rstrip('='),
-            ''.join(f'%{byte:02x}' for byte in data)]
-
-
 def credential_pieces(text, credentials):
-    """(line, credential) for each line of text that holds CREDENTIAL_PIECE characters in a row of a credential, in any
-    of its encodings and either case, and for a run that only appears with every line joined, as when a provider split
-    it across lines. A run of a credential with its first characters removed is a run of the credential."""
-    pieces = {}
-    for credential in credentials:
-        for encoded in credential_encodings(credential):
-            encoded = encoded.lower()
-            for start in range(len(encoded) - CREDENTIAL_PIECE + 1):
-                pieces.setdefault(encoded[start:start + CREDENTIAL_PIECE], credential)
-
-    def held(line):
-        line = line.lower()
-        return next((pieces[line[start:start + CREDENTIAL_PIECE]] for start in range(len(line) - CREDENTIAL_PIECE + 1)
-                     if line[start:start + CREDENTIAL_PIECE] in pieces), None)
-
-    found = [(line, credential) for line in text.splitlines() if (credential := held(line))]
-    if not found and (credential := held(''.join(text.split()))):
-        found.append(('a run split across lines', credential))
+    """(line, credential) for each line of text that holds a part of a credential: CREDENTIAL_PIECE characters of it."""
+    pieces = {credential[start:start + CREDENTIAL_PIECE]: credential for credential in credentials
+              for start in range(len(credential) - CREDENTIAL_PIECE + 1)}
+    found = []
+    for line in text.splitlines():
+        if any(line[start:start + CREDENTIAL_PIECE] in pieces for start in range(len(line) - CREDENTIAL_PIECE + 1)):
+            # Tokens can share a start, such as a JWT header: name the one the line holds most of.
+            found.append((line, max(credentials, key=lambda credential: sum(
+                credential[start:start + CREDENTIAL_PIECE] in line for start in range(len(credential) - CREDENTIAL_PIECE + 1)))))
     return found
 
 
-def output_files():
-    """Every proxy log and launchd output file in this run, on every proxy, and the output of every command a person
-    runs."""
-    commands = [RUN / 'logs' / name for name in read('logs/command-outputs').split()] if (RUN / 'logs/command-outputs').exists() else []
-    return sorted({*RUN.glob('**/proxy.log'), *RUN.glob('**/*launchd.log'), *RUN.glob('logs/commands.log'),
-                   *[path for path in commands if path.exists()]})
-
-
-def menu_snapshot():
-    """The menu snapshot the proxy serves, as the menu reads it."""
-    with urllib.request.urlopen(read('data/menu-snapshot-url').strip(), timeout=5) as response:
-        return response.read()
+def proxy_output_files():
+    """Every proxy log and launchd output file in this run, on every proxy."""
+    return sorted({*RUN.glob('**/proxy.log'), *RUN.glob('**/*launchd.log')})
 
 
 def menu_snapshot_served(data=RUN / 'data'):

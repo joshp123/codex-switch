@@ -1,11 +1,10 @@
 package usage
 
 import (
-	"bytes"
+	"encoding/json"
 	"errors"
 	"time"
 
-	"github.com/joshp123/codex-switch/internal/providerreply"
 	"github.com/joshp123/codex-switch/internal/store"
 )
 
@@ -53,7 +52,7 @@ func (observation *ClaudeResponseUsage) Observe(payload []byte) (bool, error) {
 			Usage claudeMessageUsage `json:"usage"`
 		} `json:"message"`
 	}
-	if err := providerreply.Decode(bytes.NewReader(payload), &event); err != nil {
+	if err := json.Unmarshal(payload, &event); err != nil {
 		return false, err
 	}
 	if observation.complete {

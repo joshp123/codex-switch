@@ -7,22 +7,16 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/joshp123/codex-switch/internal/providerreply"
 	"github.com/joshp123/codex-switch/internal/routing"
 	"github.com/joshp123/codex-switch/internal/store"
 
 	"github.com/joshp123/codex-switch/internal/logtime"
 )
-
-// limitNumber is a number in a Claude limit header: a time, a count of
-// seconds or a share used.
-var limitNumber = regexp.MustCompile(`^[0-9]{1,12}(\.[0-9]{1,6})?$`)
 
 type ClaudeAccountObserver interface {
 	ObserveClaudeResponse(store.AccountKey, string, http.Header, int)
@@ -61,7 +55,7 @@ func (handler *TrafficRelayHandler) observeClaudeRejection(request *routedRelayR
 	case http.StatusTooManyRequests:
 		head := peekResponseBody(response)
 		limited := describeModelRequest(request.taskID, request.client, request.routeDecision.DisplayName) + ": Anthropic limited " + request.modelSlug +
-			" with " + providerreply.Refusal(response.StatusCode, head) + " (" + describeClaudeLimitHeaders(response.Header) + ")"
+			" (" + describeClaudeLimitHeaders(response.Header) + ")" + describeRejection(response.Header, head)
 		answerClaudeRejection(response, handler.taskRouter, request.modelSlug, limited)
 	case http.StatusUnauthorized:
 		handler.taskRouter.ReportUnauthorizedTurn(request.routeDecision.AccountKey, request.routeDecision.Credentials)
@@ -71,7 +65,7 @@ func (handler *TrafficRelayHandler) observeClaudeRejection(request *routedRelayR
 		response.Header.Set("X-Should-Retry", "true")
 	default:
 		head := peekResponseBody(response)
-		log.Printf("%s: Anthropic answered %s with %s", describeModelRequest(request.taskID, request.client, request.routeDecision.DisplayName), request.modelSlug, providerreply.Refusal(response.StatusCode, head))
+		log.Printf("%s: Anthropic answered %s with HTTP %d%s", describeModelRequest(request.taskID, request.client, request.routeDecision.DisplayName), request.modelSlug, response.StatusCode, describeRejection(response.Header, head))
 	}
 	return nil
 }
@@ -88,9 +82,9 @@ func (handler *TrafficRelayHandler) passClaudeFastModeRefusal(request *routedRel
 		request.responseObserver.admittedRequests = 0
 	}
 	head := peekResponseBody(response)
-	log.Printf("%s: Anthropic refused fast mode for %s with %s (%s); Claude Code retries at standard speed on the same account",
+	log.Printf("%s: Anthropic refused fast mode for %s (%s)%s; Claude Code retries at standard speed on the same account",
 		describeModelRequest(request.taskID, request.client, request.routeDecision.DisplayName), request.modelSlug,
-		providerreply.Refusal(response.StatusCode, head), describeClaudeLimitHeaders(response.Header))
+		describeClaudeLimitHeaders(response.Header), describeRejection(response.Header, head))
 	return nil
 }
 
@@ -133,8 +127,8 @@ func answerClaudeRejection(response *http.Response, router TaskRouter, modelSlug
 	}
 }
 
-// peekResponseBody reads only the start of the body for its error codes; the
-// client gets every byte.
+// peekResponseBody reads only the start of the body for the reason; the client
+// gets every byte.
 func peekResponseBody(response *http.Response) []byte {
 	head, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
 	response.Body = struct {
@@ -145,19 +139,13 @@ func peekResponseBody(response *http.Response) []byte {
 }
 
 // describeClaudeLimitHeaders lists the unified rate-limit headers on a 429, so
-// the log shows which limit Anthropic named. Their values are codes, such as
-// five_hour, and numbers; a header with any other value is left out.
+// the log shows which limit Anthropic named.
 func describeClaudeLimitHeaders(header http.Header) string {
 	var named []string
 	for name, values := range header {
 		name = strings.ToLower(name)
-		if !strings.HasPrefix(name, "anthropic-ratelimit-unified-") && name != "retry-after" {
-			continue
-		}
-		name = strings.TrimPrefix(name, "anthropic-ratelimit-unified-")
-		value := strings.Join(values, ",")
-		if providerreply.Code(value) != "" || limitNumber.MatchString(value) {
-			named = append(named, name+"="+value)
+		if strings.HasPrefix(name, "anthropic-ratelimit-unified-") || name == "retry-after" {
+			named = append(named, strings.TrimPrefix(name, "anthropic-ratelimit-unified-")+"="+strings.Join(values, ","))
 		}
 	}
 	if len(named) == 0 {

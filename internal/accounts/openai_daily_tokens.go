@@ -1,7 +1,6 @@
 package accounts
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,8 +12,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-
-	"github.com/joshp123/codex-switch/internal/providerreply"
 )
 
 const (
@@ -88,7 +85,7 @@ func (s *OpenAIDailyTokenSource) get(ctx context.Context, url string) (string, [
 	request.Header.Set("User-Agent", "codex-cli")
 	response, err := s.client.Do(request)
 	if err != nil {
-		return "", nil, errors.New("read OpenAI usage: " + providerreply.Failure(err))
+		return "", nil, fmt.Errorf("read OpenAI usage: %w", err)
 	}
 	if response.StatusCode == http.StatusUnauthorized {
 		discardOpenAIDailyTokenBody(response.Body)
@@ -101,7 +98,7 @@ func (s *OpenAIDailyTokenSource) get(ctx context.Context, url string) (string, [
 	}
 	encoded, err := io.ReadAll(io.LimitReader(response.Body, maximumOpenAIDailyTokenBodyBytes+1))
 	if err != nil {
-		return "", nil, errors.New("read OpenAI usage: " + providerreply.Failure(err))
+		return "", nil, fmt.Errorf("read OpenAI usage: %w", err)
 	}
 	if len(encoded) > maximumOpenAIDailyTokenBodyBytes {
 		return "", nil, errors.New("OpenAI usage response is too large")
@@ -144,7 +141,7 @@ func decodeOpenAIDailyTokenHistory(accountID string, readStarted time.Time, enco
 	}
 	readStarted = readStarted.UTC()
 	var wire openAIDailyTokenProfileResponse
-	if err := providerreply.Decode(bytes.NewReader(encoded), &wire); err != nil {
+	if err := json.Unmarshal(encoded, &wire); err != nil {
 		return OpenAIDailyTokenHistory{}, fmt.Errorf("decode OpenAI daily tokens: %w", err)
 	}
 	if wire.Metadata == nil || wire.Metadata.GeneratedAt.IsZero() {

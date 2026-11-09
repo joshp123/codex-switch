@@ -1,15 +1,13 @@
 package accounts
 
 import (
-	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"net/url"
 	"time"
-
-	"github.com/joshp123/codex-switch/internal/providerreply"
 )
 
 const openAIDailyUsageBreakdownPath = "/backend-api/wham/usage/daily-token-usage-breakdown"
@@ -55,23 +53,23 @@ func decodeOpenAIModelDayCredits(encoded []byte) ([]OpenAIModelDayCredits, error
 			} `json:"models"`
 		} `json:"data"`
 	}
-	if err := providerreply.Decode(bytes.NewReader(encoded), &wire); err != nil {
+	if err := json.Unmarshal(encoded, &wire); err != nil {
 		return nil, fmt.Errorf("decode OpenAI daily usage breakdown: %w", err)
 	}
 	if wire.Units == nil || *wire.Units != "percent" {
 		return nil, errors.New("OpenAI daily usage breakdown is not in percent of the busiest day")
 	}
 	var credits []OpenAIModelDayCredits
-	for index, day := range wire.Data {
+	for _, day := range wire.Data {
 		if _, err := time.Parse(time.DateOnly, day.Date); err != nil {
-			return nil, fmt.Errorf("OpenAI daily usage breakdown day %d has an invalid date", index+1)
+			return nil, fmt.Errorf("OpenAI daily usage breakdown has an invalid date %q", day.Date)
 		}
 		for _, model := range day.Models {
 			if model.Model == "" || model.Credits == nil || *model.Credits < 0 || math.IsInf(*model.Credits, 0) || math.IsNaN(*model.Credits) {
 				return nil, fmt.Errorf("OpenAI daily usage breakdown for %s has invalid model credits", day.Date)
 			}
 			if model.Speed != "standard" && model.Speed != "fast" {
-				return nil, fmt.Errorf("OpenAI daily usage breakdown for %s has a speed other than standard or fast", day.Date)
+				return nil, fmt.Errorf("OpenAI daily usage breakdown for %s has an unknown speed %q", day.Date, model.Speed)
 			}
 			if *model.Credits == 0 {
 				continue

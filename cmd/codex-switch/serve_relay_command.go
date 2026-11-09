@@ -21,6 +21,7 @@ import (
 	accountapi "github.com/joshp123/codex-switch/internal/accounts"
 	"github.com/joshp123/codex-switch/internal/clientcapability"
 	"github.com/joshp123/codex-switch/internal/codexstate"
+	"github.com/joshp123/codex-switch/internal/heldcredentials"
 	"github.com/joshp123/codex-switch/internal/logtime"
 	"github.com/joshp123/codex-switch/internal/relay"
 	"github.com/joshp123/codex-switch/internal/routing"
@@ -70,7 +71,7 @@ func serveRelay(tcpListenAddress string) {
 	}
 	defer proxyLog.Close()
 	log.SetFlags(0)
-	log.SetOutput(logtime.StampedLines{Output: proxyLog})
+	log.SetOutput(heldcredentials.RemovingWriter{Output: logtime.StampedLines{Output: proxyLog}})
 	capability, err := clientcapability.Create(dataDir())
 	if err != nil {
 		log.Fatal(err)
@@ -129,7 +130,7 @@ func serveRelay(tcpListenAddress string) {
 		if err := accountMonitor.CheckProviderAccess(context.Background()); err != nil {
 			failure := fmt.Sprintf("provider check failed: %s; old generation keeps serving", strings.ReplaceAll(err.Error(), "\n", "; "))
 			log.Printf("process %d: %s", os.Getpid(), failure)
-			fmt.Fprintln(os.Stderr, failure)
+			fmt.Fprintln(stderr, failure)
 			os.Exit(providerCheckFailedExitCode)
 		}
 		log.Printf("process %d: provider check passed", os.Getpid())
@@ -194,7 +195,7 @@ func serveRelay(tcpListenAddress string) {
 	}
 	serving := fmt.Sprintf("codex-switch %s serving on %s, process %d", revision, "http://"+listener.Addr().String(), os.Getpid())
 	log.Print(serving)
-	fmt.Printf("codex-switch listening on %s\ncodex-switch log: %s\n", "http://"+listener.Addr().String(), proxyLogPath(dataDir()))
+	fmt.Fprintf(stdout, "codex-switch listening on %s\ncodex-switch log: %s\n", "http://"+listener.Addr().String(), proxyLogPath(dataDir()))
 
 	clientURL := "http://" + listener.Addr().String() + clientcapability.PathPrefix(capability)
 	snapshots.codexBaseURL = clientURL + "/backend-api/codex"
@@ -309,7 +310,7 @@ func printBinaryRevision(args []string) {
 		log.Fatal("usage: codex-switch print-revision")
 	}
 	revision, _ := buildRevision()
-	fmt.Println(revision)
+	fmt.Fprintln(stdout, revision)
 }
 
 // proxyLogPath is the serving proxy's one log file.
@@ -317,9 +318,8 @@ func proxyLogPath(dataDirectory string) string {
 	return filepath.Join(dataDirectory, "proxy.log")
 }
 
-// secondsFromEnvironment reads a timer only the system test sets, to shorten
-// it; a live proxy never has these variables. Any other value than a positive
-// whole number of seconds stops the proxy.
+// secondsFromEnvironment reads a duration the system test shortens. Any other
+// value than a positive whole number of seconds stops the proxy.
 func secondsFromEnvironment(name string) (time.Duration, bool) {
 	value := strings.TrimSpace(os.Getenv(name))
 	if value == "" {

@@ -17,8 +17,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/joshp123/codex-switch/internal/providerreply"
 )
 
 // A retiring proxy gives every connection doing no work this long before it
@@ -93,7 +91,7 @@ func CreateClaudeForwardProxy(dataDirectory, capability string, trafficRelay *Tr
 					if isUpstreamProtocolFailure(err) && trafficRelay.onFailure != nil {
 						trafficRelay.onFailure()
 					}
-					log.Printf("Claude account request %s %s failed: %s; the proxy did not resend this attempt", request.Method, request.URL.Path, providerreply.Failure(err))
+					log.Printf("Claude account request %s %s failed: %v; the proxy did not resend this attempt", request.Method, request.URL.Path, err)
 				}
 				http.Error(writer, "upstream service unavailable", http.StatusBadGateway)
 			},

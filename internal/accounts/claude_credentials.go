@@ -2,6 +2,7 @@ package accounts
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,10 +11,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
-	"github.com/joshp123/codex-switch/internal/providerreply"
+	"github.com/joshp123/codex-switch/internal/heldcredentials"
 )
 
 const (
@@ -71,6 +73,7 @@ func (s *savedLogin) readClaudeAuth() (claudeAuthFile, error) {
 	if err := json.Unmarshal(data, &auth); err != nil {
 		return auth, signInRequired(err)
 	}
+	heldcredentials.Remember(auth.AccessToken, auth.RefreshToken)
 	if auth.AccessToken == "" || auth.RefreshToken == "" || auth.AccountID == "" || auth.OrganizationID == "" || auth.ExpiresAt.IsZero() {
 		return auth, signInRequired(errors.New("incomplete Claude credentials"))
 	}
@@ -143,9 +146,18 @@ type claudeTokenResponse struct {
 	} `json:"organization"`
 }
 
+// claudeOAuthPublicFields are the token request fields that carry no secret.
+var claudeOAuthPublicFields = []string{"grant_type", "client_id", "scope", "redirect_uri"}
+
 // postClaudeOAuth sends a token request. When Anthropic refuses it, the error
-// gives Anthropic's HTTP status and error code; see providerreply.
+// gives Anthropic's status, code and message. Every secret the request sends
+// and every token it receives is remembered, so no output shows one.
 func postClaudeOAuth(ctx context.Context, client *http.Client, tokenURL string, body map[string]string, result *claudeTokenResponse) error {
+	for field, value := range body {
+		if !slices.Contains(claudeOAuthPublicFields, field) {
+			heldcredentials.Remember(value)
+		}
+	}
 	encoded, err := json.Marshal(body)
 	if err != nil {
 		return err
@@ -157,19 +169,59 @@ func postClaudeOAuth(ctx context.Context, client *http.Client, tokenURL string, 
 	request.Header.Set("Content-Type", "application/json")
 	response, err := client.Do(request)
 	if err != nil {
-		return temporary(errors.New("Claude token request: " + providerreply.Failure(err)))
+		return temporary(fmt.Errorf("Claude token request: %w", err))
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		refusal, _ := io.ReadAll(io.LimitReader(response.Body, maximumRefreshResponseBytes))
-		err := errors.New("Anthropic refused the token request with " + providerreply.Refusal(response.StatusCode, refusal))
+		err := fmt.Errorf("Anthropic refused the token request with HTTP %d%s", response.StatusCode, describeTokenRefusal(refusal))
 		if response.StatusCode == 400 || response.StatusCode == 401 || response.StatusCode == 403 {
 			return signInRequired(err)
 		}
 		return temporary(err)
 	}
-	if err := providerreply.Decode(io.LimitReader(response.Body, maximumRefreshResponseBytes), result); err != nil {
-		return fmt.Errorf("Claude token request: %w", err)
+	if err := json.NewDecoder(io.LimitReader(response.Body, maximumRefreshResponseBytes)).Decode(result); err != nil {
+		return err
 	}
+	heldcredentials.Remember(result.AccessToken, result.RefreshToken)
 	return nil
+}
+
+// tokenRefusal reads a provider's reason for refusing a token request, as
+// Codex and Claude Code read it: the code is "error" when that is a string,
+// else "error.code" or "error.type"; the message is "error_description", or
+// "error.message" in the API error shape.
+func tokenRefusal(body []byte) (code, message string) {
+	var refusal struct {
+		Error            json.RawMessage `json:"error"`
+		ErrorDescription string          `json:"error_description"`
+	}
+	if json.Unmarshal(body, &refusal) != nil {
+		return "", ""
+	}
+	var apiError struct {
+		Code    string `json:"code"`
+		Type    string `json:"type"`
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(refusal.Error, &code) != nil && json.Unmarshal(refusal.Error, &apiError) == nil {
+		code, message = cmp.Or(apiError.Code, apiError.Type), apiError.Message
+	}
+	return code, cmp.Or(refusal.ErrorDescription, message)
+}
+
+// describeTokenRefusal is the provider's reason for refusing a token request,
+// to follow "with HTTP <status>". A body without a code or message is quoted
+// as it is.
+func describeTokenRefusal(body []byte) string {
+	code, message := tokenRefusal(body)
+	switch {
+	case code != "" && message != "":
+		return " " + code + ": " + message
+	case code != "" || message != "":
+		return " " + code + message
+	case len(bytes.TrimSpace(body)) == 0:
+		return " and an empty body"
+	}
+	return ": " + string(bytes.TrimSpace(body))
 }

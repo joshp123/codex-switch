@@ -19,7 +19,6 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	_ "embed"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
@@ -66,7 +65,6 @@ func main() {
 	controlPath := flag.String("control", "", "simulation file; an empty file means every account is available")
 	authorityPath := flag.String("certificate-authority", "", "where to write the PEM certificate that the HTTPS listener's certificate chains to")
 	requestsDirectory := flag.String("requests", "", "directory that keeps a copy of every model request, for reading what a client sent")
-	flag.StringVar(&unknownToken, "unknown-token", "", "a credential no login holds, which every error quotes as well; see echoes")
 	flag.Parse()
 	log.SetOutput(os.Stdout)
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
@@ -174,10 +172,11 @@ type providers struct {
 //	hold-responses CLIENT           model responses for CLIENT (its Originator header) pause once started
 //	break-responses                 model requests receive a malformed HTTP response
 //	provider-error                  model requests receive a provider HTTP error
-//	token-quoting-error             Codex model and model-list requests receive HTTP 503: a model request's body is an
-//	                                API error whose every field is echoes, a model-list request's body is echoes alone
-//	token-quoting-failure           Codex model requests over HTTP start, then OpenAI fails the response with an error
-//	                                whose every field is echoes
+//	token-quoting-error             Codex model and model-list requests receive a provider HTTP error quoting the request's
+//	                                access token where the proxy shortens what it logs: after 260 bytes of a model
+//	                                request's reason, and across the 4096 bytes it reads of any other body
+//	token-quoting-failure           Codex model requests over HTTP start, then OpenAI fails the response with a message
+//	                                quoting the request's access token after 260 bytes
 //	usage-error                     usage reads receive a provider HTTP error
 //	hold-usage-reads                usage reads wait, unanswered
 //	claude-throttle COUNT           the next COUNT Claude model requests receive a 429 that names no usage limit
@@ -187,7 +186,8 @@ type providers struct {
 //	reset-soon                      a limited account-2 refills five minutes from each read
 //	reset-drop                      requests to spend a credit are answered as usual, but the replies are lost
 //	reset-refuse                    requests to spend a credit receive a provider HTTP error
-//	reset-token-code                requests to spend a credit are answered with echoes as the code, and spend nothing
+//	reset-token-code                requests to spend a credit are answered with the request's access token as the code,
+//	                                and spend nothing
 //	hold-resets                     requests to spend a credit wait, unanswered and not yet applied
 //	usage-lag                       usage reads report each account as it was before a credit reset it
 //	claude-grant                    Claude usage reads report reset grants
@@ -210,11 +210,9 @@ type providers struct {
 // retired, with Anthropic's error and message.
 //
 // Every error these fakes return quotes the credentials of the request it
-// answers in every field the proxy does not act on, as echoes: its message,
-// body and codes, a Claude limit header, a malformed reply's status line, and
-// a refused Claude refresh's description, which quotes the refresh token sent.
-// So every test can see that the proxy never logs or shows a credential,
-// however a provider sends it.
+// answers: an error's message or body quotes its Authorization header, and a
+// refused Claude refresh quotes the refresh token sent. So every test can see
+// that the proxy never logs or shows a credential, whatever a provider sends.
 type controls struct {
 	weeklyUsed       map[string]float64
 	weeklyResets     map[string]int64
@@ -358,10 +356,10 @@ func (providers *providers) ServeHTTP(writer http.ResponseWriter, request *http.
 	switch {
 	case controls.quoteToken && (request.URL.Path == modelsPath || request.URL.Path == responsesPath):
 		providers.logRequest("token-quoting-error", request, http.StatusServiceUnavailable)
-		echoed := requestEchoes(request)
-		body, _ := json.Marshal(map[string]any{"error": map[string]string{"type": echoed, "code": echoed, "message": echoed}, "detail": echoed})
+		token := strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer ")
+		body := fmt.Appendf(nil, `{"error":{"type":"invalid_request_error","message":"%s Rejected Bearer %s"}}`, strings.Repeat("x", 260), token)
 		if request.URL.Path == modelsPath {
-			body = []byte(echoed)
+			body = fmt.Appendf(nil, "%sRejected Bearer %s", strings.Repeat(" ", 4096-len("Rejected Bearer ")-40), token)
 		}
 		writeJSON(writer, http.StatusServiceUnavailable, body)
 	case request.URL.Path == modelsPath:
@@ -374,7 +372,7 @@ func (providers *providers) ServeHTTP(writer http.ResponseWriter, request *http.
 		providers.spendResetCredit(writer, request, controls, alias)
 	case request.URL.Path == usagePath && controls.usageError:
 		providers.logRequest("usage-error", request, http.StatusServiceUnavailable)
-		http.Error(writer, "provider unavailable (simulation); "+requestEchoes(request), http.StatusServiceUnavailable)
+		http.Error(writer, "provider unavailable (simulation)"+quotedCredentials(request), http.StatusServiceUnavailable)
 	case request.URL.Path == usagePath:
 		for controls.holdUsageReads {
 			select {
@@ -392,23 +390,22 @@ func (providers *providers) ServeHTTP(writer http.ResponseWriter, request *http.
 		writeJSON(writer, http.StatusOK, body)
 	case request.URL.Path != responsesPath:
 		providers.logRequest("not-found", request, http.StatusNotFound)
-		http.Error(writer, "404 page not found; "+requestEchoes(request), http.StatusNotFound)
+		http.Error(writer, "404 page not found"+quotedCredentials(request), http.StatusNotFound)
 	case controls.quoteInFailure && !webSocket:
 		providers.logRequest("token-quoting-failure", request, http.StatusOK)
 		providers.failCodexResponse(writer, request)
 	case controls.providerError:
 		providers.logRequest("provider-error", request, http.StatusServiceUnavailable)
-		http.Error(writer, "provider unavailable (simulation); "+requestEchoes(request), http.StatusServiceUnavailable)
+		http.Error(writer, "provider unavailable (simulation)"+quotedCredentials(request), http.StatusServiceUnavailable)
 	case controls.breakResponses:
 		providers.logRequest("malformed-response", request, 0)
 		if connection, _, err := writer.(http.Hijacker).Hijack(); err == nil {
-			// Go's client quotes a malformed status code, the status line's second field, in its error.
-			_, _ = connection.Write([]byte("HTTP/1.1 " + strings.Join(strings.Fields(requestEchoes(request)), "+") + " not an HTTP response\r\n\r\n"))
+			_, _ = connection.Write([]byte("not an HTTP response\r\n\r\n"))
 			_ = connection.Close()
 		}
 	case webSocket && controls.httpOnly:
 		providers.logRequest("websocket-refused", request, http.StatusUpgradeRequired)
-		http.Error(writer, "WebSocket refused (simulation); "+requestEchoes(request), http.StatusUpgradeRequired)
+		http.Error(writer, "WebSocket refused (simulation)"+quotedCredentials(request), http.StatusUpgradeRequired)
 	case controls.limited[alias] && !providers.accountReset(alias):
 		providers.logRequest("rejected-usage-limit", request, http.StatusTooManyRequests)
 		writeJSON(writer, http.StatusTooManyRequests, usageLimitError(request))
@@ -469,13 +466,12 @@ func (providers *providers) spendResetCredit(writer http.ResponseWriter, request
 	_ = json.NewDecoder(request.Body).Decode(&claim)
 	if controls.resetRefuse {
 		log.Printf("event=reset-refused account=%s credit=%s", alias, claim.CreditID)
-		http.Error(writer, "provider unavailable (simulation); "+requestEchoes(request), http.StatusServiceUnavailable)
+		http.Error(writer, "provider unavailable (simulation)"+quotedCredentials(request), http.StatusServiceUnavailable)
 		return
 	}
 	if controls.resetTokenCode {
 		log.Printf("event=reset-token-code account=%s credit=%s request=%s", alias, claim.CreditID, claim.RequestID)
-		body, _ := json.Marshal(map[string]string{"code": requestEchoes(request)})
-		writeJSON(writer, http.StatusOK, body)
+		writeJSON(writer, http.StatusOK, fmt.Appendf(nil, `{"code":%q}`, strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer ")))
 		return
 	}
 	log.Printf("event=reset-claim account=%s credit=%s request=%s", alias, claim.CreditID, claim.RequestID)
@@ -579,51 +575,19 @@ func accountsCheck(accountID string) []byte {
 // webSocketAgeLimitError is what OpenAI sends when a Responses WebSocket has
 // been open an hour, as Codex's own tests reproduce it.
 func webSocketAgeLimitError(request *http.Request) []byte {
-	return fmt.Appendf(nil, `{"type":"error","status":400,"error":{"type":%q,"code":"websocket_connection_limit_reached","message":%q}}`,
-		requestEchoes(request), "Responses websocket connection limit reached (60 minutes). Create a new websocket connection to continue. "+requestEchoes(request))
+	return fmt.Appendf(nil, `{"type":"error","status":400,"error":{"type":"invalid_request_error","code":"websocket_connection_limit_reached","message":%q}}`,
+		"Responses websocket connection limit reached (60 minutes). Create a new websocket connection to continue."+quotedCredentials(request))
 }
 
 func usageLimitError(request *http.Request) []byte {
-	return fmt.Appendf(nil, `{"type":"error","status":429,"error":{"type":"usage_limit_reached","code":%q,"message":%q,"plan_type":"pro","resets_at":%d}}`,
-		requestEchoes(request), "Usage limit reached (simulation); "+requestEchoes(request), time.Now().Add(time.Hour).Unix())
+	return fmt.Appendf(nil, `{"type":"error","status":429,"error":{"type":"usage_limit_reached","message":%q,"plan_type":"pro","resets_at":%d}}`,
+		"Usage limit reached (simulation)"+quotedCredentials(request), time.Now().Add(time.Hour).Unix())
 }
 
-// unknownToken is a credential no login holds, such as one from another Mac,
-// which every echo quotes as well.
-var unknownToken string
-
-// echoes is credentials as a careless provider might quote them back in an
-// error: base64-encoded, URL-encoded, split across lines, without their first
-// 16 characters, and whole. unknownToken comes first, the same ways, so even
-// the start of an echo holds every form of a token.
-func echoes(credentials ...string) string {
-	var quoted []string
-	for _, credential := range append([]string{unknownToken}, credentials...) {
-		if credential == "" {
-			continue
-		}
-		var percentEncoded, splitAcrossLines strings.Builder
-		for index := range len(credential) {
-			fmt.Fprintf(&percentEncoded, "%%%02X", credential[index])
-			if index > 0 && index%8 == 0 {
-				splitAcrossLines.WriteByte('\n')
-			}
-			splitAcrossLines.WriteByte(credential[index])
-		}
-		quoted = append(quoted, base64.StdEncoding.EncodeToString([]byte(credential)), base64.RawURLEncoding.EncodeToString([]byte(credential)),
-			percentEncoded.String(), splitAcrossLines.String(), credential[min(16, len(credential)):], credential)
-	}
-	return strings.Join(quoted, " ")
-}
-
-// requestEchoes is echoes of the credential the request is sent with.
-func requestEchoes(request *http.Request) string {
-	return echoes(strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer "))
-}
-
-// oneLine is text fit for a header.
-func oneLine(text string) string {
-	return strings.ReplaceAll(text, "\n", " ")
+// quotedCredentials is the request's credentials as a provider might quote
+// them back in an error; see controls.
+func quotedCredentials(request *http.Request) string {
+	return " (sent with Authorization: " + request.Header.Get("Authorization") + ")"
 }
 
 func (providers *providers) alias(request *http.Request) string {
@@ -930,16 +894,16 @@ func (providers *providers) serveCodexHTTP(writer http.ResponseWriter, request *
 	}
 }
 
-// failCodexResponse starts a response, then fails it as OpenAI does, with an
-// error whose every field is echoes.
+// failCodexResponse starts a response, then fails it as OpenAI does, with a
+// message that quotes the request's access token after 260 bytes.
 func (providers *providers) failCodexResponse(writer http.ResponseWriter, request *http.Request) {
 	_, _ = io.Copy(io.Discard, request.Body)
 	id := fmt.Sprintf("resp_fake_%d", providers.sequence.Add(1))
-	echoed := requestEchoes(request)
+	message := strings.Repeat("x", 260) + " Rejected " + request.Header.Get("Authorization")
 	events := []map[string]any{
 		{"type": "response.created", "response": map[string]any{"id": id, "status": "in_progress", "output": []any{}}},
 		{"type": "response.failed", "response": map[string]any{"id": id, "status": "failed", "output": []any{},
-			"error": map[string]any{"type": echoed, "code": echoed, "message": echoed}}},
+			"error": map[string]any{"type": "server_error", "code": "server_error", "message": message}}},
 	}
 	writer.Header().Set("Content-Type", "text/event-stream")
 	writer.WriteHeader(http.StatusOK)
@@ -1037,7 +1001,7 @@ func (providers *providers) serveAnthropic(writer http.ResponseWriter, request *
 			status = http.StatusServiceUnavailable
 		}
 		providers.logRequest("claude-refresh-refused", request, status)
-		refusal, _ := json.Marshal(map[string]string{"error": "invalid_grant", "error_description": "Refresh token not found or invalid: " + echoes(refresh.RefreshToken)})
+		refusal, _ := json.Marshal(map[string]string{"error": "invalid_grant", "error_description": "Refresh token " + refresh.RefreshToken + " not found or invalid"})
 		writeJSON(writer, status, refusal)
 	case request.URL.Path == claudeUsagePath && controls.claudeGrant:
 		writeJSON(writer, http.StatusOK, fmt.Appendf(nil, `{"five_hour":{"utilization":10,"resets_at":%q},"cedar_ember":{"eligible":true,"grants":[{"resets_left":2},{"resets_left":1,"ends_at":%q}]}}`, time.Now().Add(3*time.Hour).Format(time.RFC3339), time.Now().Add(-time.Hour).Format(time.RFC3339)))
@@ -1165,8 +1129,7 @@ func writeClaudeRejection(writer http.ResponseWriter, request *http.Request, lim
 	for name, value := range limits {
 		writer.Header().Set("Anthropic-Ratelimit-Unified-"+name, value)
 	}
-	writer.Header().Set("Anthropic-Ratelimit-Unified-Echo", oneLine(requestEchoes(request)))
-	body, _ := json.Marshal(map[string]any{"type": "error", "error": map[string]string{"type": "rate_limit_error", "message": message + "; " + requestEchoes(request)}})
+	body, _ := json.Marshal(map[string]any{"type": "error", "error": map[string]string{"type": "rate_limit_error", "message": message + quotedCredentials(request)}})
 	writeJSON(writer, http.StatusTooManyRequests, body)
 }
 

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,7 +16,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/joshp123/codex-switch/internal/logtime"
-	"github.com/joshp123/codex-switch/internal/providerreply"
 )
 
 // A reset credit restores an account's weekly allowance, and OpenAI starts
@@ -488,11 +486,7 @@ func completeReset(ctx context.Context, directory string, origin *url.URL, clien
 	}
 	outcome, known := outcomes[result.Code]
 	if !known {
-		answer := "a result that is not a code"
-		if code := providerreply.Code(result.Code); code != "" {
-			answer = "the result " + code + ", which this build does not know"
-		}
-		return fmt.Errorf("reset outcome unknown; run the command again to retry the same credit (OpenAI answered with %s)", answer)
+		return fmt.Errorf("reset outcome unknown; run the command again to retry the same credit (provider result %q)", result.Code)
 	}
 	if err := os.Remove(path); err != nil {
 		return err
@@ -520,12 +514,11 @@ func resetRequest(ctx context.Context, client *http.Client, origin *url.URL, cre
 	request.Header.Set("Originator", "Codex Desktop")
 	response, err := client.Do(request)
 	if err != nil {
-		return errors.New(providerreply.Failure(err))
+		return err
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		refusal, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
-		return errors.New("OpenAI answered with " + providerreply.Refusal(response.StatusCode, refusal))
+		return fmt.Errorf("provider returned HTTP %d", response.StatusCode)
 	}
-	return providerreply.Decode(io.LimitReader(response.Body, 1<<20), result)
+	return json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(result)
 }

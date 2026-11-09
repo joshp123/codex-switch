@@ -9,8 +9,6 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"sync/atomic"
-
-	"github.com/joshp123/codex-switch/internal/providerreply"
 )
 
 // NewUpstreamTransport is the one way this process reaches providers: account
@@ -59,7 +57,7 @@ func (transport *upstreamTransport) RoundTrip(request *http.Request) (*http.Resp
 				return nil, err
 			}
 		}
-		log.Printf("%s: opening the upstream connection failed: %s; the proxy resends the request", upstreamRequestDescription(request), providerreply.Failure(connectionError))
+		log.Printf("%s: opening the upstream connection failed: %v; the proxy resends the request", upstreamRequestDescription(request), connectionError)
 		response, err = transport.transport.RoundTrip(forwarded)
 	}
 	if err != nil && !gotConnection.Load() && request.Body != nil {

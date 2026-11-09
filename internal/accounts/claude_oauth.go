@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -17,7 +18,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/joshp123/codex-switch/internal/providerreply"
 	"github.com/joshp123/codex-switch/internal/store"
 )
 
@@ -144,7 +144,7 @@ func readClaudeProfile(ctx context.Context, client *http.Client, auth *claudeAut
 	setClaudeOAuthHeaders(request, auth.AccessToken)
 	response, err := client.Do(request)
 	if err != nil {
-		return errors.New("Claude profile: " + providerreply.Failure(err))
+		return err
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
@@ -162,8 +162,8 @@ func readClaudeProfile(ctx context.Context, client *http.Client, auth *claudeAut
 			Tier string `json:"rate_limit_tier"`
 		} `json:"organization"`
 	}
-	if err := providerreply.Decode(response.Body, &profile); err != nil {
-		return fmt.Errorf("Claude profile: %w", err)
+	if err := json.NewDecoder(response.Body).Decode(&profile); err != nil {
+		return err
 	}
 	if profile.Account.UUID != "" {
 		auth.AccountID = profile.Account.UUID

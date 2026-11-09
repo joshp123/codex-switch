@@ -2,13 +2,13 @@ package accounts
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"time"
 
-	"github.com/joshp123/codex-switch/internal/providerreply"
 	"github.com/joshp123/codex-switch/internal/store"
 )
 
@@ -110,7 +110,7 @@ func (monitor *Monitor) readAllowanceSample(ctx context.Context, account PoolAcc
 	request.Header.Set("ChatGPT-Account-ID", credentials.AccountID)
 	response, err := monitor.httpClient.Do(request)
 	if err != nil {
-		return AllowanceSample{}, errors.New("wham/usage: " + providerreply.Failure(err))
+		return AllowanceSample{}, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
@@ -124,8 +124,8 @@ func (monitor *Monitor) readAllowanceSample(ctx context.Context, account PoolAcc
 		return AllowanceSample{}, statusError
 	}
 	var usage usageResponse
-	if err := providerreply.Decode(response.Body, &usage); err != nil {
-		return AllowanceSample{}, fmt.Errorf("wham/usage: %w", err)
+	if err := json.NewDecoder(response.Body).Decode(&usage); err != nil {
+		return AllowanceSample{}, err
 	}
 	sample, err := usage.Sample(credentials.AccountID, time.Now())
 	if err != nil {
@@ -181,7 +181,7 @@ func (monitor *Monitor) readSupportedModelSlugs(ctx context.Context, credentials
 	request.Header.Set("ChatGPT-Account-ID", credentials.AccountID)
 	response, err := monitor.httpClient.Do(request)
 	if err != nil {
-		return nil, errors.New("models: " + providerreply.Failure(err))
+		return nil, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
@@ -192,8 +192,8 @@ func (monitor *Monitor) readSupportedModelSlugs(ctx context.Context, credentials
 			Slug string `json:"slug"`
 		} `json:"models"`
 	}
-	if err := providerreply.Decode(response.Body, &catalogue); err != nil {
-		return nil, fmt.Errorf("models: %w", err)
+	if err := json.NewDecoder(response.Body).Decode(&catalogue); err != nil {
+		return nil, err
 	}
 	if catalogue.Models == nil {
 		return nil, errors.New("models response omitted models")

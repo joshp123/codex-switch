@@ -214,12 +214,11 @@ func TestRefreshRejectsTrailingOrOversizedSuccessWithoutChangingAuth(t *testing.
 	}
 }
 
-func TestRefresh401RequiresSignInWithoutExposingTheResponse(t *testing.T) {
+func TestRefresh401RequiresSignInAndGivesOpenAIsReason(t *testing.T) {
 	for _, body := range []string{
-		`{"error":{"code":"refresh_token_expired","message":"secret detail"}}`,
-		`{"error":"refresh_token_reused","detail":"secret detail"}`,
-		`{"error":{"code":"refresh_token_invalidated"}}`,
-		`{"unknown":"secret detail"}`,
+		`{"error":{"code":"refresh_token_expired","message":"provider reason"}}`,
+		`{"error":"refresh_token_reused","error_description":"provider reason"}`,
+		`{"unknown":"provider reason"}`,
 	} {
 		t.Run(body, func(t *testing.T) {
 			home := t.TempDir()
@@ -235,8 +234,8 @@ func TestRefresh401RequiresSignInWithoutExposingTheResponse(t *testing.T) {
 			if !requiresSignIn(err) {
 				t.Fatalf("error = %T %v", err, err)
 			}
-			if strings.Contains(err.Error(), "secret detail") {
-				t.Fatalf("error exposed response content: %v", err)
+			if !strings.Contains(err.Error(), "provider reason") {
+				t.Fatalf("error leaves out OpenAI's reason: %v", err)
 			}
 		})
 	}
@@ -246,7 +245,7 @@ func TestRefreshServerFailureIsTemporary(t *testing.T) {
 	home := t.TempDir()
 	writeTestAuth(t, home, jwt(t, time.Now().Add(-time.Minute), "account"), "refresh", "account")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, "secret detail", http.StatusBadGateway)
+		http.Error(w, "provider reason", http.StatusBadGateway)
 	}))
 	defer server.Close()
 	store := newSavedLogin(home, server.Client())
@@ -255,8 +254,8 @@ func TestRefreshServerFailureIsTemporary(t *testing.T) {
 	if err == nil || requiresSignIn(err) {
 		t.Fatalf("error = %T %v", err, err)
 	}
-	if strings.Contains(err.Error(), "secret detail") {
-		t.Fatalf("error exposed response content: %v", err)
+	if !strings.Contains(err.Error(), "provider reason") {
+		t.Fatalf("error leaves out OpenAI's reason: %v", err)
 	}
 }
 
@@ -357,10 +356,10 @@ func TestRefreshInvalidGrantRequiresSignInAndOtherBadRequestsRemainTemporary(t *
 		status      int
 		needsSignIn bool
 	}{
-		{"invalid grant", `{"error":"invalid_grant","error_description":"secret detail"}`, http.StatusBadRequest, true},
-		{"bad client request", `{"error":"invalid_request","error_description":"secret detail"}`, http.StatusBadRequest, false},
-		{"reused refresh token", `{"error":{"type":"invalid_request_error","code":"refresh_token_reused","message":"secret detail"}}`, http.StatusBadRequest, true},
-		{"provider outage", `{"error":"invalid_grant","error_description":"secret detail"}`, http.StatusBadGateway, false},
+		{"invalid grant", `{"error":"invalid_grant","error_description":"provider reason"}`, http.StatusBadRequest, true},
+		{"bad client request", `{"error":"invalid_request","error_description":"provider reason"}`, http.StatusBadRequest, false},
+		{"reused refresh token", `{"error":{"type":"invalid_request_error","code":"refresh_token_reused","message":"provider reason"}}`, http.StatusBadRequest, true},
+		{"provider outage", `{"error":"invalid_grant","error_description":"provider reason"}`, http.StatusBadGateway, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			home := t.TempDir()
@@ -380,8 +379,8 @@ func TestRefreshInvalidGrantRequiresSignInAndOtherBadRequestsRemainTemporary(t *
 			if err == nil || requiresSignIn(err) != test.needsSignIn {
 				t.Fatalf("refresh error = %v; needs sign in %t", err, test.needsSignIn)
 			}
-			if strings.Contains(err.Error(), "secret detail") {
-				t.Fatal("refresh error exposed response content")
+			if !strings.Contains(err.Error(), "provider reason") {
+				t.Fatalf("refresh error leaves out OpenAI's reason: %v", err)
 			}
 			after, err := os.ReadFile(filepath.Join(home, "auth.json"))
 			if err != nil {
