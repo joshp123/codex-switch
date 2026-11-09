@@ -143,8 +143,14 @@ func (monitor *Monitor) ResetCreditComesFirst() bool {
 	// A reset OpenAI's reading does not show yet holds usage credits back
 	// only while the reading can be expected: for 30 minutes, with the
 	// account signed in. It still stops another reset for as long as it takes.
-	if unconfirmed, err := readUnconfirmedReset(monitor.dataDirectory); err != nil || (unconfirmed != nil && unconfirmed.readingExpected(readings, now)) {
+	unconfirmed, err := readUnconfirmedReset(monitor.dataDirectory)
+	if err != nil || (unconfirmed != nil && unconfirmed.readingExpected(readings, now)) {
 		return true
+	}
+	// While that reset is still unconfirmed no other credit is spent, so none
+	// is about to be: work draws usage credits.
+	if unconfirmed != nil && unconfirmed.waitingFor(readings, now) != "" {
+		return false
 	}
 	if on, err := AutomaticResetsOn(monitor.dataDirectory); err != nil || !on {
 		return false

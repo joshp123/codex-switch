@@ -178,9 +178,9 @@ def run_group(name):
             system.extra = [f"claude-grant {NEWER_CLAUDE_CODE}"]
             rig.CLAUDE_USAGE_READ_SECONDS = 1  # so the read after the newer Claude Code's request comes at once
         # The proxy reads credits every five minutes, so the credits these groups test are there from the start.
-        if name in ("resets", "auto-reset", "cold-reset", "authority-off", "authority-rollback", "secrets", "reset-refused"):
+        if name in ("resets", "auto-reset", "cold-reset", "authority-off", "authority-rollback", "secrets", "reset-refused", "reset-unconfirmed"):
             system.credits = reset_credits()
-        if name == "reset-refused":
+        if name in ("reset-refused", "reset-unconfirmed"):
             system.usage_credits = dict(USAGE_CREDITS)
         if name == "reset-refused":
             system.extra = ["reset-nothing"]
@@ -1518,6 +1518,28 @@ def expiring_credit_is_spent_once_by_the_authority(system):
             'The other Mac, with automatic resets off, decided nothing.')
 
 
+def unconfirmed_reset_does_not_hold_work_for_ever(system):
+    """When OpenAI's usage reading has not shown a spent reset after 30 minutes, the waiting work draws usage credits, and
+    no second reset credit is spent"""
+    automatic_resets(True)
+    system.limited = set(system.accounts)
+    system.extra = ['usage-lag']
+    system.apply()
+    wait_until_the_proxy_reads(*system.accounts)
+    task = rig.CodexTask('work-behind-a-lagging-reset', 'Reply with the word drawn.')
+    rig.wait_for(spends, 'the proxy to spend a reset credit')
+    unconfirmed = rig.RUN / 'data/unconfirmed-reset.json'
+    record = json.loads(unconfirmed.read_text())
+    asked = datetime.datetime.fromisoformat(record['AskedAt'].replace('Z', '+00:00')) - datetime.timedelta(minutes=31)
+    record['AskedAt'] = asked.isoformat().replace('+00:00', 'Z')
+    unconfirmed.write_text(json.dumps(record))  # as if the reading had lagged for 31 minutes
+    task.finish()
+    system.record_codex_task('work behind a lagging reset', task.thread)
+    if len(spends()) != 1 or not draws():
+        raise Failure(f'OpenAI spent {spends()}; usage credits drawn: {draws()}.')
+    return f'One reset credit was spent and OpenAI\'s reading never showed it. 31 minutes on, the work finished on usage credits and no other credit was spent.'
+
+
 def refused_expiring_credit_is_not_asked_for_in_a_loop(system):
     """When OpenAI finds nothing to reset with a credit about to expire, the proxy asks once and waits before it asks again"""
     automatic_resets(True)
@@ -1923,6 +1945,7 @@ GROUPS = [
     ('low-credit-balance', 'cli', [low_credit_balance_leaves_included_allowance_usable, low_credit_balance_blocks_until_weekly_reset]),
     ('reset-refused', 'cli', [refused_reset_lets_work_draw_usage_credits]),
     ('expiry-refused', 'cli', [refused_expiring_credit_is_not_asked_for_in_a_loop]),
+    ('reset-unconfirmed', 'cli', [unconfirmed_reset_does_not_hold_work_for_ever]),
     ('usage-credits', 'cli', [status_shows_each_accounts_usage_credits, usage_credits_wait_while_an_account_has_included_allowance,
                               usage_credits_are_drawn_when_every_allowance_is_out, usage_credits_stop_at_the_floor, reset_credits_come_first]),
     ('routing', 'cli', [t3_reads_the_account_pool, new_work_goes_to_the_allowance_that_resets_first, request_without_task_id_is_served]),
