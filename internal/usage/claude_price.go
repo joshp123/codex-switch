@@ -1,14 +1,17 @@
 package usage
 
 import (
+	"slices"
 	"strings"
 	"time"
 )
 
-// Anthropic's Standard rates, checked 12 October 2026:
+// Anthropic's Standard rates, checked 9 November 2026:
 // https://platform.claude.com/docs/en/about-claude/pricing.
 // One dollar per million tokens is 1,000 nano-US dollars per token.
 var claudeTokenRates = map[string]tokenRates{
+	"claude-fable-5-2":  {8000, 200, 40000},
+	"claude-mythos-5-2": {8000, 200, 40000},
 	"claude-fable-5-1":  {10000, 250, 50000},
 	"claude-mythos-5-1": {10000, 250, 50000},
 	"claude-opus-5-5":   {4000, 200, 20000},
@@ -30,6 +33,10 @@ var claudeTokenRates = map[string]tokenRates{
 	"claude-haiku-4-5":  {1000, 100, 5000},
 	"claude-haiku-3-5":  {800, 80, 4000},
 }
+
+// claudeFastModeModels are the models Anthropic serves in fast mode, at twice
+// their Standard rates.
+var claudeFastModeModels = []string{"claude-fable-5-2", "claude-mythos-5-2", "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8"}
 
 func claudeMessagePrice(model, speed, inferenceGeo string, usage claudeMessageUsage) *int64 {
 	model = strings.TrimSpace(model)
@@ -60,7 +67,7 @@ func claudeMessagePrice(model, speed, inferenceGeo string, usage claudeMessageUs
 			return nil
 		}
 	}
-	if speed == "fast" && (model == "claude-opus-5-5" || model == "claude-opus-5" || model == "claude-opus-4-8") {
+	if speed == "fast" && slices.Contains(claudeFastModeModels, model) {
 		rates.input *= 2
 		rates.cached *= 2
 		rates.output *= 2

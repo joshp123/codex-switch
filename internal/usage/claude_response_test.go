@@ -77,3 +77,26 @@ func TestClaudeHaikuContextTierIncludesCachedTokens(t *testing.T) {
 		t.Fatalf("price=%v, error=%v, want 5528050 nano-USD", record.CostNanoUSD, err)
 	}
 }
+
+// Published Fable 5.2 rates: $8 input, $0.20 cache read, $16 one-hour cache
+// write and $40 output per million tokens, and twice that in fast mode.
+func TestClaudeFable52PricesAtItsPublishedRates(t *testing.T) {
+	for speed, want := range map[string]int64{"standard": 80_000_000, "fast": 160_000_000} {
+		observation := NewClaudeResponseUsage("claude-fable-5-2", speed, "global")
+		for _, event := range []string{
+			`{"type":"message_start","message":{"id":"msg_example","model":"claude-fable-5-2","usage":{"input_tokens":1000,"output_tokens":500,"cache_read_input_tokens":100000,"cache_creation_input_tokens":2000,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":2000}}}}`,
+			`{"type":"message_stop"}`,
+		} {
+			if _, err := observation.Observe([]byte(event)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		record, err := observation.Record("session", "account", time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if record.CostNanoUSD == nil || *record.CostNanoUSD != want {
+			t.Fatalf("%s price=%v, want %d nano-USD", speed, record.CostNanoUSD, want)
+		}
+	}
+}
