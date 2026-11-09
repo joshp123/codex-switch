@@ -58,7 +58,21 @@ func readClaudePoolAccount(data []byte, folder string, index int) (PoolAccount, 
 	}
 	identity := auth.credentials().AccountID
 	return PoolAccount{Key: AccountKeyFor(ProviderClaude, auth.Email), Folder: folder, Index: index, Provider: ProviderClaude, ID: identity,
-		AccountID: identity, OrganizationID: auth.OrganizationID, Email: auth.Email, Plan: auth.Plan}, nil
+		AccountID: identity, OrganizationID: auth.OrganizationID, Email: auth.Email, Plan: claudePlanName(auth.Plan)}, nil
+}
+
+// claudeUltraPlan is Anthropic's name for the plan its rate-limit tier still
+// calls max_20x.
+const claudeUltraPlan = "Ultra"
+
+// claudePlanName is the plan as Anthropic names it now. A saved login keeps
+// the name the plan had at sign-in, and Anthropic has renamed Max 20x to
+// Ultra.
+func claudePlanName(savedPlan string) string {
+	if savedPlan == "Max 20x" {
+		return claudeUltraPlan
+	}
+	return savedPlan
 }
 
 func (s *savedLogin) readClaudeAuth() (claudeAuthFile, error) {

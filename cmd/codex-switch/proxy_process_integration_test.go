@@ -94,7 +94,7 @@ func TestProxyProcessHTTPStartsAuthenticatesAndForwards(t *testing.T) {
 		t.Fatal(err)
 	}
 	proxyLog := string(logBytes)
-	for _, name := range []string{"Codex 1 (http-user@example.test, pro): available", "Claude 1 (claude@example.test, Max 20x): signed out", "Codex 2 (signed-out@example.test): signed out", "new task assigned to Codex 1"} {
+	for _, name := range []string{"Codex 1 (http-user@example.test, pro): available", "Claude 1 (claude@example.test, Ultra): signed out", "Codex 2 (signed-out@example.test): signed out", "new task assigned to Codex 1"} {
 		if !strings.Contains(proxyLog, name) {
 			t.Fatalf("log omits %s: %s", name, proxyLog)
 		}

@@ -178,7 +178,7 @@ func readClaudeProfile(ctx context.Context, client *http.Client, auth *claudeAut
 	}
 	auth.Plan = profile.Organization.Type
 	if strings.Contains(profile.Organization.Tier, "20x") {
-		auth.Plan = "Max 20x"
+		auth.Plan = claudeUltraPlan
 	} else if strings.Contains(profile.Organization.Tier, "5x") {
 		auth.Plan = "Max 5x"
 	}
