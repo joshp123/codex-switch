@@ -439,12 +439,24 @@ nonisolated struct CSSwitch_AllowanceObservation: Sendable {
   /// Clears the value of `availableResetCredits`. Subsequent reads from it will return its default value.
   mutating func clearAvailableResetCredits() {self._availableResetCredits = nil}
 
+  /// The usage credit balance, which OpenAI draws once the included allowance
+  /// is used up; absent when OpenAI reports none.
+  var creditBalance: Double {
+    get {_creditBalance ?? 0}
+    set {_creditBalance = newValue}
+  }
+  /// Returns true if `creditBalance` has been explicitly set.
+  var hasCreditBalance: Bool {self._creditBalance != nil}
+  /// Clears the value of `creditBalance`. Subsequent reads from it will return its default value.
+  mutating func clearCreditBalance() {self._creditBalance = nil}
+
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
   init() {}
 
   fileprivate var _observedAt: SwiftProtobuf.Google_Protobuf_Timestamp? = nil
   fileprivate var _availableResetCredits: UInt32? = nil
+  fileprivate var _creditBalance: Double? = nil
 }
 
 nonisolated struct CSSwitch_AllowanceWindow: Sendable {
@@ -1066,7 +1078,7 @@ nonisolated extension CSSwitch_Account: SwiftProtobuf.Message, SwiftProtobuf._Me
 
 nonisolated extension CSSwitch_AllowanceObservation: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".AllowanceObservation"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}observed_at\0\u{1}allowed\0\u{3}limit_reached\0\u{1}windows\0\u{3}available_reset_credits\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}observed_at\0\u{1}allowed\0\u{3}limit_reached\0\u{1}windows\0\u{3}available_reset_credits\0\u{3}credit_balance\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1079,6 +1091,7 @@ nonisolated extension CSSwitch_AllowanceObservation: SwiftProtobuf.Message, Swif
       case 3: try { try decoder.decodeSingularBoolField(value: &self.limitReached) }()
       case 4: try { try decoder.decodeRepeatedMessageField(value: &self.windows) }()
       case 5: try { try decoder.decodeSingularUInt32Field(value: &self._availableResetCredits) }()
+      case 6: try { try decoder.decodeSingularDoubleField(value: &self._creditBalance) }()
       default: break
       }
     }
@@ -1104,6 +1117,9 @@ nonisolated extension CSSwitch_AllowanceObservation: SwiftProtobuf.Message, Swif
     try { if let v = self._availableResetCredits {
       try visitor.visitSingularUInt32Field(value: v, fieldNumber: 5)
     } }()
+    try { if let v = self._creditBalance {
+      try visitor.visitSingularDoubleField(value: v, fieldNumber: 6)
+    } }()
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -1113,6 +1129,7 @@ nonisolated extension CSSwitch_AllowanceObservation: SwiftProtobuf.Message, Swif
     if lhs.limitReached != rhs.limitReached {return false}
     if lhs.windows != rhs.windows {return false}
     if lhs._availableResetCredits != rhs._availableResetCredits {return false}
+    if lhs._creditBalance != rhs._creditBalance {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

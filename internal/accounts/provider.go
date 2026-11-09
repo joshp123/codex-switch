@@ -3,6 +3,8 @@ package accounts
 import (
 	"errors"
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -11,6 +13,14 @@ type usageResponse struct {
 	PlanType     string                 `json:"plan_type"`
 	RateLimit    *rateLimit             `json:"rate_limit"`
 	ResetCredits *rateLimitResetCredits `json:"rate_limit_reset_credits"`
+	Credits      *usageCredits          `json:"credits"`
+}
+
+// usageCredits is the account's usage credit balance, which OpenAI draws once
+// the plan's included allowance is used up. OpenAI sends the balance as a
+// decimal string, such as "62427.76".
+type usageCredits struct {
+	Balance *string `json:"balance"`
 }
 
 type rateLimitResetCredits struct {
@@ -49,6 +59,13 @@ func (u usageResponse) Sample(credentialAccountID string, observedAt time.Time) 
 	}
 	if u.ResetCredits != nil {
 		result.AvailableResetCredits = u.ResetCredits.AvailableCount
+	}
+	if u.Credits != nil && u.Credits.Balance != nil {
+		balance, err := strconv.ParseFloat(strings.TrimSpace(*u.Credits.Balance), 64)
+		if err != nil || math.IsNaN(balance) || math.IsInf(balance, 0) {
+			return AllowanceSample{}, fmt.Errorf("usage response credit balance %q is not a number", *u.Credits.Balance)
+		}
+		result.CreditBalance = &balance
 	}
 	for index, raw := range []*usageWindow{u.RateLimit.Primary, u.RateLimit.Secondary} {
 		if raw == nil {

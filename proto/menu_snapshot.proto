@@ -78,6 +78,9 @@ message AllowanceObservation {
   bool limit_reached = 3;
   repeated AllowanceWindow windows = 4;
   optional uint32 available_reset_credits = 5;
+  // The usage credit balance, which OpenAI draws once the included allowance
+  // is used up; absent when OpenAI reports none.
+  optional double credit_balance = 6;
 }
 message AllowanceWindow {
   int64 period_seconds = 1;

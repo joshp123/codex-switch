@@ -420,7 +420,7 @@ func readServingMenuSnapshot(dataDirectory string, router *routing.TaskRouter, m
 			account.OffersConfiguredModel = true
 		}
 		if !sample.ObservedAt.IsZero() {
-			observation := &menupb.AllowanceObservation{ObservedAt: timestamppb.New(sample.ObservedAt), Allowed: sample.Allowed, LimitReached: sample.LimitReached, AvailableResetCredits: sample.AvailableResetCredits}
+			observation := &menupb.AllowanceObservation{ObservedAt: timestamppb.New(sample.ObservedAt), Allowed: sample.Allowed, LimitReached: sample.LimitReached, AvailableResetCredits: sample.AvailableResetCredits, CreditBalance: sample.CreditBalance}
 			for _, window := range sample.Windows {
 				observation.Windows = append(observation.Windows, &menupb.AllowanceWindow{PeriodSeconds: window.DurationSeconds, UsedPercent: window.UsedPercent, ResetAt: timestamppb.New(window.ResetsAt), ModelId: window.ModelID, ModelName: window.ModelName})
 			}

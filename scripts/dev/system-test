@@ -57,6 +57,7 @@ class System:
         self.resets = {account: int(time.time()) + number * 86400 for number, account in enumerate(accounts, 1)}
         self.limited, self.idle, self.extra, self.records, self.taskless_usage = set(), set(), [], [], []
         self.credits = []  # reset credits, as `credit account-N ID UNIX` lines
+        self.usage_credits = {}  # each account's reported usage credit balance
         self.credentials = rig.held_credentials()  # as saved at the start, before any outcome changes a login
         self.records.append(('requests without a task ID', '', lambda: self.taskless_usage,
                              lambda: rig.forwarded_requests(thread='', session='', client='')))
@@ -65,7 +66,8 @@ class System:
         rig.control(*[f'weekly-used {account} {used}' for account, used in self.weekly.items()],
                     *[f'weekly-resets {account} {at}' for account, at in self.resets.items()],
                     *[f'weekly-idle {account}' for account in sorted(self.idle)],
-                    *[f'limited {account}' for account in sorted(self.limited)], *self.credits, *self.extra)
+                    *[f'limited {account}' for account in sorted(self.limited)], *self.credits,
+                    *[f'usage-credits {account} {balance}' for account, balance in self.usage_credits.items()], *self.extra)
 
     def best_account(self, excluding=()):
         """The rule under test: an account whose week has not started, then the weekly allowance that resets first."""
@@ -105,8 +107,8 @@ def main():
     if rig.ROOT.exists():
         previous = rig.ROOT.with_name(f'system-test.previous.{time.time_ns()}')
         os.rename(rig.ROOT, previous)
-        # The previous run's evidence is about 800 MB of the test's own output; delete it rather than fill the Bin.
-        subprocess.Popen(['rm', '-rf', str(previous)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        # Keep previous evidence recoverable in the Trash.
+        subprocess.run(['trash', str(previous)], check=True)
     rig.ROOT.mkdir(parents=True)
     try:
         rig.build()
@@ -173,6 +175,9 @@ def run_group(name):
         # The proxy reads credits every five minutes, so the credits these groups test are there from the start.
         if name in ("resets", "auto-reset", "cold-reset", "authority-off", "authority-rollback", "secrets"):
             system.credits = reset_credits()
+        if name == "usage-credits":
+            system.credits = [f'credit account-3 credit-account-3 {int(time.time()) + 20 * DAY}']
+            system.usage_credits = dict(USAGE_CREDITS)
         if name == "routing":
             system.credits = [f'credit account-1 routing-credit {int(time.time()) + 20 * DAY}']
         if name == "expiry-reset":
@@ -1495,6 +1500,18 @@ def rollback_and_back_spends_no_second_credit(system):
             f'next update the build logged:\n{said.split(" ", 1)[1]}\nOpenAI spent one credit; the work finished on account-3 once the reading caught up.')
 
 
+# Each Codex account's usage credits at the start: OpenAI's free grant of 62,500, one account having drawn a little, and
+# one near the 2,000 floor.
+USAGE_CREDITS = {'account-1': 62500, 'account-2': 62427.76, 'account-3': 2350}
+def status_shows_each_accounts_usage_credits(system):
+    """Status shows each Codex account's usage credit balance"""
+    status = rig.proxy_command('status')
+    shown = ['usage credits: 62,500', 'usage credits: 62,428', 'usage credits: 2,350']
+    if any(line not in status for line in shown):
+        raise Failure(f'Status did not show {shown}:\n{status}')
+    return 'Status showed ' + ', '.join(f'"{line}"' for line in shown) + ' for the three Codex accounts.'
+
+
 def no_part_of_a_token_reaches_the_log(system):
     """When OpenAI's reason for refusing or failing a request quotes the request's access token where the proxy shortens
     what it logs, the proxy log holds no part of the token"""
@@ -1636,6 +1653,7 @@ GROUPS = [
     ('authority-rollback', 'published-release', [rollback_and_back_spends_no_second_credit]),
     ('secrets', 'cli', [no_part_of_a_token_reaches_the_log, a_reset_result_quoting_the_token_is_neither_logged_nor_printed,
                         a_signed_out_account_pauses_resets_and_says_why_once, a_claude_refresh_failure_quoting_the_refresh_token_is_not_shown]),
+    ('usage-credits', 'cli', [status_shows_each_accounts_usage_credits]),
     ('routing', 'cli', [t3_reads_the_account_pool, new_work_goes_to_the_allowance_that_resets_first, request_without_task_id_is_served]),
     ('exhaustion', 'cli', [exhausted_task_moves_on_its_next_turn]),
     ('outage-goal', 'cli', [goal_continues_when_an_account_returns]),

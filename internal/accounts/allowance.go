@@ -34,5 +34,8 @@ type AllowanceSample struct {
 	LimitReached          bool
 	ObservedAt            time.Time
 	AvailableResetCredits *uint32
-	Windows               []ReportedWindow
+	// CreditBalance is the account's usage credit balance; nil when OpenAI
+	// reports none.
+	CreditBalance *float64
+	Windows       []ReportedWindow
 }

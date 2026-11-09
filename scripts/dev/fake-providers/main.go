@@ -183,6 +183,7 @@ type providers struct {
 //	claude-limited account-N        the Claude account's five-hour allowance has run out
 //	websocket-age-limit             the next idle Codex WebSocket gets OpenAI's one-hour limit error and closes, once
 //	credit account-N ID UNIX        the account holds reset credit ID, which expires at UNIX seconds
+//	usage-credits account-N BALANCE the account reports BALANCE usage credits
 //	reset-soon                      a limited account-2 refills five minutes from each read
 //	reset-drop                      requests to spend a credit are answered as usual, but the replies are lost
 //	reset-refuse                    requests to spend a credit receive a provider HTTP error
@@ -229,6 +230,7 @@ type controls struct {
 	claudeThrottle   bool
 	claudeLimited    map[string]bool
 	credits          map[string][]fakeCredit
+	usageCredits     map[string]float64
 	resetSoon        bool
 	resetDrop        bool
 	resetRefuse      bool
@@ -251,7 +253,7 @@ func (providers *providers) readControls() (controls, error) {
 	if err != nil {
 		return controls{}, errors.New("cannot read simulation control file")
 	}
-	parsed := controls{weeklyUsed: map[string]float64{}, weeklyResets: map[string]int64{}, weeklyIdle: map[string]bool{}, limited: map[string]bool{}, holdResponses: map[string]bool{}, claudeLimited: map[string]bool{}, credits: map[string][]fakeCredit{}}
+	parsed := controls{weeklyUsed: map[string]float64{}, weeklyResets: map[string]int64{}, weeklyIdle: map[string]bool{}, limited: map[string]bool{}, holdResponses: map[string]bool{}, claudeLimited: map[string]bool{}, credits: map[string][]fakeCredit{}, usageCredits: map[string]float64{}}
 	scanner := bufio.NewScanner(strings.NewReader(string(data)))
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
@@ -263,6 +265,12 @@ func (providers *providers) readControls() (controls, error) {
 				return controls{}, fmt.Errorf("invalid control line %q", scanner.Text())
 			}
 			parsed.credits[fields[1]] = append(parsed.credits[fields[1]], fakeCredit{fields[2], time.Unix(expiresAt, 0)})
+		case len(fields) == 3 && fields[0] == "usage-credits" && providers.knownAlias(fields[1]):
+			balance, err := strconv.ParseFloat(fields[2], 64)
+			if err != nil {
+				return controls{}, fmt.Errorf("invalid control line %q", scanner.Text())
+			}
+			parsed.usageCredits[fields[1]] = balance
 		case len(fields) == 1 && fields[0] == "reset-soon":
 			parsed.resetSoon = true
 		case len(fields) == 1 && fields[0] == "reset-drop":
@@ -385,8 +393,13 @@ func (providers *providers) ServeHTTP(writer http.ResponseWriter, request *http.
 				return
 			}
 		}
-		used, body := openAIUsage(controls, alias, providers.accountReset(alias) && !controls.usageLag, providers.availableCredits(controls, alias))
-		log.Printf("event=usage-read account=%s used=%g", alias, used)
+		balance := providers.usageCreditBalance(controls, alias)
+		used, body := openAIUsage(controls, alias, providers.accountReset(alias) && !controls.usageLag, providers.availableCredits(controls, alias), balance)
+		if balance != nil {
+			log.Printf("event=usage-read account=%s used=%g credits=%g", alias, used, *balance)
+		} else {
+			log.Printf("event=usage-read account=%s used=%g", alias, used)
+		}
 		writeJSON(writer, http.StatusOK, body)
 	case request.URL.Path != responsesPath:
 		providers.logRequest("not-found", request, http.StatusNotFound)
@@ -414,6 +427,15 @@ func (providers *providers) ServeHTTP(writer http.ResponseWriter, request *http.
 	default:
 		providers.serveCodexHTTP(writer, request)
 	}
+}
+
+// usageCreditBalance is the balance the provider reports, or nil when absent.
+func (providers *providers) usageCreditBalance(controls controls, alias string) *float64 {
+	balance, present := controls.usageCredits[alias]
+	if !present {
+		return nil
+	}
+	return &balance
 }
 
 func (providers *providers) accountReset(alias string) bool {
@@ -487,7 +509,7 @@ func (providers *providers) spendResetCredit(writer http.ResponseWriter, request
 			return
 		}
 	}
-	used, _ := openAIUsage(controls, alias, providers.accountReset(alias), 0)
+	used, _ := openAIUsage(controls, alias, providers.accountReset(alias), 0, nil)
 	providers.resetMu.Lock()
 	code, answered := providers.resetAnswers[claim.RequestID]
 	switch {
@@ -532,8 +554,9 @@ func writeJSON(writer http.ResponseWriter, status int, body []byte) {
 
 // openAIUsage is an account's weekly allowance as wham/usage reports it. A
 // limited week still resets when the week ends. An account a credit reset has
-// used nothing, and its week starts at its first request.
-func openAIUsage(controls controls, alias string, reset bool, availableCredits int) (float64, []byte) {
+// used nothing, and its week starts at its first request. A limited account
+// with usage credits above zero is allowed and not at its limit.
+func openAIUsage(controls controls, alias string, reset bool, availableCredits int, creditBalance *float64) (float64, []byte) {
 	used, limited := 10.0, controls.limited[alias] && !reset
 	if level, set := controls.weeklyUsed[alias]; set {
 		used = level
@@ -555,8 +578,13 @@ func openAIUsage(controls controls, alias string, reset bool, availableCredits i
 	if !limited && (controls.weeklyIdle[alias] || reset) {
 		used, resetAt = 0, now+604800
 	}
-	return used, fmt.Appendf(nil, `{"plan_type":"pro","rate_limit":{"allowed":%t,"limit_reached":%t,"primary_window":{"used_percent":%g,"limit_window_seconds":604800,"reset_after_seconds":%d,"reset_at":%d}},"rate_limit_reset_credits":{"available_count":%d}}`,
-		!limited, limited, used, resetAt-now, resetAt, availableCredits)
+	allowed := !limited || (creditBalance != nil && *creditBalance > 0)
+	credits := ""
+	if creditBalance != nil {
+		credits = fmt.Sprintf(`,"credits":{"has_credits":%t,"unlimited":false,"balance":"%s"}`, *creditBalance > 0, strconv.FormatFloat(*creditBalance, 'f', -1, 64))
+	}
+	return used, fmt.Appendf(nil, `{"plan_type":"pro","rate_limit":{"allowed":%t,"limit_reached":%t,"primary_window":{"used_percent":%g,"limit_window_seconds":604800,"reset_after_seconds":%d,"reset_at":%d}},"rate_limit_reset_credits":{"available_count":%d}%s}`,
+		allowed, !allowed, used, resetAt-now, resetAt, availableCredits, credits)
 }
 
 // accountsCheck is the account Codex asks about, as ChatGPT describes a

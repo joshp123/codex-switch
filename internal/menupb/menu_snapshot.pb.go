@@ -698,8 +698,11 @@ type AllowanceObservation struct {
 	LimitReached          bool                   `protobuf:"varint,3,opt,name=limit_reached,json=limitReached,proto3" json:"limit_reached,omitempty"`
 	Windows               []*AllowanceWindow     `protobuf:"bytes,4,rep,name=windows,proto3" json:"windows,omitempty"`
 	AvailableResetCredits *uint32                `protobuf:"varint,5,opt,name=available_reset_credits,json=availableResetCredits,proto3,oneof" json:"available_reset_credits,omitempty"`
-	unknownFields         protoimpl.UnknownFields
-	sizeCache             protoimpl.SizeCache
+	// The usage credit balance, which OpenAI draws once the included allowance
+	// is used up; absent when OpenAI reports none.
+	CreditBalance *float64 `protobuf:"fixed64,6,opt,name=credit_balance,json=creditBalance,proto3,oneof" json:"credit_balance,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *AllowanceObservation) Reset() {
@@ -763,6 +766,13 @@ func (x *AllowanceObservation) GetWindows() []*AllowanceWindow {
 func (x *AllowanceObservation) GetAvailableResetCredits() uint32 {
 	if x != nil && x.AvailableResetCredits != nil {
 		return *x.AvailableResetCredits
+	}
+	return 0
+}
+
+func (x *AllowanceObservation) GetCreditBalance() float64 {
+	if x != nil && x.CreditBalance != nil {
+		return *x.CreditBalance
 	}
 	return 0
 }
@@ -1261,15 +1271,17 @@ const file_menu_snapshot_proto_rawDesc = "" +
 	"\bprovider\x18\n" +
 	" \x01(\x0e2\x1b.codex_switch.menu.ProviderR\bprovider\x12%\n" +
 	"\x0ereserve_status\x18\v \x01(\tR\rreserveStatus\x12G\n" +
-	"\x11unavailable_until\x18\f \x01(\v2\x1a.google.protobuf.TimestampR\x10unavailableUntil\"\xa9\x02\n" +
+	"\x11unavailable_until\x18\f \x01(\v2\x1a.google.protobuf.TimestampR\x10unavailableUntil\"\xe8\x02\n" +
 	"\x14AllowanceObservation\x12;\n" +
 	"\vobserved_at\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
 	"observedAt\x12\x18\n" +
 	"\aallowed\x18\x02 \x01(\bR\aallowed\x12#\n" +
 	"\rlimit_reached\x18\x03 \x01(\bR\flimitReached\x12<\n" +
 	"\awindows\x18\x04 \x03(\v2\".codex_switch.menu.AllowanceWindowR\awindows\x12;\n" +
-	"\x17available_reset_credits\x18\x05 \x01(\rH\x00R\x15availableResetCredits\x88\x01\x01B\x1a\n" +
-	"\x18_available_reset_credits\"\xcc\x01\n" +
+	"\x17available_reset_credits\x18\x05 \x01(\rH\x00R\x15availableResetCredits\x88\x01\x01\x12*\n" +
+	"\x0ecredit_balance\x18\x06 \x01(\x01H\x01R\rcreditBalance\x88\x01\x01B\x1a\n" +
+	"\x18_available_reset_creditsB\x11\n" +
+	"\x0f_credit_balance\"\xcc\x01\n" +
 	"\x0fAllowanceWindow\x12%\n" +
 	"\x0eperiod_seconds\x18\x01 \x01(\x03R\rperiodSeconds\x12!\n" +
 	"\fused_percent\x18\x02 \x01(\x01R\vusedPercent\x125\n" +
