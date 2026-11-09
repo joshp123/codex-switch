@@ -171,8 +171,8 @@ func writeCurrentStatus(output io.Writer, snapshot *menupb.MenuSnapshot) {
 			}
 		}
 		fmt.Fprintf(output, "\n%s · %s\n", label, state)
-		if account.GetAllowance() != nil && account.GetAllowance().AvailableResetCredits != nil && account.GetAllowance().GetAvailableResetCredits() > 0 {
-			fmt.Fprintf(output, "  reset credits: %d\n", account.GetAllowance().GetAvailableResetCredits())
+		for _, line := range storedResetLines(account.GetAllowance()) {
+			fmt.Fprintf(output, "  %s\n", line)
 		}
 		if account.GetAllowance() != nil && account.GetAllowance().CreditBalance != nil {
 			fmt.Fprintf(output, "  usage credits: %s\n", groupedTokens(int64(math.Round(account.GetAllowance().GetCreditBalance()))))
@@ -236,6 +236,37 @@ func writeCurrentStatus(output io.Writer, snapshot *menupb.MenuSnapshot) {
 			fmt.Fprintln(output)
 		}
 	}
+}
+
+// storedResetLines lists the resets an account holds, one line for each kind
+// and expiry: "holds 3 Fable resets · expire Tue 9 Mar 2027 08:59". While the
+// provider's list is unread there is one line, the number held.
+func storedResetLines(allowance *menupb.AllowanceObservation) []string {
+	var lines []string
+	for _, reset := range allowance.GetStoredResets() {
+		line := "holds " + accountapi.StoredResetLabel(resetKindOf(reset.Kind), reset.Count)
+		if reset.ExpiresAt != nil {
+			verb := "expire"
+			if reset.Count == 1 {
+				verb = "expires"
+			}
+			line += fmt.Sprintf(" · %s %s", verb, reset.ExpiresAt.AsTime().Local().Format("Mon 2 Jan 2006 15:04"))
+		}
+		lines = append(lines, line)
+	}
+	if len(lines) == 0 && allowance.GetAvailableResetCredits() > 0 {
+		lines = append(lines, "holds "+accountapi.StoredResetLabel("", allowance.GetAvailableResetCredits()))
+	}
+	return lines
+}
+
+func resetKindOf(menuKind menupb.ResetKind) accountapi.ResetKind {
+	for kind, known := range menuResetKinds {
+		if known == menuKind {
+			return kind
+		}
+	}
+	return ""
 }
 
 func writeProxyActivity(output io.Writer, activity *menupb.ProxyActivity, accountDisplayName func(string) string, accountDisplayNames func([]string) string) {

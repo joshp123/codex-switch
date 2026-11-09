@@ -27,6 +27,31 @@ final class FormattingTests: XCTestCase {
         XCTAssertEqual(UsageFormatting.resetLabel(november, now: now, locale: locale, timeZone: utc), "Resets Sun 8, 11:20")
     }
 
+    func testStoredResetsNameTheirKindCountAndExpiry() throws {
+        let now = try Date.ISO8601FormatStyle().parse("2026-11-09T21:00:00Z")
+        func reset(_ kind: CSSwitch_ResetKind, _ count: UInt32, expires: String) throws -> CSSwitch_StoredReset {
+            var reset = CSSwitch_StoredReset()
+            reset.kind = kind
+            reset.count = count
+            reset.expiresAt = .init(date: try Date.ISO8601FormatStyle().parse(expires))
+            return reset
+        }
+        var claude = CSSwitch_AllowanceObservation()
+        claude.availableResetCredits = 3
+        claude.storedResets = [try reset(.fable, 3, expires: "2027-03-09T07:59:00Z")]
+        XCTAssertEqual(UsageFormatting.storedResets(claude, now: now, locale: locale, timeZone: utc), ["3 Fable resets expiring 9 Mar 2027"])
+
+        var codex = CSSwitch_AllowanceObservation()
+        codex.storedResets = [try reset(.weekly, 1, expires: "2026-11-14T09:02:00Z"), try reset(.weekly, 1, expires: "2026-12-02T17:55:00Z")]
+        XCTAssertEqual(UsageFormatting.storedResets(codex, now: now, locale: locale, timeZone: utc), ["2 weekly resets, the first expiring 14 Nov"])
+
+        // A proxy that sends no list sends only how many the account holds.
+        var countOnly = CSSwitch_AllowanceObservation()
+        countOnly.availableResetCredits = 2
+        XCTAssertEqual(UsageFormatting.storedResets(countOnly, now: now, locale: locale, timeZone: utc), ["2 stored resets"])
+        XCTAssertEqual(UsageFormatting.storedResets(CSSwitch_AllowanceObservation(), now: now, locale: locale, timeZone: utc), [])
+    }
+
     func testAmountsUseThreeSignificantFigures() {
         XCTAssertEqual(UsageFormatting.tokens(946_491, locale: locale), "946K")
         XCTAssertEqual(UsageFormatting.tokens(34_138_059, locale: locale), "34.1M")

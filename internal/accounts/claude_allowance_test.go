@@ -1,12 +1,16 @@
 package accounts
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -275,8 +279,8 @@ func TestClaudeRejectionNamesUsageLimitAsTheAccountRulesDo(t *testing.T) {
 	}
 }
 
-// Response headers carry no reset-grant count, so an ordinary Claude turn must
-// not hide grants the usage read reported.
+// Response headers carry no stored resets, so an ordinary Claude turn must not
+// hide those the usage read reported.
 func TestClaudeResetGrantsSurviveAnOrdinaryResponse(t *testing.T) {
 	now := time.Now().Truncate(time.Second)
 	data := t.TempDir()
@@ -289,15 +293,140 @@ func TestClaudeResetGrantsSurviveAnOrdinaryResponse(t *testing.T) {
 	grants := uint32(2)
 	monitor.monitoredAccountLocked(claudeTestAccount).fact = AccountRoutingFact{Provider: ProviderClaude, AccountState: AccountReady, AllowanceSample: AllowanceSample{
 		AccountID: "subscription", ObservedAt: now.Add(-time.Minute), AvailableResetCredits: &grants,
+		StoredResets: []StoredReset{{Kind: ResetFable, Count: 2, ExpiresAt: now.Add(24 * time.Hour)}}, StoredResetsReadAt: now.Add(-time.Minute),
 		Windows: []ReportedWindow{{ObservedAt: now.Add(-time.Minute), UsedPercent: 10, DurationSeconds: 5 * 3600, ResetsAt: now.Add(time.Hour)}},
 	}}
 	headers := make(http.Header)
 	headers.Set("anthropic-ratelimit-unified-5h-utilization", "0.2")
 	headers.Set("anthropic-ratelimit-unified-5h-reset", strconv.FormatInt(now.Add(time.Hour).Unix(), 10))
 	monitor.ObserveClaudeResponse(claudeTestAccount.Key, "claude-opus-4-5", headers, 200)
-	got := monitor.accounts[claudeTestAccount.Key].fact.AllowanceSample.AvailableResetCredits
-	if got == nil || *got != 2 {
-		t.Fatalf("reset grants after an ordinary response = %v, want 2", got)
+	fact := monitor.accounts[claudeTestAccount.Key].fact
+	if count, list := HeldResets(fact, now); count == nil || *count != 2 || len(list) != 1 || list[0].Kind != ResetFable {
+		t.Fatalf("stored resets after an ordinary response = %v %v, want 2 Fable resets", count, list)
+	}
+	// During an update a proxy built before the list may save its own reading
+	// beside this one: a count of none, and no list.
+	none := uint32(0)
+	fromOlderBuild := AllowanceSample{ObservedAt: now.Add(time.Minute), AvailableResetCredits: &none}
+	fact.AllowanceSample = mergeClaudeAllowance(fact.AllowanceSample, fromOlderBuild)
+	if count, list := HeldResets(fact, now); count == nil || *count != 2 || len(list) != 1 {
+		t.Fatalf("stored resets after an older build's reading = %v %v, want 2 Fable resets", count, list)
+	}
+}
+
+// claudeLaunchGrants is Anthropic's list of an Ultra account's stored resets
+// as it stood on 9 November 2026, the day it granted Fable resets: three
+// grants of one reset each, which expire together.
+const claudeLaunchGrants = `{"eligible":true,"ineligible_reason":null,"grants":[
+ {"id":"launch-2610-fable","resets_total":1,"resets_left":1,"ends_at":"2027-03-09T07:59:00+00:00","clears":["seven_day_overage_included"],"paused":false,"usable_now":true,"type":"full","gives_back_weekly":true},
+ {"id":"launch-2610-fable-12mo","resets_total":1,"resets_left":1,"ends_at":"2027-03-09T07:59:00+00:00","clears":["seven_day_overage_included"],"paused":false,"usable_now":true,"type":"full","gives_back_weekly":true},
+ {"id":"launch-2610-fable-6mo","resets_total":1,"resets_left":1,"ends_at":"2027-03-09T07:59:00+00:00","clears":["seven_day_overage_included"],"paused":false,"usable_now":true,"type":"full","gives_back_weekly":true}],
+ "next_grant_id":"launch-2610-fable"}`
+
+// Anthropic lists an account's stored resets only to the Claude Code command
+// line, and only to a release new enough. The proxy reads as the newest Claude
+// Code that has sent it a request, so the list comes back when the person's
+// Claude Code is new enough, whatever release this build was made with.
+func TestClaudeStoredResetsAreReadAsTheNewestClaudeCodeServed(t *testing.T) {
+	const minimum = "99.0.0"
+	anthropic := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		product, _, _ := strings.Cut(request.Header.Get("User-Agent"), " ")
+		version, isClaudeCode := strings.CutPrefix(product, "claude-cli/")
+		grants := claudeLaunchGrants
+		switch {
+		case !isClaudeCode:
+			grants = `{"eligible":false,"ineligible_reason":"surface","grants":[]}`
+		case newerRelease(minimum, version):
+			grants = `{"eligible":false,"ineligible_reason":"cli_version","grants":[]}`
+		}
+		fmt.Fprintf(writer, `{"five_hour":null,"cedar_ember":%s}`, grants)
+	}))
+	defer anthropic.Close()
+	origin, _ := url.Parse(anthropic.URL)
+	monitor := NewMonitor(t.TempDir(), origin, "", http.DefaultClient, monitorTestDatabase(t))
+	monitor.SetClaudeUpstreamOrigin(origin)
+	read := func() AllowanceSample {
+		t.Helper()
+		sample, _, err := monitor.readClaudeAllowance(context.Background(), claudeTestAccount, Credentials{AccessToken: "token"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sample
+	}
+
+	if sample := read(); sample.NoResetsReason != "cli_version" || len(sample.StoredResets) != 0 {
+		t.Fatalf("read as Claude Code %s: resets %v, reason %q; want none, for cli_version", builtInClaudeCodeVersion, sample.StoredResets, sample.NoResetsReason)
+	}
+	// Neither another client nor an older Claude Code changes what the proxy reads as.
+	monitor.ObserveClaudeClient("pi/9.9.9")
+	monitor.ObserveClaudeClient("claude-cli/2.1.100 (external, cli)")
+	if sample := read(); sample.NoResetsReason != "cli_version" {
+		t.Fatalf("after an older client, the proxy read as %s", monitor.claudeCodeVersion())
+	}
+	monitor.ObserveClaudeClient("claude-cli/99.1.0 (external, sdk-ts, agent-sdk/0.2.1)")
+	sample := read()
+	expires := time.Date(2027, 3, 9, 7, 59, 0, 0, time.UTC)
+	if sample.NoResetsReason != "" || len(sample.StoredResets) != 1 || sample.StoredResets[0].Kind != ResetFable || sample.StoredResets[0].Count != 3 || !sample.StoredResets[0].ExpiresAt.Equal(expires) {
+		t.Fatalf("read as Claude Code 99.1.0: resets %v, reason %q; want 3 Fable resets expiring %s", sample.StoredResets, sample.NoResetsReason, expires)
+	}
+	fact := AccountRoutingFact{Provider: ProviderClaude, AllowanceSample: sample}
+	if got, want := describeStoredResets(fact, time.Date(2026, 11, 9, 21, 0, 0, 0, time.UTC)), "holds 3 Fable resets, expire 2027-03-09T07:59:00Z"; got != want {
+		t.Fatalf("log describes the resets as %q, want %q", got, want)
+	}
+	// Once they have expired the account holds none, whatever the last reading counted.
+	if count, list := HeldResets(fact, expires.Add(time.Minute)); count == nil || *count != 0 || len(list) != 0 {
+		t.Fatalf("after the resets expired the account holds %v %v, want none", count, list)
+	}
+}
+
+// OpenAI counts a Codex account's reset credits in every usage reading and
+// lists them apart, less often. The list is given only while it agrees with
+// the count: after a spend the count is right first.
+func TestCodexStoredResetsAreListedWhileTheListAgreesWithTheCount(t *testing.T) {
+	now := time.Now()
+	credit := func(id string, expiresIn time.Duration) ResetCredit {
+		return ResetCredit{ID: id, Status: "available", ResetType: "codex_rate_limits", ExpiresAt: now.Add(expiresIn)}
+	}
+	counted := func(count uint32) AccountRoutingFact {
+		return AccountRoutingFact{AllowanceSample: AllowanceSample{AvailableResetCredits: &count}, ResetCreditsReadAt: now,
+			ResetCredits: []ResetCredit{credit("later", 48*time.Hour), credit("sooner", 24*time.Hour), credit("expired", -time.Hour)}}
+	}
+	count, list := HeldResets(counted(2), now)
+	if *count != 2 || len(list) != 2 || list[0].Kind != ResetWeekly || !list[0].ExpiresAt.Equal(now.Add(24*time.Hour)) {
+		t.Fatalf("two credits counted and listed: got %d %v, want both, the sooner first", *count, list)
+	}
+	if count, list := HeldResets(counted(1), now); *count != 1 || list != nil {
+		t.Fatalf("one credit counted, two listed: got %d %v, want the count alone", *count, list)
+	}
+}
+
+// Fable's weekly window resets with the week's. Claude Code must be told the
+// limit that holds the account: its "Fable limit" while other models still
+// work, and its "weekly limit" only when the week itself is used up.
+func TestClaudeLimitNamesTheWindowThatHoldsTheAccount(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	weekEnds := now.Add(40 * time.Hour)
+	account := func(weekUsed, fableUsed float64) AccountRoutingFact {
+		return AccountRoutingFact{Provider: ProviderClaude, AllowanceSample: AllowanceSample{Windows: []ReportedWindow{
+			{DurationSeconds: 7 * 86400, UsedPercent: weekUsed, ResetsAt: weekEnds},
+			{DurationSeconds: 7 * 86400, UsedPercent: fableUsed, ResetsAt: weekEnds, ModelName: "Fable"},
+		}}}
+	}
+	for _, check := range []struct {
+		name                string
+		weekUsed, fableUsed float64
+		claim               string
+	}{
+		{"Fable allowance used up", 60, 100, "seven_day_overage_included"},
+		{"week used up with Fable allowance left", 100, 60, "seven_day"},
+	} {
+		availableAt, claim, found := ClaudeAvailableAgain(account(check.weekUsed, check.fableUsed), "claude-fable-5-2", now)
+		if !found || !availableAt.Equal(weekEnds) || claim != check.claim {
+			t.Errorf("%s: available again at %s as %q, want the week's reset as %q", check.name, availableAt.Sub(now), claim, check.claim)
+		}
+	}
+	if reason, _ := ClaudeUnavailableReason(account(60, 100), "claude-opus-5-5", now); reason != "" {
+		t.Errorf("a used-up Fable allowance keeps Opus off the account: %s", reason)
 	}
 }
 

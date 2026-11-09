@@ -52,6 +52,9 @@ CLAUDE_ACCOUNTS = ['account-4', 'account-5', 'account-6']
 # Proxy timers, shortened as the installer's are in system-test. The fake
 # providers answer at once, so they can be this short.
 ACCOUNT_READ_SECONDS, CONNECTION_DRAIN_SECONDS, MENU_SNAPSHOT_SECONDS = 1, 1, 1
+# How often the proxy reads each Claude account's usage: None for its own five minutes, so that it learns a limit from
+# the request Anthropic refuses, as it mostly does. A group that tests what a later usage read brings shortens it.
+CLAUDE_USAGE_READ_SECONDS = None
 MODEL = 'gpt-6-luna'
 LABEL = 'dev.codex-switch.system-test-' + hashlib.sha256(str(RUN).encode()).hexdigest()[:10]
 # A second proxy, as on Josh's other Mac, signed in to the same accounts.
@@ -297,6 +300,8 @@ def proxy_environment():
                             'CODEX_SWITCH_ACCOUNT_READ_SECONDS': str(ACCOUNT_READ_SECONDS),
                             'CODEX_SWITCH_CONNECTION_DRAIN_SECONDS': str(CONNECTION_DRAIN_SECONDS),
                             'CODEX_SWITCH_MENU_SNAPSHOT_SECONDS': str(MENU_SNAPSHOT_SECONDS)})
+        if CLAUDE_USAGE_READ_SECONDS:
+            environment['CODEX_SWITCH_CLAUDE_USAGE_READ_SECONDS'] = str(CLAUDE_USAGE_READ_SECONDS)
     return environment
 
 
@@ -424,10 +429,10 @@ def run_pi(name, prompt, session):
     return finish_pi(name, start_pi(name, prompt, session))
 
 
-def run_claude(session, must_succeed=True, resume=False, fast_mode=False):
+def run_claude(session, must_succeed=True, resume=False, fast_mode=False, model='haiku'):
     """Claude Code through the two printed proxy settings, to the fake providers (to Anthropic in the smoke test).
     resume continues the session, as a person's next prompt in it does. fast_mode asks for Opus in fast mode, as /fast does;
-    the fake providers refuse it as Anthropic does without usage credits."""
+    the fake providers refuse it as Anthropic does without usage credits. model is the model the person picked."""
     environment = {name: value for name, value in client_environment().items()
                    if not name.upper().startswith(('CLAUDE_', 'ANTHROPIC_'))
                    and not name.upper().endswith('_PROXY')
@@ -441,7 +446,7 @@ def run_claude(session, must_succeed=True, resume=False, fast_mode=False):
     environment['CLAUDE_CODE_OAUTH_TOKEN'] = auth['access_token']
     environment['CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC'] = '1'
     prompt, session_option = ('Reply with the word again only.', '--resume') if resume else ('Reply with the word ready only.', '--session-id')
-    model = ['--model', 'opus', '--settings', json.dumps({'fastMode': True})] if fast_mode else ['--model', 'haiku']
+    model = ['--model', 'opus', '--settings', json.dumps({'fastMode': True})] if fast_mode else ['--model', model]
     if fast_mode:
         # Claude Code asks Anthropic first and leaves fast mode off for an account without usage credits; T3's
         # Claude sessions on the Mac mini asked for it anyway, at the start of each turn.
@@ -453,6 +458,22 @@ def run_claude(session, must_succeed=True, resume=False, fast_mode=False):
         raise Failure(f'Claude Code exited with status {process.returncode}: {read("logs/claude.err")[-400:]} '
                       f'{read("logs/claude.out")[-400:]}')
     return json.loads(read('logs/claude.out'))
+
+
+def post_as_claude_code(version, session):
+    """Sends one streamed Messages request as the Claude Code command line at that release sends it, for a release newer
+    than any that exists. Returns the (input, cached, output, reasoning) tokens of the reply, as the proxy records them."""
+    base = f'http://{listen_address()}/client/{read("data/client-capability").strip()}/anthropic'
+    body = {'model': 'claude-haiku-4-5', 'max_tokens': 64, 'stream': True,
+            'messages': [{'role': 'user', 'content': 'Reply with the word ready only.'}]}
+    request = urllib.request.Request(base + '/v1/messages', data=json.dumps(body).encode(), headers={
+        'Content-Type': 'application/json', 'Accept': 'text/event-stream', 'Anthropic-Version': '2023-06-01',
+        'User-Agent': f'claude-cli/{version} (external, cli)', 'X-Claude-Code-Session-Id': session})
+    with urllib.request.urlopen(request, timeout=60) as response:
+        events = [json.loads(line[6:]) for line in response.read().decode().splitlines() if line.startswith('data: {')]
+    usage = next(event['usage'] for event in reversed(events) if event.get('type') == 'message_delta')
+    cached, written = usage.get('cache_read_input_tokens', 0), usage.get('cache_creation_input_tokens', 0)
+    return (usage['input_tokens'] + cached + written, cached, usage['output_tokens'], 0)
 
 
 def pi_task_id(session):

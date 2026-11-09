@@ -108,6 +108,64 @@ nonisolated enum CSSwitch_AccountState: SwiftProtobuf.Enum, Swift.CaseIterable {
 
 }
 
+/// What a stored reset gives back when it is spent.
+nonisolated enum CSSwitch_ResetKind: SwiftProtobuf.Enum, Swift.CaseIterable {
+  typealias RawValue = Int
+
+  /// A kind the provider names in no way this build knows.
+  case unspecified // = 0
+
+  /// The weekly allowance for every model.
+  case weekly // = 1
+
+  /// The five-hour allowance.
+  case fiveHour // = 2
+
+  /// The five-hour and weekly allowances.
+  case full // = 3
+
+  /// What Fable models used of the week: the Fable allowance is full again and
+  /// the weekly allowance regains that share. The week keeps its reset time.
+  case fable // = 4
+  case UNRECOGNIZED(Int)
+
+  init() {
+    self = .unspecified
+  }
+
+  init?(rawValue: Int) {
+    switch rawValue {
+    case 0: self = .unspecified
+    case 1: self = .weekly
+    case 2: self = .fiveHour
+    case 3: self = .full
+    case 4: self = .fable
+    default: self = .UNRECOGNIZED(rawValue)
+    }
+  }
+
+  var rawValue: Int {
+    switch self {
+    case .unspecified: return 0
+    case .weekly: return 1
+    case .fiveHour: return 2
+    case .full: return 3
+    case .fable: return 4
+    case .UNRECOGNIZED(let i): return i
+    }
+  }
+
+  // The compiler won't synthesize support with the UNRECOGNIZED case.
+  static let allCases: [CSSwitch_ResetKind] = [
+    .unspecified,
+    .weekly,
+    .fiveHour,
+    .full,
+    .fable,
+  ]
+
+}
+
 nonisolated enum CSSwitch_ReportingPeriodKind: SwiftProtobuf.Enum, Swift.CaseIterable {
   typealias RawValue = Int
   case reportingPeriodUnspecified // = 0
@@ -437,6 +495,10 @@ nonisolated struct CSSwitch_AllowanceObservation: Sendable {
 
   var windows: [CSSwitch_AllowanceWindow] = []
 
+  /// How many resets the account holds; absent when the provider has not said.
+  /// It is above zero with stored_resets empty when only the number is known:
+  /// the provider's list is unread or older than its count, or the proxy
+  /// serving the snapshot is a build that sends no list.
   var availableResetCredits: UInt32 {
     get {_availableResetCredits ?? 0}
     set {_availableResetCredits = newValue}
@@ -457,6 +519,10 @@ nonisolated struct CSSwitch_AllowanceObservation: Sendable {
   /// Clears the value of `creditBalance`. Subsequent reads from it will return its default value.
   mutating func clearCreditBalance() {self._creditBalance = nil}
 
+  /// The resets the account holds, soonest expiry first, when the provider's
+  /// list of them is known.
+  var storedResets: [CSSwitch_StoredReset] = []
+
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
   init() {}
@@ -464,6 +530,33 @@ nonisolated struct CSSwitch_AllowanceObservation: Sendable {
   fileprivate var _observedAt: SwiftProtobuf.Google_Protobuf_Timestamp? = nil
   fileprivate var _availableResetCredits: UInt32? = nil
   fileprivate var _creditBalance: Double? = nil
+}
+
+/// Resets of one kind that an account holds and that expire together.
+nonisolated struct CSSwitch_StoredReset: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var kind: CSSwitch_ResetKind = .unspecified
+
+  var count: UInt32 = 0
+
+  /// Absent when the provider states no expiry.
+  var expiresAt: SwiftProtobuf.Google_Protobuf_Timestamp {
+    get {_expiresAt ?? SwiftProtobuf.Google_Protobuf_Timestamp()}
+    set {_expiresAt = newValue}
+  }
+  /// Returns true if `expiresAt` has been explicitly set.
+  var hasExpiresAt: Bool {self._expiresAt != nil}
+  /// Clears the value of `expiresAt`. Subsequent reads from it will return its default value.
+  mutating func clearExpiresAt() {self._expiresAt = nil}
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+
+  fileprivate var _expiresAt: SwiftProtobuf.Google_Protobuf_Timestamp? = nil
 }
 
 nonisolated struct CSSwitch_AllowanceWindow: Sendable {
@@ -669,6 +762,10 @@ nonisolated extension CSSwitch_Provider: SwiftProtobuf._ProtoNameProviding {
 
 nonisolated extension CSSwitch_AccountState: SwiftProtobuf._ProtoNameProviding {
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0ACCOUNT_STATE_UNSPECIFIED\0\u{1}ACCOUNT_STATE_READY\0\u{1}ACCOUNT_STATE_LIMITED\0\u{1}ACCOUNT_STATE_SIGN_IN_REQUIRED\0\u{1}ACCOUNT_STATE_CREDENTIALS_UNAVAILABLE\0\u{1}ACCOUNT_STATE_USAGE_CHECK_FAILED\0")
+}
+
+nonisolated extension CSSwitch_ResetKind: SwiftProtobuf._ProtoNameProviding {
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0RESET_KIND_UNSPECIFIED\0\u{1}RESET_KIND_WEEKLY\0\u{1}RESET_KIND_FIVE_HOUR\0\u{1}RESET_KIND_FULL\0\u{1}RESET_KIND_FABLE\0")
 }
 
 nonisolated extension CSSwitch_ReportingPeriodKind: SwiftProtobuf._ProtoNameProviding {
@@ -1092,7 +1189,7 @@ nonisolated extension CSSwitch_Account: SwiftProtobuf.Message, SwiftProtobuf._Me
 
 nonisolated extension CSSwitch_AllowanceObservation: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".AllowanceObservation"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}observed_at\0\u{1}allowed\0\u{3}limit_reached\0\u{1}windows\0\u{3}available_reset_credits\0\u{3}credit_balance\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}observed_at\0\u{1}allowed\0\u{3}limit_reached\0\u{1}windows\0\u{3}available_reset_credits\0\u{3}credit_balance\0\u{3}stored_resets\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1106,6 +1203,7 @@ nonisolated extension CSSwitch_AllowanceObservation: SwiftProtobuf.Message, Swif
       case 4: try { try decoder.decodeRepeatedMessageField(value: &self.windows) }()
       case 5: try { try decoder.decodeSingularUInt32Field(value: &self._availableResetCredits) }()
       case 6: try { try decoder.decodeSingularDoubleField(value: &self._creditBalance) }()
+      case 7: try { try decoder.decodeRepeatedMessageField(value: &self.storedResets) }()
       default: break
       }
     }
@@ -1134,6 +1232,9 @@ nonisolated extension CSSwitch_AllowanceObservation: SwiftProtobuf.Message, Swif
     try { if let v = self._creditBalance {
       try visitor.visitSingularDoubleField(value: v, fieldNumber: 6)
     } }()
+    if !self.storedResets.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.storedResets, fieldNumber: 7)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -1144,6 +1245,51 @@ nonisolated extension CSSwitch_AllowanceObservation: SwiftProtobuf.Message, Swif
     if lhs.windows != rhs.windows {return false}
     if lhs._availableResetCredits != rhs._availableResetCredits {return false}
     if lhs._creditBalance != rhs._creditBalance {return false}
+    if lhs.storedResets != rhs.storedResets {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension CSSwitch_StoredReset: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".StoredReset"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}kind\0\u{1}count\0\u{3}expires_at\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularEnumField(value: &self.kind) }()
+      case 2: try { try decoder.decodeSingularUInt32Field(value: &self.count) }()
+      case 3: try { try decoder.decodeSingularMessageField(value: &self._expiresAt) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if self.kind != .unspecified {
+      try visitor.visitSingularEnumField(value: self.kind, fieldNumber: 1)
+    }
+    if self.count != 0 {
+      try visitor.visitSingularUInt32Field(value: self.count, fieldNumber: 2)
+    }
+    try { if let v = self._expiresAt {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 3)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: CSSwitch_StoredReset, rhs: CSSwitch_StoredReset) -> Bool {
+    if lhs.kind != rhs.kind {return false}
+    if lhs.count != rhs.count {return false}
+    if lhs._expiresAt != rhs._expiresAt {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

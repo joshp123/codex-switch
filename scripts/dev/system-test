@@ -13,6 +13,7 @@ in .project-private/system-test.
 scripts/dev/smoke-test checks the real services with real accounts.
 """
 import contextlib
+import datetime
 import json
 import os
 import re
@@ -170,8 +171,12 @@ def run_group(name):
     leftovers = []
     try:
         system = System(rig.prepare(first_proxy))
-        if name == "resets":
+        # The proxy reads Claude usage every five minutes, so the resets these groups test are there from the start.
+        if name == "claude":
             system.extra = ["claude-grant"]
+        if name == "claude-newer-client":
+            system.extra = [f"claude-grant {NEWER_CLAUDE_CODE}"]
+            rig.CLAUDE_USAGE_READ_SECONDS = 1  # so the read after the newer Claude Code's request comes at once
         # The proxy reads credits every five minutes, so the credits these groups test are there from the start.
         if name in ("resets", "auto-reset", "cold-reset", "authority-off", "authority-rollback", "secrets"):
             system.credits = reset_credits()
@@ -415,6 +420,75 @@ def claude_works_through_the_https_proxy(system):
     return (f'Claude Code replied {reply!r} through HTTPS_PROXY and NODE_EXTRA_CA_CERTS, using Haiku at low effort against\n'
             'api.anthropic.com. Its task was placed on a Claude account and its response was recorded once,\n'
             f'with {received[0]} input tokens ({received[1]} cached) and {received[2]} output tokens.')
+
+
+FABLE_RESETS = 'holds 3 Fable resets · expire '
+
+
+def claude_stored_resets_are_listed(system):
+    """Status lists each Claude account's stored resets with their kind and expiry, which Anthropic lists only to the Claude Code command line"""
+    status = rig.wait_for(lambda: (text := rig.proxy_command('status')).count(FABLE_RESETS) == len(rig.CLAUDE_ACCOUNTS) and text,
+                          'status to list three Fable resets on every Claude account', fail=False) or rig.proxy_command('status')
+    listed, withheld = rig.fake_provider_events('claude-resets-listed'), rig.fake_provider_events('claude-resets-withheld')
+    if status.count(FABLE_RESETS) != len(rig.CLAUDE_ACCOUNTS) or withheld:
+        raise Failure(f'Anthropic listed stored resets to {sorted({event["as"] for event in listed})} and withheld them from '
+                      f'{sorted({event["as"] + " (" + event["reason"] + ")" for event in withheld})}. Status:\n{status}')
+    expiries = {datetime.datetime.strptime(line.split(FABLE_RESETS, 1)[1].strip(), '%a %d %b %Y %H:%M')
+                for line in status.splitlines() if FABLE_RESETS in line}
+    days = {(expiry - datetime.datetime.now()).days for expiry in expiries}
+    if len(expiries) != 1 or not days <= {119, 120} or 'Max 20x' in status or status.count(' · Ultra · ') != len(rig.CLAUDE_ACCOUNTS):
+        raise Failure(f'The resets expire in 120 days and the accounts are on Ultra, which Anthropic\'s tier still calls max_20x. Status:\n{status}')
+    return (f'Anthropic listed three Fable resets and one expired one on each account, to {listed[0]["as"]} only. Status showed each\n'
+            f'Claude account on Ultra with "{FABLE_RESETS}{expiries.pop():%a %-d %b %Y %H:%M}".')
+
+
+# A Claude Code release newer than any that exists, and so than the release the proxy is built to read as.
+NEWER_CLAUDE_CODE = '99.1.0'
+
+
+def stored_resets_return_with_a_newer_claude_code(system):
+    """When Anthropic lists stored resets only to a newer Claude Code than the proxy has served, the proxy log says why none are listed; once that Claude Code sends a request, the proxy's next usage read is as it and status lists the resets"""
+    reason = 'Anthropic lists it no stored resets (cli_version)'
+    rig.wait_for(lambda: rig.proxy_log().count(reason) == len(rig.CLAUDE_ACCOUNTS), 'the proxy to log why each Claude account lists no resets')
+    before = rig.proxy_command('status')
+    if 'Fable reset' in before:
+        raise Failure(f'Anthropic withheld the resets from the proxy\'s Claude Code, but status listed them:\n{before}')
+    read_as_before = sorted({event['as'] for event in rig.fake_provider_events('claude-resets-withheld')})
+    session = str(uuid.uuid4())
+    received = rig.post_as_claude_code(NEWER_CLAUDE_CODE, session)
+    system.records.append((f'request from Claude Code {NEWER_CLAUDE_CODE}', 'claude:code:' + session, lambda: [received], None))
+    status = rig.wait_for(lambda: (text := rig.proxy_command('status')).count(FABLE_RESETS) == len(rig.CLAUDE_ACCOUNTS) and text,
+                          'status to list the resets once the proxy has served the newer Claude Code', fail=False)
+    listed = sorted({event['as'] for event in rig.fake_provider_events('claude-resets-listed')})
+    if not status or listed != [f'claude-cli/{NEWER_CLAUDE_CODE}']:
+        raise Failure(f'After a request from Claude Code {NEWER_CLAUDE_CODE}, Anthropic listed resets to {listed}. Status:\n{rig.proxy_command("status")}')
+    return (f'Anthropic listed resets only to Claude Code {NEWER_CLAUDE_CODE} or newer. Read as {", ".join(read_as_before)}, each Claude account\n'
+            f'logged "{reason}" and status listed none. After one request from\n'
+            f'Claude Code {NEWER_CLAUDE_CODE}, the proxy\'s next usage read was as it, and status listed three Fable resets on each account.')
+
+
+def fable_limit_is_named_and_other_models_carry_on(system):
+    """With every Claude account at its Fable limit, Claude Code is told it has reached its Fable limit, not its weekly limit, and another model still gets a reply"""
+    require_available_claude_accounts(1)
+    fable, other = str(uuid.uuid4()), str(uuid.uuid4())
+    with simulating(system, *[f'claude-fable-limited {account}' for account in rig.CLAUDE_ACCOUNTS]):
+        began = time.monotonic()
+        refused = rig.run_claude(fable, must_succeed=False, model='fable')
+        took, said = time.monotonic() - began, refused.get('result', '').strip()
+        answered = rig.run_claude(other, must_succeed=False)
+    told = [line.split('; no account can take it, so ', 1)[1] for line in rig.proxy_log().splitlines()
+            if 'claude:code:' + fable in line and '; no account can take it, so ' in line]
+    rejected = {event['account'] for event in rig.fake_provider_events('claude-rejected-fable-limit')}
+    if not refused.get('is_error') or took > 30 or 'fable' not in said.lower() or not told or 'seven_day_overage_included' not in told[0]:
+        raise Failure(f'With every account at its Fable limit ({sorted(rejected)} refused Fable), Claude Code took {format_duration(took)} '
+                      f'and said {said!r}; the proxy told it {told}. It should stop at once and name the Fable limit.')
+    reply = answered.get('result', '').strip()
+    if answered.get('is_error') or not reply:
+        raise Failure(f'With only Fable used up, Claude Code on Haiku said {reply!r}.')
+    received = claude_tokens(answered)
+    system.records.append(('Claude Code task on another model at the Fable limit', 'claude:code:' + other, lambda: [received], None))
+    return (f'With the Fable allowance of all {len(rejected)} Claude accounts used up, Claude Code stopped after {format_duration(took)}: {said!r}\n'
+            f'Each account had refused Fable once, and {told[0]}. On Haiku, Claude Code replied {reply!r}.')
 
 
 def claude_throttle_holds_the_account_briefly(system):
@@ -1242,11 +1316,11 @@ def stored_resets(system):
     def command(*args):
         return reset_command('cli', *args)
     status = command('status')
-    if status.returncode or 'reset credits: 2' not in status.stdout:
-        raise Failure(f'Claude grants missing from status: {status.stdout} {status.stderr}')
+    if status.returncode or status.stdout.count('holds 1 weekly reset · expires ') != 3:
+        raise Failure(f'Status did not list each Codex account\'s reset with its expiry: {status.stdout} {status.stderr}')
     (rig.RUN / 'reset-status.txt').write_text(status.stdout)
     claude = command('reset', 'claude')
-    if claude.returncode or 'not supported yet' not in claude.stdout:
+    if claude.returncode or 'spends no Claude reset' not in claude.stdout:
         raise Failure(f'Claude reset: {claude.stdout} {claude.stderr}')
     available = command('reset', 'codex')
     if available.returncode or 'can take work' not in available.stdout:
@@ -1279,7 +1353,7 @@ def stored_resets(system):
     system.record_codex_task('work after reset', task.thread)
     if rig.pinned_account(task.thread) != 'account-2':
         raise Failure(f'Work after the reset used {rig.pinned_account(task.thread)}, not the reset account.')
-    return 'Status showed 2 Claude resets; available and near-reset pools spent none. A refused redemption spent nothing once another account could work. This build retried the response the published release lost with the same request ID, and work resumed on that account.'
+    return 'Status listed each Codex account\'s reset with its expiry; available and near-reset pools spent none. A refused redemption spent nothing once another account could work. This build retried the response the published release lost with the same request ID, and work resumed on that account.'
 
 
 def automatic_resets(on, data=None):
@@ -1320,7 +1394,7 @@ def only_the_authority_spends_one_credit(system):
     and no other while OpenAI's usage reading lags behind the spend; nor does the reset command. Work on both Macs
     resumes once the reading catches up"""
     status = rig.proxy_command('status')
-    if status.count('reset credits: 1') != 3 or 'Automatic resets: off' not in status:
+    if status.count('holds 1 weekly reset · expires ') != 3 or 'Automatic resets: off' not in status:
         raise Failure(f'Status did not show each Codex account\'s reset credit and automatic resets off:\n{status}')
     automatic_resets(True)
     if 'Automatic resets: on' not in (status := rig.proxy_command('status')):
@@ -1804,7 +1878,9 @@ GROUPS = [
     ('exhaustion', 'cli', [exhausted_task_moves_on_its_next_turn]),
     ('outage-goal', 'cli', [goal_continues_when_an_account_returns]),
     ('websocket-age-limit', 'cli', [websocket_age_limit_does_not_interrupt_work]),
-    ('claude', 'cli', [claude_works_through_the_https_proxy]),
+    ('claude', 'cli', [claude_works_through_the_https_proxy, claude_stored_resets_are_listed]),
+    ('claude-newer-client', 'cli', [stored_resets_return_with_a_newer_claude_code]),
+    ('claude-fable-limit', 'cli', [fable_limit_is_named_and_other_models_carry_on]),
     ('claude-throttle', 'cli', [claude_throttle_holds_the_account_briefly]),
     ('claude-fast-mode', 'cli', [claude_fast_mode_refusal_stays_on_the_account]),
     ('claude-failover', 'cli', [claude_limit_moves_the_task_to_a_free_account]),

@@ -12,7 +12,8 @@ import (
 // whose availability changed since the previous refresh, or "" when nothing an
 // operator needs to know has changed. Allowance percentages and repeated
 // failures of the same kind do not count as changes; the first observation
-// after the proxy starts always does.
+// after the proxy starts always does, and so does a stored reset granted,
+// spent or no longer listed.
 func describeAccountAvailabilityChange(previous, current AccountRoutingFact, email string) string {
 	firstObservation := previous.AccountKey == ""
 	stateChanged := previous.AccountState != current.AccountState
@@ -22,7 +23,9 @@ func describeAccountAvailabilityChange(previous, current AccountRoutingFact, ema
 	now := time.Now()
 	reserveReason := ReserveStatus(current, now)
 	reserveChanged := ReserveStatus(previous, now) != reserveReason
-	if !firstObservation && !stateChanged && !modelListChanged && !allowanceReadChanged && !modelListReadChanged && !reserveChanged {
+	storedResets := describeStoredResets(current, now)
+	storedResetsChanged := describeStoredResets(previous, now) != storedResets
+	if !firstObservation && !stateChanged && !modelListChanged && !allowanceReadChanged && !modelListReadChanged && !reserveChanged && !storedResetsChanged {
 		return ""
 	}
 	identity := current.DisplayName
@@ -72,6 +75,9 @@ func describeAccountAvailabilityChange(previous, current AccountRoutingFact, ema
 	}
 	if allowance := describeAllowanceWindows(current.AllowanceSample); allowance != "" {
 		line += "; " + allowance
+	}
+	if storedResets != "" {
+		line += "; " + storedResets
 	}
 	switch {
 	case current.ModelListCause != nil && current.SupportedModelSlugs == nil:

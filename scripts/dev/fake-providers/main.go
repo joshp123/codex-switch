@@ -34,6 +34,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -194,7 +195,9 @@ type providers struct {
 //	                                and spend nothing
 //	hold-resets                     requests to spend a credit wait, unanswered and not yet applied
 //	usage-lag                       usage reads report each account as it was before a credit reset it
-//	claude-grant                    Claude usage reads report reset grants
+//	claude-grant [VERSION]          each Claude account holds three Fable resets, which usage reads list to Claude
+//	                                Code VERSION or newer; see below
+//	claude-fable-limited account-N  the Claude account's Fable allowance has run out; its other models carry on
 //	claude-refresh-unavailable      Claude login refreshes receive HTTP 503 instead of invalid_grant, with the same message
 //
 // A credit is spent as OpenAI spends one: once, for one redeem_request_id; a
@@ -216,6 +219,17 @@ type providers struct {
 // allowed and not at its limit, with the weekly window used up. An account
 // without a usage-credits line reports no balance.
 //
+// Stored Claude resets are listed as Anthropic lists them: only to the Claude
+// Code command line, by its User-Agent, and only to a release new enough. Any
+// other client is told the account is not eligible, for the reason surface, and
+// an older Claude Code for the reason cli_version. Anthropic publishes no
+// minimum: on 9 November 2026 it refused 2.1.273 and listed resets to 2.1.321,
+// so without VERSION this fake lists them to 2.1.274 or newer.
+//
+// A Claude account at its Fable limit refuses Fable models with the headers
+// Claude Code 2.1.321 reads a refusal from; no refusal Anthropic sent for this
+// limit has been captured. Usage reads report the Fable window used up.
+//
 // Fast-mode Claude requests are always refused, as for an account without usage credits.
 // Claude login refreshes are always refused, as for a refresh token Anthropic has
 // retired, with Anthropic's error and message.
@@ -225,30 +239,32 @@ type providers struct {
 // refused Claude refresh quotes the refresh token sent. So every test can see
 // that the proxy never logs or shows a credential, whatever a provider sends.
 type controls struct {
-	weeklyUsed       map[string]float64
-	weeklyResets     map[string]int64
-	weeklyIdle       map[string]bool
-	limited          map[string]bool
-	httpOnly         bool
-	holdResponses    map[string]bool
-	breakResponses   bool
-	providerError    bool
-	quoteToken       bool
-	quoteInFailure   bool
-	usageError       bool
-	holdUsageReads   bool
-	claudeThrottle   bool
-	claudeLimited    map[string]bool
-	credits          map[string][]fakeCredit
-	usageCredits     map[string]float64
-	resetSoon        bool
-	resetDrop        bool
-	resetRefuse      bool
-	resetTokenCode   bool
-	holdResets       bool
-	usageLag         bool
-	claudeGrant      bool
-	claudeRefresh503 bool
+	weeklyUsed     map[string]float64
+	weeklyResets   map[string]int64
+	weeklyIdle     map[string]bool
+	limited        map[string]bool
+	httpOnly       bool
+	holdResponses  map[string]bool
+	breakResponses bool
+	providerError  bool
+	quoteToken     bool
+	quoteInFailure bool
+	usageError     bool
+	holdUsageReads bool
+	claudeThrottle bool
+	claudeLimited  map[string]bool
+	credits        map[string][]fakeCredit
+	usageCredits   map[string]float64
+	resetSoon      bool
+	resetDrop      bool
+	resetRefuse    bool
+	resetTokenCode bool
+	holdResets     bool
+	usageLag       bool
+	// claudeGrantMinimum is the oldest Claude Code that stored resets are listed to; "" when accounts hold none.
+	claudeGrantMinimum string
+	claudeFableLimited map[string]bool
+	claudeRefresh503   bool
 }
 
 type fakeCredit struct {
@@ -263,7 +279,7 @@ func (providers *providers) readControls() (controls, error) {
 	if err != nil {
 		return controls{}, errors.New("cannot read simulation control file")
 	}
-	parsed := controls{weeklyUsed: map[string]float64{}, weeklyResets: map[string]int64{}, weeklyIdle: map[string]bool{}, limited: map[string]bool{}, holdResponses: map[string]bool{}, claudeLimited: map[string]bool{}, credits: map[string][]fakeCredit{}, usageCredits: map[string]float64{}}
+	parsed := controls{weeklyUsed: map[string]float64{}, weeklyResets: map[string]int64{}, weeklyIdle: map[string]bool{}, limited: map[string]bool{}, holdResponses: map[string]bool{}, claudeLimited: map[string]bool{}, claudeFableLimited: map[string]bool{}, credits: map[string][]fakeCredit{}, usageCredits: map[string]float64{}}
 	scanner := bufio.NewScanner(strings.NewReader(string(data)))
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
@@ -298,7 +314,11 @@ func (providers *providers) readControls() (controls, error) {
 		case len(fields) == 1 && fields[0] == "usage-lag":
 			parsed.usageLag = true
 		case len(fields) == 1 && fields[0] == "claude-grant":
-			parsed.claudeGrant = true
+			parsed.claudeGrantMinimum = "2.1.274"
+		case len(fields) == 2 && fields[0] == "claude-grant" && releaseNumbers(fields[1]) != nil:
+			parsed.claudeGrantMinimum = fields[1]
+		case len(fields) == 2 && fields[0] == "claude-fable-limited" && providers.knownAlias(fields[1]):
+			parsed.claudeFableLimited[fields[1]] = true
 		case len(fields) == 1 && fields[0] == "http-only":
 			parsed.httpOnly = true
 		case len(fields) == 1 && fields[0] == "break-responses":
@@ -1077,8 +1097,13 @@ func (providers *providers) serveAnthropic(writer http.ResponseWriter, request *
 		providers.logRequest("claude-refresh-refused", request, status)
 		refusal, _ := json.Marshal(map[string]string{"error": "invalid_grant", "error_description": "Refresh token " + refresh.RefreshToken + " not found or invalid"})
 		writeJSON(writer, status, refusal)
-	case request.URL.Path == claudeUsagePath && controls.claudeGrant:
-		writeJSON(writer, http.StatusOK, fmt.Appendf(nil, `{"five_hour":{"utilization":10,"resets_at":%q},"cedar_ember":{"eligible":true,"grants":[{"resets_left":2},{"resets_left":1,"ends_at":%q}]}}`, time.Now().Add(3*time.Hour).Format(time.RFC3339), time.Now().Add(-time.Hour).Format(time.RFC3339)))
+	case request.URL.Path == claudeUsagePath && controls.claudeGrantMinimum != "":
+		writeJSON(writer, http.StatusOK, fmt.Appendf(nil, `{"five_hour":{"utilization":10,"resets_at":%q},"seven_day":{"utilization":20,"resets_at":%q},"cedar_ember":%s}`,
+			time.Now().Add(3*time.Hour).Format(time.RFC3339), time.Now().Add(4*24*time.Hour).Format(time.RFC3339), providers.claudeStoredResets(request, controls.claudeGrantMinimum)))
+	case request.URL.Path == claudeUsagePath && controls.claudeFableLimited[alias]:
+		weekEnds := claudeWeekEnd().Format(time.RFC3339)
+		writeJSON(writer, http.StatusOK, fmt.Appendf(nil, `{"five_hour":null,"limits":[{"kind":"weekly_all","percent":20,"resets_at":%q},`+
+			`{"kind":"weekly_scoped","percent":100,"resets_at":%q,"scope":{"model":{"id":null,"display_name":"Fable"}}}]}`, weekEnds, weekEnds))
 	case request.URL.Path == claudeUsagePath && controls.claudeLimited[alias]:
 		providers.logRequest("claude-usage-read-limited", request, http.StatusOK)
 		writeJSON(writer, http.StatusOK, fmt.Appendf(nil, `{"five_hour":{"utilization":100,"resets_at":%q}}`, claudeLimitReset().Format(time.RFC3339)))
@@ -1095,6 +1120,13 @@ func (providers *providers) serveAnthropic(writer http.ResponseWriter, request *
 		var message claudeRequest
 		_ = json.Unmarshal(payload, &message)
 		switch {
+		case controls.claudeFableLimited[alias] && strings.Contains(message.Model, "fable"):
+			providers.logRequest("claude-rejected-fable-limit", request, http.StatusTooManyRequests)
+			weekEnds := strconv.FormatInt(claudeWeekEnd().Unix(), 10)
+			writeClaudeRejection(writer, request, map[string]string{"status": "rejected", "reset": weekEnds, "representative-claim": "seven_day_overage_included",
+				"7d_oi-status": "rejected", "7d_oi-utilization": "1.0", "7d_oi-reset": weekEnds,
+				"7d-status": "allowed", "7d-utilization": "0.2", "7d-reset": weekEnds,
+				"overage-status": "rejected", "overage-disabled-reason": "org_level_disabled"}, "Rate limited (simulation)")
 		case controls.claudeLimited[alias]:
 			providers.logRequest("claude-rejected-usage-limit", request, http.StatusTooManyRequests)
 			reset := strconv.FormatInt(claudeLimitReset().Unix(), 10)
@@ -1198,6 +1230,51 @@ func claudeAlias(accessToken string) string {
 
 // claudeLimitReset is an hour from now, as usageLimitError's reset is.
 func claudeLimitReset() time.Time { return time.Now().Add(time.Hour).Truncate(time.Second) }
+
+// claudeWeekEnd is when a Claude account's week, and its Fable allowance, next
+// reset: four days from now.
+func claudeWeekEnd() time.Time { return time.Now().Add(4 * 24 * time.Hour).Truncate(time.Second) }
+
+// claudeStoredResets is Anthropic's list of an account's stored resets, for
+// the client that asked: three grants of one Fable reset each, which expire
+// together in 120 days, and one that has expired.
+func (providers *providers) claudeStoredResets(request *http.Request, minimum string) []byte {
+	product, _, _ := strings.Cut(request.Header.Get("User-Agent"), " ")
+	version, isClaudeCode := strings.CutPrefix(product, "claude-cli/")
+	reason := ""
+	switch {
+	case !isClaudeCode || releaseNumbers(version) == nil:
+		reason = "surface"
+	case slices.Compare(releaseNumbers(version), releaseNumbers(minimum)) < 0:
+		reason = "cli_version"
+	}
+	if reason != "" {
+		log.Printf("event=claude-resets-withheld account=%s as=%q reason=%s", providers.alias(request), product, reason)
+		return fmt.Appendf(nil, `{"eligible":false,"ineligible_reason":%q,"at_limit":false,"grants":[],"next_grant_id":null}`, reason)
+	}
+	log.Printf("event=claude-resets-listed account=%s as=%q", providers.alias(request), product)
+	grant := func(id string, endsAt time.Time) string {
+		return fmt.Sprintf(`{"id":%q,"label":"New model launch: one Fable reset","resets_total":1,"resets_left":1,"ends_at":%q,`+
+			`"clears":["seven_day_overage_included"],"paused":false,"usable_now":true,"use_requires_limit":false,"type":"full","gives_back_weekly":true}`,
+			id, endsAt.Format(time.RFC3339))
+	}
+	expires := time.Now().Add(120 * 24 * time.Hour).Truncate(time.Minute)
+	return fmt.Appendf(nil, `{"eligible":true,"ineligible_reason":null,"at_limit":false,"grants":[%s,%s,%s,%s],"next_grant_id":"launch-fable"}`,
+		grant("launch-fable", expires), grant("launch-fable-12mo", expires), grant("launch-fable-6mo", expires), grant("expired-fable", time.Now().Add(-time.Hour)))
+}
+
+// releaseNumbers reads a dotted release such as 2.1.321; nil for anything else.
+func releaseNumbers(version string) []int {
+	var numbers []int
+	for part := range strings.SplitSeq(version, ".") {
+		number, err := strconv.Atoi(part)
+		if err != nil || number < 0 {
+			return nil
+		}
+		numbers = append(numbers, number)
+	}
+	return numbers
+}
 
 func writeClaudeRejection(writer http.ResponseWriter, request *http.Request, limits map[string]string, message string) {
 	for name, value := range limits {

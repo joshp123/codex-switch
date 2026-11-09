@@ -1,4 +1,4 @@
-<!-- Written by AI on 2026.10.11 by model claude-opus-5.5; updated on 2026.10.29 by model GPT-6.1 Terra; rewritten on 2026.11.01 by model claude-opus-5.5; updated on 2026.11.08 and 2026.11.09 by model claude-opus-5.5. -->
+<!-- Written by AI on 2026.10.11 by model claude-opus-5.5; updated on 2026.10.29 by model GPT-6.1 Terra; rewritten on 2026.11.01 by model claude-opus-5.5; updated on 2026.11.08 and 2026.11.09 by model claude-opus-5.5; updated on 2026.11.09 by model claude-fable-5.2. -->
 
 # System test
 
@@ -33,8 +33,8 @@ Before a release, also run the smoke test (see below).
 | keyless-update | Records v0.1.9, the last release before account keys, wrote by folder name, including those it writes while it drains, keep their contents and take their account keys, and a task it pinned keeps its account. |
 | rollback | After an update, `deploy/deploy.sh back` restores the published release. Tasks pinned by either build stay on their accounts while new work goes to the account the rule picks. T3 reads every account's usage by the index the other build gave it, after the update and after the rollback. |
 | rollback | A task the rolled-back published release moves off an exhausted account stays where it moved after the next update, although the first account has recovered. |
-| resets | Claude grants appear in status; the reset command checks pool availability and the next reset, and retries a response the published release lost with the same request ID, as after an update. |
-| auto-reset | Status shows each Codex account's reset credits, and automatic resets off until `codex-switch auto-reset on`. With every Codex account out and work waiting on two proxies, as on two Macs, only the one with automatic resets on spends a credit. It spends none while an account refills within 30 minutes, then one, on the account with the most of its week left. While OpenAI's usage reading still shows that account at its limit, neither it nor the reset command spends another, and the work on both resumes once the reading catches up. |
+| resets | Status lists each Codex account's reset with its expiry; the reset command checks pool availability and the next reset, and retries a response the published release lost with the same request ID, as after an update. |
+| auto-reset | Status lists each Codex account's reset, and automatic resets off until `codex-switch auto-reset on`. With every Codex account out and work waiting on two proxies, as on two Macs, only the one with automatic resets on spends a credit. It spends none while an account refills within 30 minutes, then one, on the account with the most of its week left. While OpenAI's usage reading still shows that account at its limit, neither it nor the reset command spends another, and the work on both resumes once the reading catches up. |
 | cold-reset | A second proxy with automatic resets off, started after the first spent a credit while the reading still lags, spends none while its work waits. |
 | authority-off | With automatic resets off and every Codex account out, no credit is spent; the work waits and resumes when an account refills. |
 | expiry-reset | Of two proxies, only the one with automatic resets on spends a credit in its last hour. It keeps the credit while its account has used no more of its week than the share of the week that has passed, or when OpenAI finds nothing to reset; a later attempt, under a new request ID, spends it once, and the account's second credit is then kept. |
@@ -49,6 +49,9 @@ Before a release, also run the smoke test (see below).
 | websocket-age-limit | When OpenAI ends a goal's WebSocket at its one-hour limit during a tool call, the goal carries on over a new connection. No model work is replayed and Codex shows no error. |
 | outage-goal | With every account out of allowance, a running goal continues by itself when one account comes back. |
 | claude | Claude Code gets a reply through the HTTPS proxy, recorded once with its tokens. |
+| claude | Status lists each Claude account's three Fable resets with their expiry, and not an expired one. Anthropic lists them only to the Claude Code command line, new enough, and the proxy reads as one. A login saved as Max 20x shows as Ultra. |
+| claude-newer-client | When Anthropic lists stored resets only to a newer Claude Code than the proxy has served, the proxy log gives Anthropic's reason and status lists none. After one request from that Claude Code, the proxy's next usage read is as it and status lists the resets. |
+| claude-fable-limit | With every Claude account's Fable allowance used up, Claude Code stops and says it has reached its Fable limit, not its weekly limit, and on another model it still gets a reply. |
 | claude-throttle | When Anthropic throttles a Claude request without naming a usage limit, the account is held for the throttle's Retry-After and no longer, then serves the task. |
 | claude-fast-mode | When Anthropic refuses fast mode for want of usage credits, Claude Code carries on at standard speed on the same account. A usage limit on a fast-mode request still moves the task. |
 | claude-failover | When a Claude task's account reaches its usage limit, the task's next prompt is answered by another account and Claude Code shows no limit. |

@@ -32,6 +32,41 @@ enum UsageFormatting {
         return formatter.string(from: date)
     }
 
+    /// The resets an account holds, one phrase per kind: "3 Fable resets
+    /// expiring 9 Mar 2027", "2 weekly resets, the first expiring 14 Nov", or
+    /// "2 stored resets" while the proxy knows only how many.
+    static func storedResets(_ allowance: CSSwitch_AllowanceObservation, now: Date, locale: Locale = .autoupdatingCurrent, timeZone: TimeZone = .autoupdatingCurrent) -> [String] {
+        var kinds: [CSSwitch_ResetKind] = []
+        for reset in allowance.storedResets where !kinds.contains(reset.kind) {
+            kinds.append(reset.kind)
+        }
+        let phrases = kinds.map { kind in
+            let held = allowance.storedResets.filter { $0.kind == kind }
+            let count = held.reduce(0) { $0 + Int($1.count) }
+            let phrase = "\(count) \(kind.title)\(count == 1 ? "reset" : "resets")"
+            guard let first = held.filter(\.hasExpiresAt).map(\.expiresAt.date).min() else { return phrase }
+            let expiry = expiryDay(first, now: now, locale: locale, timeZone: timeZone)
+            return held.count == 1 ? "\(phrase) expiring \(expiry)" : "\(phrase), the first expiring \(expiry)"
+        }
+        if phrases.isEmpty, allowance.hasAvailableResetCredits, allowance.availableResetCredits > 0 {
+            let count = allowance.availableResetCredits
+            return [count == 1 ? "1 stored reset" : "\(count) stored resets"]
+        }
+        return phrases
+    }
+
+    /// "14 Nov", or "9 Mar 2027" for a day in another year than now's, in the
+    /// Mac's date format.
+    static func expiryDay(_ date: Date, now: Date, locale: Locale = .autoupdatingCurrent, timeZone: TimeZone = .autoupdatingCurrent) -> String {
+        var calendar = Calendar.autoupdatingCurrent
+        calendar.timeZone = timeZone
+        let formatter = DateFormatter()
+        formatter.locale = locale
+        formatter.timeZone = timeZone
+        formatter.setLocalizedDateFormatFromTemplate(calendar.component(.year, from: date) == calendar.component(.year, from: now) ? "dMMM" : "dMMMy")
+        return formatter.string(from: date)
+    }
+
     /// "2.6", "1.0": one decimal, as the Mac formats it.
     static func oneDecimal(_ value: Double, locale: Locale = .autoupdatingCurrent) -> String {
         decimal(value, fractionDigits: 1, locale: locale)
@@ -88,5 +123,19 @@ enum UsageFormatting {
         formatter.minimumFractionDigits = fractionDigits
         formatter.maximumFractionDigits = fractionDigits
         return formatter.string(from: NSNumber(value: value)) ?? String(value)
+    }
+}
+
+extension CSSwitch_ResetKind {
+    /// What the reset gives back, as the word before "reset": "weekly ",
+    /// "Fable ". Empty for a kind this build does not know.
+    var title: String {
+        switch self {
+        case .weekly: "weekly "
+        case .fiveHour: "five-hour "
+        case .full: "full "
+        case .fable: "Fable "
+        case .unspecified, .UNRECOGNIZED: ""
+        }
     }
 }

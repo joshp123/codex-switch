@@ -18,7 +18,7 @@ func resetCommand(args []string) {
 		log.Fatal("usage: codex-switch reset <codex|claude>")
 	}
 	if args[0] == "claude" {
-		fmt.Fprintln(stdout, "Claude resets are not supported yet.")
+		fmt.Fprintln(stdout, "Codex Switch spends no Claude reset. Spend one in Claude's Settings > Usage; `codex-switch status` lists those each account holds.")
 		return
 	}
 	originValue := strings.TrimSpace(os.Getenv("CODEX_SWITCH_UPSTREAM_ORIGIN"))

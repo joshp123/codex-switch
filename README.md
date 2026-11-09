@@ -68,6 +68,7 @@ Click it for:
 - whether the pool is working, and how many accounts are in it
 - cost at API prices, or tokens, for Today, 7 Days or 30 Days, split by account
 - each account's allowance, when it resets, and its usage over the last 30 days
+- the resets each account holds: what each gives back and when it expires
 - when an account will run out, if it's going to run out before it resets
 - the tasks that used the most, and which accounts served them
 
@@ -177,8 +178,9 @@ in the real account's sign-in.
 codex-switch status
 ```
 
-It shows each account's allowance, whether it can take new work (and why not),
-and which accounts recent tasks went to. The log at
+It shows each account's allowance, the resets it holds with their expiry,
+whether it can take new work (and why not), and which accounts recent tasks
+went to. The log at
 `~/Library/Application Support/codex-switch/proxy.log` records every assignment,
 move, wait and rejected request. It never records prompts or responses.
 
@@ -244,10 +246,17 @@ credentials take precedence. Use Pi's `/logout` for Anthropic so it uses the
 pool entry. Keep any Claude system-prompt extension you normally use enabled.
 See [Pi's model settings](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/docs/models.md).
 
-Claude limits show the five-hour session, the week, and each model's weekly
-window. A model-specific limit applies to that model; other models can keep
-using the account. Forked sessions stay with their parent's account while it
-can serve the requested model, preserving the prompt cache.
+Claude limits show the five-hour session where the plan has one, the week, and
+each model's weekly window. A model-specific limit applies to that model; other
+models can keep using the account. When every account has used up its Fable
+allowance, Claude Code is told its Fable limit, and its other models carry on.
+Forked sessions stay with their parent's account while it can serve the
+requested model, preserving the prompt cache.
+
+Anthropic lists an account's stored resets only to a recent Claude Code, so the
+proxy reads usage as the newest Claude Code that has sent it a request. If
+Anthropic lists none, the account's line in the proxy log gives Anthropic's
+reason, such as `cli_version`.
 
 ## How routing works
 
@@ -299,7 +308,12 @@ takes. The log says when the reading is late.
 
 `codex-switch reset codex` spends a credit by the first rule, without waiting
 work, on any Mac. If the response is lost, run the same command again to
-resolve it. Claude reset redemption is not supported yet.
+resolve it.
+
+The proxy never spends a Claude reset: spend one in Claude's own Settings >
+Usage. A Fable reset gives back what Fable models used of the account's week,
+and the week keeps its reset time, so it returns most on an account that has
+used up its Fable allowance.
 
 ## How updates work
 

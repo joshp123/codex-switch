@@ -188,6 +188,9 @@ func (handler *TrafficRelayHandler) serveAuthenticatedTraffic(response http.Resp
 		handler.onModelRequest()
 	}
 	client := clientNameForRequest(request)
+	if provider == accounts.ProviderClaude && handler.accountObserver != nil {
+		handler.accountObserver.ObserveClaudeClient(request.Header.Get("User-Agent"))
+	}
 	var modelSlug, serviceTier, inferenceGeo string
 	var responseStreamRequested bool
 	var warmup bool

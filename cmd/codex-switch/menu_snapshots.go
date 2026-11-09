@@ -421,15 +421,30 @@ func readServingMenuSnapshot(dataDirectory string, router *routing.TaskRouter, m
 			account.OffersConfiguredModel = true
 		}
 		if !sample.ObservedAt.IsZero() {
-			observation := &menupb.AllowanceObservation{ObservedAt: timestamppb.New(sample.ObservedAt), Allowed: sample.Allowed, LimitReached: sample.LimitReached, AvailableResetCredits: sample.AvailableResetCredits, CreditBalance: sample.CreditBalance}
+			heldResets, storedResets := accountapi.HeldResets(fact, snapshot.GeneratedAt.AsTime())
+			observation := &menupb.AllowanceObservation{ObservedAt: timestamppb.New(sample.ObservedAt), Allowed: sample.Allowed, LimitReached: sample.LimitReached, AvailableResetCredits: heldResets, CreditBalance: sample.CreditBalance}
 			for _, window := range sample.Windows {
 				observation.Windows = append(observation.Windows, &menupb.AllowanceWindow{PeriodSeconds: window.DurationSeconds, UsedPercent: window.UsedPercent, ResetAt: timestamppb.New(window.ResetsAt), ModelId: window.ModelID, ModelName: window.ModelName})
+			}
+			for _, reset := range storedResets {
+				stored := &menupb.StoredReset{Kind: menuResetKinds[reset.Kind], Count: reset.Count}
+				if !reset.ExpiresAt.IsZero() {
+					stored.ExpiresAt = timestamppb.New(reset.ExpiresAt)
+				}
+				observation.StoredResets = append(observation.StoredResets, stored)
 			}
 			account.Allowance = observation
 		}
 		snapshot.Accounts = append(snapshot.Accounts, account)
 	}
 	return snapshot, nil
+}
+
+var menuResetKinds = map[accountapi.ResetKind]menupb.ResetKind{
+	accountapi.ResetWeekly:   menupb.ResetKind_RESET_KIND_WEEKLY,
+	accountapi.ResetFiveHour: menupb.ResetKind_RESET_KIND_FIVE_HOUR,
+	accountapi.ResetFull:     menupb.ResetKind_RESET_KIND_FULL,
+	accountapi.ResetFable:    menupb.ResetKind_RESET_KIND_FABLE,
 }
 
 func menuAccountState(state accountapi.AccountState) menupb.AccountState {

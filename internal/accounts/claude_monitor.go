@@ -17,6 +17,12 @@ import (
 
 const claudeUsageReadInterval = 5 * time.Minute
 
+// SetClaudeUsageReadInterval changes how often each Claude account's usage is
+// read, before Run starts.
+func (monitor *Monitor) SetClaudeUsageReadInterval(interval time.Duration) {
+	monitor.claudeUsageReadInterval = interval
+}
+
 // SetClaudeUpstreamOrigin changes the Claude origin before Run starts.
 func (monitor *Monitor) SetClaudeUpstreamOrigin(origin *url.URL) { monitor.claudeOrigin = origin }
 
@@ -95,13 +101,15 @@ func clearClaudeRestrictionsFromSample(fact *AccountRoutingFact, sample Allowanc
 	fact.ClaudeRestrictions = mergeClaudeRestrictions(nil, fact.ClaudeRestrictions)
 	for scope, restriction := range fact.ClaudeRestrictions {
 		for _, window := range sample.Windows {
-			if claudeWindowRestrictionScope(window) == scope && !window.LimitReached && window.UsedPercent < 100 && window.ObservedAt.After(restriction.ObservedAt) {
+			if claudeWindowRestrictionScope(window) == scope && !claudeWindowAtLimit(window) && window.ObservedAt.After(restriction.ObservedAt) {
 				fact.ClaudeRestrictions[scope] = ClaudeRestriction{ObservedAt: window.ObservedAt}
 			}
 		}
 	}
 }
 
+// readClaudeAllowance reads the account's usage as the newest Claude Code the
+// proxy has served reads it.
 func (monitor *Monitor) readClaudeAllowance(ctx context.Context, account PoolAccount, credentials Credentials) (AllowanceSample, time.Time, error) {
 	endpoint := monitor.claudeOrigin.ResolveReference(&url.URL{Path: "/api/oauth/usage", RawQuery: "cedar_ember=1&skip_spend=1"})
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
@@ -109,7 +117,7 @@ func (monitor *Monitor) readClaudeAllowance(ctx context.Context, account PoolAcc
 		return AllowanceSample{}, time.Time{}, err
 	}
 	setClaudeOAuthHeaders(request, credentials.AccessToken)
-	request.Header.Set("User-Agent", "claude-code/2.1.273")
+	request.Header.Set("User-Agent", monitor.claudeCodeUserAgent())
 	response, err := monitor.httpClient.Do(request)
 	if err != nil {
 		return AllowanceSample{}, time.Time{}, err
@@ -151,7 +159,7 @@ func (monitor *Monitor) reserveClaudeUsageRead(accountDirectory string, now time
 		cache = existing
 		if !now.Before(existing.ReadAfter) {
 			due = true
-			cache.ReadAfter = now.Add(claudeUsageReadInterval)
+			cache.ReadAfter = now.Add(monitor.claudeUsageReadInterval)
 		}
 		return cache, nil
 	})

@@ -63,14 +63,20 @@ type Monitor struct {
 	httpClient      *http.Client
 	storeDatabase   *store.StoreDatabase
 
-	// readInterval is accountReadInterval; the system test shortens it.
-	readInterval time.Duration
+	// readInterval is accountReadInterval, and claudeUsageReadInterval the
+	// constant of that name; the system test shortens them.
+	readInterval            time.Duration
+	claudeUsageReadInterval time.Duration
 
 	mutex         sync.Mutex
 	accounts      map[store.AccountKey]*monitoredAccount
 	readCompleted chan struct{}
 	readRequested chan struct{}
 	firstReadDone chan struct{}
+
+	// observedClaudeCodeVersion is the newest Claude Code release that has sent
+	// a request, when it is newer than builtInClaudeCodeVersion.
+	observedClaudeCodeVersion atomic.Pointer[string]
 
 	// codexWorkWaitingAt and resetCheckRequested drive RunAutomaticResets.
 	codexWorkWaitingAt  atomic.Int64
@@ -101,10 +107,12 @@ func NewMonitor(dataDirectory string, upstreamOrigin *url.URL, codexExecutable s
 		httpClient:      httpClient,
 		storeDatabase:   storeDatabase,
 		readInterval:    accountReadInterval,
-		accounts:        map[store.AccountKey]*monitoredAccount{},
-		readRequested:   make(chan struct{}, 1),
-		readCompleted:   make(chan struct{}, 1),
-		firstReadDone:   make(chan struct{}),
+
+		claudeUsageReadInterval: claudeUsageReadInterval,
+		accounts:                map[store.AccountKey]*monitoredAccount{},
+		readRequested:           make(chan struct{}, 1),
+		readCompleted:           make(chan struct{}, 1),
+		firstReadDone:           make(chan struct{}),
 
 		resetCheckRequested: make(chan struct{}, 1),
 	}

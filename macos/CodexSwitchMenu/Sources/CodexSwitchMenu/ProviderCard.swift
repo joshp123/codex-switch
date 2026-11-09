@@ -18,7 +18,7 @@ struct ProviderSection: View {
             ProviderHeader(provider: provider)
                 .padding(.horizontal, density.cardInset)
             VStack(alignment: .leading, spacing: density.groupGap) {
-                AccountIdentities(accounts: accounts, snapshot: snapshot, hideIdentity: hideIdentity)
+                AccountIdentities(accounts: accounts, snapshot: snapshot, hideIdentity: hideIdentity, now: now)
                 ForEach(IndicatorBlock.blocks(for: accounts, provider: provider)) { block in
                     VStack(alignment: .leading, spacing: density.blockTitleGap) {
                         Text(block.title)
@@ -51,6 +51,7 @@ private struct AccountIdentities: View {
     let accounts: [CSSwitch_Account]
     let snapshot: CSSwitch_MenuSnapshot
     let hideIdentity: Bool
+    let now: Date
     @Environment(\.panelDensity) private var density
 
     var body: some View {
@@ -78,14 +79,11 @@ private struct AccountIdentities: View {
         }
     }
 
-    /// "3 stored resets", or "not in pool" for an account whose plan cannot
-    /// run the configured model.
+    /// The resets the account holds, such as "3 Fable resets expiring 9 Mar
+    /// 2027", and "not in pool" for an account whose plan cannot run the
+    /// configured model.
     private func resets(_ account: CSSwitch_Account) -> [String] {
-        var parts: [String] = []
-        if account.allowance.hasAvailableResetCredits, account.allowance.availableResetCredits > 0 {
-            let count = account.allowance.availableResetCredits
-            parts.append(count == 1 ? "1 stored reset" : "\(count) stored resets")
-        }
+        var parts = UsageFormatting.storedResets(account.allowance, now: now)
         if !account.offersConfiguredModel { parts.append("not in pool") }
         return parts
     }
@@ -155,7 +153,7 @@ extension CSSwitch_AllowanceWindow {
 }
 
 extension CSSwitch_Account {
-    /// "Pro", "Max 20x".
+    /// "Pro", "Ultra".
     var planTitle: String { plan.prefix(1).uppercased() + plan.dropFirst() }
 }
 

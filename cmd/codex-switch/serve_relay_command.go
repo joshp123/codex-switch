@@ -124,6 +124,9 @@ func serveRelay(tcpListenAddress string) {
 	if interval, set := secondsFromEnvironment("CODEX_SWITCH_ACCOUNT_READ_SECONDS"); set {
 		accountMonitor.SetAccountReadInterval(interval)
 	}
+	if interval, set := secondsFromEnvironment("CODEX_SWITCH_CLAUDE_USAGE_READ_SECONDS"); set {
+		accountMonitor.SetClaudeUsageReadInterval(interval)
+	}
 	// A process that starts during a switch is its candidate. Any other start
 	// must succeed during a provider outage, so launchd can restart the proxy.
 	if _, err := os.Stat(filepath.Join(dataDir(), switchStartedFilename)); err == nil {

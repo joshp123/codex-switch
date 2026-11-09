@@ -102,7 +102,7 @@ func restrictClaudeAccountAfterRejection(fact *AccountRoutingFact, model string,
 	// Every restriction names its limit, so a saved one is never read as a throttle.
 	scopes, claims := make(map[string]time.Time), make(map[string]string)
 	for _, window := range incoming.Windows {
-		if !window.LimitReached && window.UsedPercent < 100 {
+		if !claudeWindowAtLimit(window) {
 			continue
 		}
 		scope := claudeWindowRestrictionScope(window)

@@ -34,6 +34,16 @@ type AllowanceSample struct {
 	LimitReached          bool
 	ObservedAt            time.Time
 	AvailableResetCredits *uint32
+	// StoredResets are the resets Anthropic listed for a Claude account at
+	// StoredResetsReadAt, which is zero until it has answered. A Codex
+	// account's are its reset credits, on AccountRoutingFact.
+	StoredResets       []StoredReset
+	StoredResetsReadAt time.Time
+	// NoResetsReason is Anthropic's reason for listing a Claude account no
+	// resets, such as no_grant, or cli_version when it lists them only for a
+	// newer Claude Code than the proxy read as. It is empty when Anthropic
+	// lists the account's resets.
+	NoResetsReason string
 	// CreditBalance is the account's usage credit balance; nil when OpenAI
 	// reports none.
 	CreditBalance *float64

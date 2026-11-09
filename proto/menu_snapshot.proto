@@ -80,10 +80,38 @@ message AllowanceObservation {
   bool allowed = 2;
   bool limit_reached = 3;
   repeated AllowanceWindow windows = 4;
+  // How many resets the account holds; absent when the provider has not said.
+  // It is above zero with stored_resets empty when only the number is known:
+  // the provider's list is unread or older than its count, or the proxy
+  // serving the snapshot is a build that sends no list.
   optional uint32 available_reset_credits = 5;
   // The usage credit balance, which OpenAI draws once the included allowance
   // is used up; absent when OpenAI reports none.
   optional double credit_balance = 6;
+  // The resets the account holds, soonest expiry first, when the provider's
+  // list of them is known.
+  repeated StoredReset stored_resets = 7;
+}
+// Resets of one kind that an account holds and that expire together.
+message StoredReset {
+  ResetKind kind = 1;
+  uint32 count = 2;
+  // Absent when the provider states no expiry.
+  google.protobuf.Timestamp expires_at = 3;
+}
+// What a stored reset gives back when it is spent.
+enum ResetKind {
+  // A kind the provider names in no way this build knows.
+  RESET_KIND_UNSPECIFIED = 0;
+  // The weekly allowance for every model.
+  RESET_KIND_WEEKLY = 1;
+  // The five-hour allowance.
+  RESET_KIND_FIVE_HOUR = 2;
+  // The five-hour and weekly allowances.
+  RESET_KIND_FULL = 3;
+  // What Fable models used of the week: the Fable allowance is full again and
+  // the weekly allowance regains that share. The week keeps its reset time.
+  RESET_KIND_FABLE = 4;
 }
 message AllowanceWindow {
   int64 period_seconds = 1;

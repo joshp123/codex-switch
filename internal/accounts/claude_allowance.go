@@ -1,6 +1,7 @@
 package accounts
 
 import (
+	"cmp"
 	"fmt"
 	"math"
 	"slices"
@@ -14,12 +15,52 @@ type claudeUsageWindow struct {
 	ResetsAt    time.Time `json:"resets_at"`
 }
 
+// claudeResetGrantStatus is Anthropic's list of an account's stored resets.
+// Anthropic lists them only to a Claude Code it accepts; to any other client
+// it answers that the account is not eligible, with the reason.
 type claudeResetGrantStatus struct {
-	Eligible *bool `json:"eligible"`
-	Grants   []struct {
-		ResetsLeft *uint32    `json:"resets_left"`
-		EndsAt     *time.Time `json:"ends_at"`
-	} `json:"grants"`
+	Eligible         *bool              `json:"eligible"`
+	IneligibleReason string             `json:"ineligible_reason"`
+	Grants           []claudeResetGrant `json:"grants"`
+}
+
+type claudeResetGrant struct {
+	ResetsLeft *uint32    `json:"resets_left"`
+	EndsAt     *time.Time `json:"ends_at"`
+	// Paused is a grant Anthropic has suspended: it cannot be spent.
+	Paused bool `json:"paused"`
+	// Type is session, weekly or full.
+	Type string `json:"type"`
+	// Clears names the limits a reset refills, as Anthropic names them on a
+	// 429: five_hour, seven_day, seven_day_overage_included (Fable's).
+	Clears []string `json:"clears"`
+	// GivesBackWeekly marks a Fable reset: it also returns what Fable used
+	// to the weekly allowance.
+	GivesBackWeekly bool `json:"gives_back_weekly"`
+}
+
+// kind names what a reset from the grant gives back, by the rule Claude Code
+// applies to the same fields.
+func (grant claudeResetGrant) kind() ResetKind {
+	switch {
+	case grant.GivesBackWeekly:
+		return ResetFable
+	case grant.Type == "session":
+		return ResetFiveHour
+	case grant.Type == "weekly":
+		return ResetWeekly
+	case grant.Type == "full":
+		return ResetFull
+	}
+	fiveHour := slices.Contains(grant.Clears, "five_hour")
+	other := slices.ContainsFunc(grant.Clears, func(limit string) bool { return limit != "five_hour" })
+	switch {
+	case fiveHour && !other:
+		return ResetFiveHour
+	case other && !fiveHour:
+		return ResetWeekly
+	}
+	return ResetFull
 }
 
 type claudeUsageResponse struct {
@@ -46,16 +87,25 @@ func (usage claudeUsageResponse) sample(account PoolAccount, observedAt time.Tim
 	sample := AllowanceSample{AccountID: account.AccountID, Plan: account.Plan, Allowed: true, ObservedAt: observedAt}
 	if usage.ResetGrants != nil && usage.ResetGrants.Eligible != nil {
 		var count uint32
+		var held []StoredReset
 		for _, grant := range usage.ResetGrants.Grants {
-			if grant.EndsAt != nil && !grant.EndsAt.After(observedAt) {
+			if grant.Paused || (grant.EndsAt != nil && !grant.EndsAt.After(observedAt)) {
 				continue
 			}
 			if grant.ResetsLeft == nil {
 				return sample, fmt.Errorf("Claude reset grant has no remaining count")
 			}
+			reset := StoredReset{Kind: grant.kind(), Count: *grant.ResetsLeft}
+			if grant.EndsAt != nil {
+				reset.ExpiresAt = *grant.EndsAt
+			}
+			held = append(held, reset)
 			count += *grant.ResetsLeft
 		}
-		sample.AvailableResetCredits = &count
+		sample.AvailableResetCredits, sample.StoredResets, sample.StoredResetsReadAt = &count, groupStoredResets(held), observedAt
+		if !*usage.ResetGrants.Eligible {
+			sample.NoResetsReason = cmp.Or(usage.ResetGrants.IneligibleReason, "no reason given")
+		}
 	}
 	for _, limit := range usage.Limits {
 		duration := int64(7 * 86400)
@@ -185,11 +235,15 @@ func mergeClaudeAllowance(current, incoming AllowanceSample) AllowanceSample {
 		}
 	}
 	if incoming.ObservedAt.After(current.ObservedAt) {
-		// Response headers carry no grant count; only a usage read replaces it.
-		if incoming.AvailableResetCredits != nil {
-			current.AvailableResetCredits = incoming.AvailableResetCredits
-		}
 		current.ObservedAt = incoming.ObservedAt
+	}
+	// Only a usage read that Anthropic answered with its list replaces the
+	// stored resets. Response headers carry none, and neither does a reading
+	// saved by a proxy built before the list, which may run beside this one
+	// during an update.
+	if incoming.StoredResetsReadAt.After(current.StoredResetsReadAt) {
+		current.AvailableResetCredits, current.StoredResets = incoming.AvailableResetCredits, incoming.StoredResets
+		current.NoResetsReason, current.StoredResetsReadAt = incoming.NoResetsReason, incoming.StoredResetsReadAt
 	}
 	if current.AccountID == "" {
 		current.AccountID = incoming.AccountID
@@ -224,6 +278,8 @@ func (restriction ClaudeRestriction) endsAt() time.Time {
 }
 
 // claudeWindowClaim is Anthropic's representative claim for a usage window.
+// Claude Code names the limit it reports from it: seven_day is its "weekly
+// limit" and seven_day_overage_included its "Fable limit".
 func claudeWindowClaim(window ReportedWindow) string {
 	switch {
 	case window.DurationSeconds != 7*86400:
@@ -232,8 +288,16 @@ func claudeWindowClaim(window ReportedWindow) string {
 		return "seven_day_opus"
 	case ClaudeModelFamily(window.ModelName) == "sonnet":
 		return "seven_day_sonnet"
+	case ClaudeModelFamily(window.ModelName) == "fable":
+		return "seven_day_overage_included"
 	}
 	return "seven_day"
+}
+
+// claudeWindowAtLimit is whether the window keeps its account from the models
+// it covers.
+func claudeWindowAtLimit(window ReportedWindow) bool {
+	return window.LimitReached || window.UsedPercent >= 100
 }
 
 func claudeWindowRestrictionScope(window ReportedWindow) string {
@@ -265,7 +329,7 @@ func ClaudeUnavailableReason(fact AccountRoutingFact, model string, now time.Tim
 		}
 	}
 	for _, window := range fact.AllowanceSample.Windows {
-		if claudeWindowMatchesModel(window, model) && (window.LimitReached || window.UsedPercent >= 100) && window.ResetsAt.After(blockedUntil) {
+		if claudeWindowMatchesModel(window, model) && claudeWindowAtLimit(window) && window.ResetsAt.After(blockedUntil) {
 			blockedUntil, throttled = window.ResetsAt, false
 		}
 	}
@@ -303,15 +367,27 @@ func ClaudeAvailableAgain(fact AccountRoutingFact, model string, now time.Time) 
 
 // claudeLimitClaimEndingAt names a limit as Anthropic's representative claim,
 // which Claude Code requires before it treats a 429 as a usage limit. It is ""
-// for a throttle, which Claude Code retries.
+// for a throttle, which Claude Code retries. A model's weekly window resets
+// with the week's, so of the windows that end at reset it names one that holds
+// the account back, at its limit or within the account's reserve, when any does.
 func claudeLimitClaimEndingAt(fact AccountRoutingFact, model string, reset time.Time) string {
-	claim := ""
+	var ending, holding []ReportedWindow
 	for _, window := range fact.AllowanceSample.Windows {
 		if !window.ResetsAt.Equal(reset) || !claudeWindowMatchesModel(window, model) {
 			continue
 		}
+		ending = append(ending, window)
+		if claudeWindowAtLimit(window) || (fact.Reserve.HardPercent > 0 && window.UsedPercent >= float64(100-fact.Reserve.HardPercent)) {
+			holding = append(holding, window)
+		}
+	}
+	if len(holding) > 0 {
+		ending = holding
+	}
+	claim := ""
+	for _, window := range ending {
 		switch windowClaim := claudeWindowClaim(window); windowClaim {
-		case "seven_day_opus", "seven_day_sonnet":
+		case "seven_day_opus", "seven_day_sonnet", "seven_day_overage_included":
 			return windowClaim
 		case "seven_day":
 			claim = windowClaim

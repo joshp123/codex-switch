@@ -20,6 +20,8 @@ import (
 
 type ClaudeAccountObserver interface {
 	ObserveClaudeResponse(store.AccountKey, string, http.Header, int)
+	// ObserveClaudeClient receives the User-Agent of each Claude request.
+	ObserveClaudeClient(userAgent string)
 }
 
 func prepareClaudeHeaders(headers http.Header) {
