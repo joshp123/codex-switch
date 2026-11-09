@@ -69,6 +69,17 @@ type Credentials struct {
 	AccountID   string
 }
 
+// WithoutSecrets replaces every secret in text, so text a provider sends back
+// can be logged whatever it quotes.
+func WithoutSecrets(text string, secrets ...string) string {
+	for _, secret := range secrets {
+		if secret != "" {
+			text = strings.ReplaceAll(text, secret, "[secret removed]")
+		}
+	}
+	return text
+}
+
 // savedLogin reads one account's auth.json and refreshes its tokens.
 type savedLogin struct {
 	provider Provider

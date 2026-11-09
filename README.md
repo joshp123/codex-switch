@@ -281,14 +281,18 @@ The proxy spends a stored Codex reset credit by itself in two cases:
 - Work is waiting, no Codex account can take it, and none refills within 30
   minutes. The credit goes to the account with the most of its week left,
   using that account's credit that expires first.
-- A credit is in its last hour, and its account has used more than 20% of its
-  week (OpenAI's minimum for a reset) and more than the share of its week that
-  has passed.
+- A credit is in its last hour, and its account has used more of its week
+  than the share of its week that has passed. If OpenAI finds nothing to
+  reset, it keeps the credit.
 
 Each spend is logged with the credit, the account and the reason. Proxies on
 several Macs signed in to the same accounts choose the same credit and send the
 same request, which OpenAI applies once; each reads every account again just
-before it spends and backs off if one can take work.
+before it spends and backs off if one can take work. OpenAI's usage reading can
+lag behind a spend, so each Mac remembers the credits it has seen. When one
+disappears before it expires, that counts as the pool refilling, and no other
+credit is spent for waiting work until the reading shows the reset, for up to
+30 minutes.
 
 `codex-switch reset codex` spends a credit by the first rule, without waiting
 work. If the response is lost, run the same command again to resolve it.

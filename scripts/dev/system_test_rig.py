@@ -21,6 +21,7 @@ import sqlite3
 import subprocess
 import threading
 import time
+import tomllib
 import urllib.request
 
 REPO = Path(__file__).resolve().parents[2]
@@ -224,15 +225,22 @@ def start_proxy():
     return base
 
 
+# Codex always reads the machine's own configuration as well as its home's, and a release build has no way to skip it.
+SYSTEM_CODEX_CONFIG = Path('/etc/codex/config.toml')
+
+
 def write_codex_config(home, base):
-    """Points the Codex client in home at the proxy whose Codex URL is base."""
+    """Points the Codex client in home at the proxy whose Codex URL is base, with nothing that reaches outside the test:
+    no plugin sync from GitHub and none of the MCP servers the machine's own Codex configuration starts."""
     # Everything else Codex asks ChatGPT for, such as its apps connector, goes to the fake providers too.
     chatgpt = '' if REAL_SERVICES else f'chatgpt_base_url = "{read("fake-providers-secure-origin")}/backend-api/"\n'
+    system = tomllib.loads(SYSTEM_CODEX_CONFIG.read_text()) if SYSTEM_CODEX_CONFIG.exists() else {}
+    no_system_mcp = ''.join(f'[mcp_servers.{json.dumps(name)}]\nenabled = false\n' for name in system.get('mcp_servers', {}))
     (home / 'config.toml').write_text(
         f'model_provider = "switch-test"\nmodel = "{MODEL}"\nmodel_reasoning_effort = "low"\n' + chatgpt +
         'cli_auth_credentials_store = "file"\n[model_providers.switch-test]\nname = "OpenAI"\n'
         f'base_url = "{base}"\nwire_api = "responses"\nrequires_openai_auth = true\n'
-        'supports_websockets = true\n[analytics]\nenabled = false\n')
+        'supports_websockets = true\n[analytics]\nenabled = false\n[features]\nplugins = false\n' + no_system_mcp)
 
 
 class OtherMac:
@@ -291,7 +299,9 @@ def proxy_environment():
 
 
 def client_environment():
-    environment = {name: value for name, value in os.environ.items() if not name.startswith(('CODEX_', 'OPENAI_', 'PI_'))}
+    # A proxy from the environment, such as the live Codex Switch an agent runs in, would carry the clients' requests.
+    environment = {name: value for name, value in os.environ.items() if not name.startswith(('CODEX_', 'OPENAI_', 'PI_'))
+                   and name.lower() not in ('https_proxy', 'http_proxy', 'all_proxy', 'no_proxy', 'node_extra_ca_certs')}
     environment.update(CODEX_HOME=str(RUN / 'home'), PI_CODING_AGENT_DIR=str(RUN / 'pi'))
     if not REAL_SERVICES:
         # Codex trusts only the fake providers' certificate authority, so none of its requests reach a real service.

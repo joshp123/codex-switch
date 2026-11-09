@@ -181,16 +181,22 @@ type providers struct {
 //	reset-drop                      the first request to spend a credit spends it, but its reply is lost
 //	reset-refuse                    requests to spend a credit receive a provider HTTP error
 //	hold-resets                     requests to spend a credit wait, unanswered and not yet applied
+//	usage-lag                       usage reads report each account as it was before a credit reset it
 //	claude-grant                    Claude usage reads report reset grants
 //
 // A credit is spent as OpenAI spends one: once, for one redeem_request_id; a
 // repeat of that request is already_redeemed, and any other request for it, or
 // for a credit expired or never held, is no_credit. An account that has used
-// under 20% of its week has nothing_to_reset and keeps the credit. A spent
-// credit resets its account: nothing used, and a week that has not started.
+// under 20% of its week has nothing_to_reset and keeps the credit: OpenAI
+// documents no such level, so this fake picks one to make the answer happen. A
+// spent credit resets its account at once: nothing used, and a week that has
+// not started. With usage-lag, usage reads do not show it yet, as when
+// OpenAI's usage reading lags behind a spend.
 //
 // Fast-mode Claude requests are always refused, as for an account without usage credits.
-// Claude login refreshes are always refused, as for a refresh token Anthropic has retired.
+// Claude login refreshes are always refused, as for a refresh token Anthropic has
+// retired, with Anthropic's error and message; the message also quotes the
+// refresh token sent, so a test can see the proxy never logs it.
 type controls struct {
 	weeklyUsed     map[string]float64
 	weeklyResets   map[string]int64
@@ -209,6 +215,7 @@ type controls struct {
 	resetDrop      bool
 	resetRefuse    bool
 	holdResets     bool
+	usageLag       bool
 	claudeGrant    bool
 }
 
@@ -244,6 +251,8 @@ func (providers *providers) readControls() (controls, error) {
 			parsed.resetRefuse = true
 		case len(fields) == 1 && fields[0] == "hold-resets":
 			parsed.holdResets = true
+		case len(fields) == 1 && fields[0] == "usage-lag":
+			parsed.usageLag = true
 		case len(fields) == 1 && fields[0] == "claude-grant":
 			parsed.claudeGrant = true
 		case len(fields) == 1 && fields[0] == "http-only":
@@ -340,7 +349,7 @@ func (providers *providers) ServeHTTP(writer http.ResponseWriter, request *http.
 				return
 			}
 		}
-		used, body := openAIUsage(controls, alias, providers.accountReset(alias), providers.availableCredits(controls, alias))
+		used, body := openAIUsage(controls, alias, providers.accountReset(alias) && !controls.usageLag, providers.availableCredits(controls, alias))
 		log.Printf("event=usage-read account=%s used=%g", alias, used)
 		writeJSON(writer, http.StatusOK, body)
 	case request.URL.Path != responsesPath:
@@ -906,8 +915,13 @@ func (providers *providers) serveAnthropic(writer http.ResponseWriter, request *
 	alias := providers.alias(request)
 	switch {
 	case request.URL.Path == claudeTokenPath:
+		var refresh struct {
+			RefreshToken string `json:"refresh_token"`
+		}
+		_ = json.NewDecoder(request.Body).Decode(&refresh)
 		providers.logRequest("claude-refresh-refused", request, http.StatusBadRequest)
-		writeJSON(writer, http.StatusBadRequest, []byte(`{"error":"invalid_grant","error_description":"Refresh token not found or invalid"}`))
+		refusal, _ := json.Marshal(map[string]string{"error": "invalid_grant", "error_description": "Refresh token " + refresh.RefreshToken + " not found or invalid"})
+		writeJSON(writer, http.StatusBadRequest, refusal)
 	case request.URL.Path == claudeUsagePath && controls.claudeGrant:
 		writeJSON(writer, http.StatusOK, fmt.Appendf(nil, `{"five_hour":{"utilization":10,"resets_at":%q},"cedar_ember":{"eligible":true,"grants":[{"resets_left":2},{"resets_left":1,"ends_at":%q}]}}`, time.Now().Add(3*time.Hour).Format(time.RFC3339), time.Now().Add(-time.Hour).Format(time.RFC3339)))
 	case request.URL.Path == claudeUsagePath && controls.claudeLimited[alias]:

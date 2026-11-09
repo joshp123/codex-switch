@@ -83,6 +83,9 @@ func (monitor *Monitor) observeAccount(parent context.Context, account PoolAccou
 		} else {
 			fact.ResetCredits = append([]ResetCredit{}, list.Credits...)
 			fact.ResetCreditsReadAt = time.Now()
+			if _, noteErr := noteResetCredits(monitor.dataDirectory, account, list.Credits, fact.AllowanceSample, fact.ResetCreditsReadAt); noteErr != nil {
+				log.Printf("%s: cannot record reset credits: %v", account.DisplayName, noteErr)
+			}
 		}
 	}
 

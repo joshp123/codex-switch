@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -106,7 +107,7 @@ func (s *savedLogin) claudeCredentials(ctx context.Context, rejected Credentials
 			if err := postClaudeOAuth(ctx, s.client, s.token, map[string]string{
 				"grant_type": "refresh_token", "client_id": claudeOAuthClientID,
 				"refresh_token": auth.RefreshToken, "scope": claudeOAuthScopes,
-			}, &refreshed); err != nil {
+			}, &refreshed, auth.AccessToken); err != nil {
 				return err
 			}
 			if refreshed.AccessToken == "" || refreshed.RefreshToken == "" || refreshed.ExpiresIn <= 0 {
@@ -141,7 +142,13 @@ type claudeTokenResponse struct {
 	} `json:"organization"`
 }
 
-func postClaudeOAuth(ctx context.Context, client *http.Client, tokenURL string, body any, result any) error {
+// claudeOAuthPublicFields are the token request fields that carry no secret.
+var claudeOAuthPublicFields = []string{"grant_type", "client_id", "scope", "redirect_uri"}
+
+// postClaudeOAuth sends a token request. When Anthropic refuses it, the error
+// gives Anthropic's status, code and message with every secret the request
+// sent, and every other secret held, removed.
+func postClaudeOAuth(ctx context.Context, client *http.Client, tokenURL string, body map[string]string, result any, heldSecrets ...string) error {
 	encoded, err := json.Marshal(body)
 	if err != nil {
 		return err
@@ -158,7 +165,13 @@ func postClaudeOAuth(ctx context.Context, client *http.Client, tokenURL string, 
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		refusal, _ := io.ReadAll(io.LimitReader(response.Body, maximumRefreshResponseBytes))
-		err := fmt.Errorf("Anthropic refused the token request with HTTP %d%s", response.StatusCode, describeClaudeTokenRefusal(refusal))
+		secrets := heldSecrets
+		for field, value := range body {
+			if !slices.Contains(claudeOAuthPublicFields, field) {
+				secrets = append(secrets, value)
+			}
+		}
+		err := fmt.Errorf("Anthropic refused the token request with HTTP %d%s", response.StatusCode, WithoutSecrets(describeClaudeTokenRefusal(refusal), secrets...))
 		if response.StatusCode == 400 || response.StatusCode == 401 || response.StatusCode == 403 {
 			return signInRequired(err)
 		}
@@ -171,7 +184,7 @@ func postClaudeOAuth(ctx context.Context, client *http.Client, tokenURL string, 
 // request, read as Claude Code reads it: the code is "error" when that is a
 // string and "error.type" when it is an object; the message is
 // "error_description", or "error.message" in Anthropic's API error shape. A
-// body without either is quoted, shortened to one line.
+// body without either is not quoted: it could hold anything.
 func describeClaudeTokenRefusal(body []byte) string {
 	var refusal struct {
 		Error            json.RawMessage `json:"error"`
@@ -196,12 +209,5 @@ func describeClaudeTokenRefusal(body []byte) string {
 	case code != "" || message != "":
 		return " " + code + message
 	}
-	excerpt := strings.Join(strings.Fields(string(body)), " ")
-	if excerpt == "" {
-		return " and an empty body"
-	}
-	if len(excerpt) > 200 {
-		excerpt = excerpt[:200] + "..."
-	}
-	return fmt.Sprintf(" and the body %q", excerpt)
+	return fmt.Sprintf(" and %d bytes with no error code or message", len(body))
 }

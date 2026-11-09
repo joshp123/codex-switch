@@ -29,10 +29,6 @@ const (
 	// expiringCreditWindow is a credit's last stretch before it expires, when
 	// spending it beats losing it.
 	expiringCreditWindow = time.Hour
-	// openAIMinimumResetPercent is the least of its week an account must have
-	// used for OpenAI to reset it; below it OpenAI answers nothing_to_reset and
-	// keeps the credit.
-	openAIMinimumResetPercent = 20.0
 )
 
 // ResetDecision is what a reset request did, in words for the person or the
@@ -95,15 +91,20 @@ type resetChoice struct {
 // credit and send the same request, which OpenAI applies once.
 //
 // The pool is out when no Codex account can take work and none refills within
-// 30 minutes; the credit then goes to the account with the most of its week
-// left, the one that would refill last, using its credit that expires first.
-// A credit in its last hour is spent when its account has used more than
-// OpenAI's 20% minimum and more of its week than the share of the week that has
-// passed. With no credit to spend it returns why, or "" when no need arose.
-func chooseResetCredit(readings []codexAccountReading, now time.Time, rules resetRules) (resetChoice, bool, string) {
+// 30 minutes. A credit seen spent in the last 30 minutes whose account's
+// reading does not show the reset yet already refills the pool. Otherwise the
+// credit goes to the account with the most of its week left, the one that
+// would refill last, using its credit that expires first.
+//
+// A credit in its last hour is spent when its account has used more of its
+// week than the share of the week that has passed. OpenAI decides whether
+// there is anything to reset: when there is not, it keeps the credit.
+//
+// With no credit to spend it returns why, or "" when no need arose.
+func chooseResetCredit(readings []codexAccountReading, lastSpent spentResetCredit, now time.Time, rules resetRules) (resetChoice, bool, string) {
 	var reasons []string
 	if rules.whenPoolOut {
-		choice, found, reason := choosePoolOutCredit(readings, now)
+		choice, found, reason := choosePoolOutCredit(readings, lastSpent, now)
 		if found {
 			return choice, true, ""
 		}
@@ -121,7 +122,7 @@ func chooseResetCredit(readings []codexAccountReading, now time.Time, rules rese
 	return resetChoice{}, false, strings.Join(reasons, " ")
 }
 
-func choosePoolOutCredit(readings []codexAccountReading, now time.Time) (resetChoice, bool, string) {
+func choosePoolOutCredit(readings []codexAccountReading, lastSpent spentResetCredit, now time.Time) (resetChoice, bool, string) {
 	type candidate struct {
 		reading   codexAccountReading
 		credit    ResetCredit
@@ -147,6 +148,10 @@ func choosePoolOutCredit(readings []codexAccountReading, now time.Time) (resetCh
 		}
 		if !refillsAt.After(now.Add(poolRefillWait)) {
 			return resetChoice{}, false, fmt.Sprintf("No reset: %s refills at %s, within 30 minutes.", name, logtime.Format(refillsAt))
+		}
+		if reading.account.Key == lastSpent.AccountKey && refillsAt.Equal(lastSpent.RefillsAt) && now.Sub(lastSpent.SeenAt) < poolRefillWait {
+			return resetChoice{}, false, fmt.Sprintf("No reset: reset credit %s on %s was spent by %s, and OpenAI's usage reading does not show the reset yet.",
+				lastSpent.CreditID, name, logtime.Format(lastSpent.SeenAt))
 		}
 		if credit, found := firstExpiringCredit(reading.credits, now); found {
 			candidates = append(candidates, candidate{reading, credit, refillsAt})
@@ -193,8 +198,6 @@ func chooseExpiringCredit(readings []codexAccountReading, now time.Time) (resetC
 			}
 			used, passed := week.UsedPercent, weekPassedPercent(week, now)
 			switch {
-			case used <= openAIMinimumResetPercent:
-				keep = append(keep, expiring{reading, credit, fmt.Sprintf("%s has used %.0f%% of its week, and OpenAI resets only above 20%%", name, used)})
 			case used <= passed:
 				keep = append(keep, expiring{reading, credit, fmt.Sprintf("%s has used %.0f%% of its week, no more than the %.0f%% of the week that has passed", name, used, passed)})
 			default:
@@ -302,11 +305,11 @@ func spendResetCredit(ctx context.Context, directory string, origin *url.URL, cl
 		} else if !os.IsNotExist(readErr) {
 			return readErr
 		}
-		readings, err := readCodexAccountsForReset(ctx, directory, origin, client)
+		readings, lastSpent, err := readCodexAccountsForReset(ctx, directory, origin, client)
 		if err != nil {
 			return err
 		}
-		choice, found, reason := chooseResetCredit(readings, time.Now(), rules)
+		choice, found, reason := chooseResetCredit(readings, lastSpent, time.Now(), rules)
 		if !found {
 			decision.Message = reason
 			return nil
@@ -324,15 +327,16 @@ func spendResetCredit(ctx context.Context, directory string, origin *url.URL, cl
 	return
 }
 
-// readCodexAccountsForReset reads every Codex account from OpenAI. It reads an
-// account's credits before its allowance: if another Mac spends a credit on
-// the account between the two reads, the allowance shows it can take work and
-// this Mac backs off. In the other order this Mac could see the credit gone
-// beside an allowance still at its limit, and spend a second credit.
-func readCodexAccountsForReset(ctx context.Context, directory string, origin *url.URL, client *http.Client) ([]codexAccountReading, error) {
+// readCodexAccountsForReset reads every Codex account from OpenAI, notes its
+// credits, and returns the latest credit seen spent; see noteResetCredits. It
+// reads an account's credits before its allowance, so a credit spent between
+// the two reads is either still listed or gone beside an allowance from after
+// the spend.
+func readCodexAccountsForReset(ctx context.Context, directory string, origin *url.URL, client *http.Client) ([]codexAccountReading, spentResetCredit, error) {
+	var lastSpent spentResetCredit
 	pool, err := ReadPool(directory)
 	if err != nil {
-		return nil, err
+		return nil, lastSpent, err
 	}
 	var readings []codexAccountReading
 	for _, account := range pool {
@@ -345,25 +349,28 @@ func readCodexAccountsForReset(ctx context.Context, directory string, origin *ur
 			continue
 		}
 		if err != nil {
-			return nil, fmt.Errorf("%s: cannot check credentials: %w", account.DisplayName, err)
+			return nil, lastSpent, fmt.Errorf("%s: cannot check credentials: %w", account.DisplayName, err)
 		}
 		var list struct {
 			Credits []ResetCredit `json:"credits"`
 		}
 		if err := resetRequest(ctx, client, origin, credentials, http.MethodGet, "/backend-api/wham/rate-limit-reset-credits", nil, &list); err != nil {
-			return nil, fmt.Errorf("%s: cannot check reset credits: %w", account.DisplayName, err)
+			return nil, lastSpent, fmt.Errorf("%s: cannot check reset credits: %w", account.DisplayName, err)
 		}
 		var usage usageResponse
 		if err := resetRequest(ctx, client, origin, credentials, http.MethodGet, "/backend-api/wham/usage", nil, &usage); err != nil {
-			return nil, fmt.Errorf("%s: cannot check allowance: %w", account.DisplayName, err)
+			return nil, lastSpent, fmt.Errorf("%s: cannot check allowance: %w", account.DisplayName, err)
 		}
 		sample, err := usage.Sample(credentials.AccountID, time.Now())
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", account.DisplayName, err)
+			return nil, lastSpent, fmt.Errorf("%s: %w", account.DisplayName, err)
+		}
+		if lastSpent, err = noteResetCredits(directory, account, list.Credits, sample, time.Now()); err != nil {
+			return nil, lastSpent, fmt.Errorf("record reset credits: %w", err)
 		}
 		readings = append(readings, codexAccountReading{account: account, allowance: sample, credits: list.Credits})
 	}
-	return readings, nil
+	return readings, lastSpent, nil
 }
 
 func pendingResetAccount(ctx context.Context, directory string, client *http.Client, pending pendingReset) (PoolAccount, Credentials, error) {

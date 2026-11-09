@@ -170,13 +170,14 @@ def run_group(name):
         if name == "resets":
             system.extra = ["claude-grant"]
         # The proxy reads credits every five minutes, so the credits these groups test are there from the start.
-        if name in ("resets", "reset-rollback", "auto-reset"):
+        if name in ("resets", "reset-rollback", "auto-reset", "lagging-reset"):
             system.credits = reset_credits()
         if name == "routing":
             system.credits = [f'credit account-1 routing-credit {int(time.time()) + 20 * DAY}']
         if name == "expiry-reset":
             system.credits = expiring_credits()
-            system.weekly['account-1'], system.resets['account-1'] = 15, int(time.time() + 3.5 * DAY)
+            # 15% used with a fifteenth of the week gone: the proxies ask, and the fake providers find nothing to reset.
+            system.weekly['account-1'], system.resets['account-1'] = 15, int(time.time() + 6.5 * DAY)
         system.apply()  # before the proxy's first allowance read
         rig.start_fake_providers()
         system.base = rig.start_proxy()
@@ -523,7 +524,7 @@ def claude_limit_reaches_the_client_at_once(system):
 
 
 def claude_sign_out_logs_what_anthropic_said(system):
-    """When Anthropic refuses to refresh a Claude login, the proxy log says what Anthropic answered"""
+    """When Anthropic refuses to refresh a Claude login, the proxy log says what Anthropic answered, and no token, even one Anthropic quotes"""
     require_available_claude_accounts(1)
     account = rig.CLAUDE_ACCOUNTS[-1]
     path = rig.RUN / 'data' / account / 'auth.json'
@@ -537,10 +538,12 @@ def claude_sign_out_logs_what_anthropic_said(system):
     line = signed_out[0]
     if not rig.fake_provider_events('claude-refresh-refused'):
         raise Failure(f'The proxy logged {account} as signed out without asking Anthropic to refresh it: {line}')
-    missing = [part for part in ('HTTP 400', 'invalid_grant', 'Refresh token not found or invalid') if part not in line]
-    if missing or auth['refresh_token'] in line or auth['access_token'] in line:
-        raise Failure(f'The sign-out line lacks {missing} or shows a token: {line}')
-    return f'Anthropic refused the refresh with HTTP 400 and invalid_grant; the proxy logged:\n{line.split(" ", 1)[1]}'
+    missing = [part for part in ('HTTP 400', 'invalid_grant', 'Refresh token', 'not found or invalid') if part not in line]
+    shown = [name for name in ('refresh_token', 'access_token') if auth[name] in rig.proxy_log()]
+    if missing or shown:
+        raise Failure(f'The sign-out line lacks {missing}, or the proxy log shows the {shown}: {line}')
+    return (f'Anthropic refused the refresh with HTTP 400 and invalid_grant, quoting the refresh token in its message; the proxy logged:\n'
+            f'{line.split(" ", 1)[1]}')
 
 
 def require_available_claude_accounts(count):
@@ -1283,10 +1286,10 @@ def proxy_logs_say(other, text):
     return text in rig.proxy_log() and text in other.proxy_log()
 
 
-def both_ask_for_one_credit():
-    """Waits for both proxies to ask OpenAI, which holds the requests, to spend a credit, and checks that they asked for
-    the same credit with the same request ID."""
-    held = rig.wait_for(lambda: (claims if len(claims := rig.fake_provider_events('reset-claim')) >= 2 else None),
+def both_ask_for_one_credit(earlier=0):
+    """Waits for both proxies to ask OpenAI, which holds the requests, to spend a credit, after the earlier requests it
+    has seen, and checks that they asked for the same credit with the same request ID."""
+    held = rig.wait_for(lambda: (claims[earlier:] if len(claims := rig.fake_provider_events('reset-claim')) >= earlier + 2 else None),
                         'both proxies to ask to spend a credit')
     asked = {(claim['account'], claim['credit'], claim['request']) for claim in held}
     if len(asked) != 1:
@@ -1336,6 +1339,44 @@ def pool_out_spends_one_credit_on_two_macs(system):
             f'finished on that account.')
 
 
+def lagging_usage_spends_one_credit(system):
+    """With every Codex account out, work waiting on two Macs, and OpenAI's usage reading still showing the reset
+    account at its limit after a credit is spent, neither proxy nor the reset command spends a second credit, and
+    the work on both resumes once the reading catches up"""
+    other = rig.OtherMac()
+    system.limited = set(system.accounts)
+    system.extra = ['usage-lag']
+    system.apply()
+    limited = 'OpenAI reports its usage limit reached'
+    rig.wait_for(lambda: rig.proxy_log().count(limited) >= 3 and other.proxy_log().count(limited) >= 3, 'both proxies to read every account as limited')
+    here = rig.CodexTask('waiting-here', 'Reply with the word here.')
+    there = other.codex_task('waiting-there', 'Reply with the word there.')
+    backing_off = 'does not show the reset yet'
+    rig.wait_for(lambda: len(rig.fake_provider_events('reset-reset')) >= 2 or proxy_logs_say(other, backing_off),
+                 'a second credit to be spent, or both proxies to see the first spent and wait for its reading')
+    reset = reset_command('cli', 'reset', 'codex')
+    spent = [(event['account'], event['credit']) for event in rig.fake_provider_events('reset-reset')]
+    if len(spent) != 1:
+        raise Failure(f'With usage lagging behind the first spend, OpenAI spent {spent}.')
+    if reset.returncode or backing_off not in reset.stdout:
+        raise Failure(f'The reset command, with usage still lagging: {reset.stdout} {reset.stderr}')
+    system.extra = []
+    system.apply()
+    here.finish()
+    there.finish()
+    system.record_codex_task('work waiting on this Mac', here.thread)
+    spent = [(event['account'], event['credit']) for event in rig.fake_provider_events('reset-reset')]
+    if spent != [CHOSEN_CREDIT['cli']]:
+        raise Failure(f'Expected one credit spent, {CHOSEN_CREDIT["cli"][1]}; OpenAI spent {spent}.')
+    resumed = (rig.pinned_account(here.thread), other.pinned_account_key(there.thread))
+    if resumed != ('account-3', rig.account_key('account-3')):
+        raise Failure(f'Work resumed on {resumed}, not on the reset account on both Macs.')
+    said = next(line for line in rig.proxy_log().splitlines() if backing_off in line)
+    return (f'OpenAI spent {CHOSEN_CREDIT["cli"][1]} once. While its usage reading still showed account-3 at its limit, both proxies '
+            f'and the reset command spent nothing more; this proxy logged:\n{said.split(" ", 1)[1]}\n'
+            f'Once the reading caught up, the work waiting on both Macs finished on account-3.')
+
+
 def expiring_credits():
     """Two credits on account-1 in their last hour, the first expiring sooner."""
     now = int(time.time())
@@ -1343,20 +1384,22 @@ def expiring_credits():
 
 
 def expiring_credit_is_spent_once_on_two_macs(system):
-    """A credit in its last hour is kept while its account has used 20% of its week or less, or no more than the share of
-    the week that has passed, and is otherwise spent once between two Macs"""
+    """A credit in its last hour is kept while its account has used no more of its week than the share of the week that
+    has passed, or OpenAI finds nothing to reset, and is otherwise spent once between two Macs"""
     other = rig.OtherMac()
-    rig.wait_for(lambda: proxy_logs_say(other, 'OpenAI resets only above 20%'), 'both proxies to keep the credit of an account that has used 15%')
-    system.weekly['account-1'] = 40
+    nothing = 'not spent, because OpenAI found nothing to reset'
+    rig.wait_for(lambda: proxy_logs_say(other, nothing), 'both proxies to ask OpenAI to spend the credit, and keep it when it finds nothing to reset')
+    system.weekly['account-1'], system.resets['account-1'] = 40, int(time.time() + 3.5 * DAY)
     system.apply()
     rig.wait_for(lambda: proxy_logs_say(other, 'has used 40% of its week, no more than the 50% of the week that has passed'),
                  'both proxies to keep the credit of an account behind its week')
-    if rig.fake_provider_events('reset-claim'):
-        raise Failure('A proxy spent a credit OpenAI would refuse, or one that gains less than it loses.')
+    if rig.fake_provider_events('reset-reset'):
+        raise Failure('A proxy spent a credit OpenAI found nothing to reset with, or one that gains less than it loses.')
     # OpenAI holds the requests to spend, so both proxies decide from the same accounts.
+    asked_before = len(rig.fake_provider_events('reset-claim'))
     system.weekly['account-1'], system.extra = 60, ['hold-resets']
     system.apply()
-    both_ask_for_one_credit()
+    both_ask_for_one_credit(asked_before)
     system.extra = []
     system.apply()
     # Once the first credit is spent the account has used nothing, so both proxies keep the second.
@@ -1367,8 +1410,10 @@ def expiring_credit_is_spent_once_on_two_macs(system):
     if len(spent) != 1 or spent[0][:2] != ('account-1', 'expiring-first') or set(claims) != set(spent):
         raise Failure(f'Expected one spend of expiring-first; OpenAI spent {spent} from the requests {claims}.')
     by = [name for name, log in (('this Mac', rig.proxy_log()), ('the other Mac', other.proxy_log())) if 'expiring-first on Codex' in log and ' spent. ' in log]
-    return (f'Both proxies kept the expiring credit at 15% used, and at 40% used with half the week gone. At 60% used both asked OpenAI to spend it, '
-            f'with one request ID, and OpenAI spent it once, for {" and ".join(by)}. Both then kept the account\'s second credit, as it had used nothing.')
+    return (f'At 15% used with a fifteenth of the week gone, both proxies asked OpenAI to spend the expiring credit; it found nothing to '
+            f'reset, and the credit was kept. At 40% used with half the week gone, both kept it without asking. At 60% used both '
+            f'asked OpenAI to spend it, with one request ID, and OpenAI spent it once, for {" and ".join(by)}. Both then kept the '
+            f'account\'s second credit, as it had used nothing.')
 
 
 # Each group shares one isolated system and runs at once with every other group. The first update and the rollback
@@ -1381,6 +1426,7 @@ GROUPS = [
     ('resets', 'cli', [stored_resets]),
     ('reset-rollback', 'cli', [reset_left_pending_completes_after_rollback]),
     ('auto-reset', 'cli', [pool_out_spends_one_credit_on_two_macs]),
+    ('lagging-reset', 'cli', [lagging_usage_spends_one_credit]),
     ('expiry-reset', 'cli', [expiring_credit_is_spent_once_on_two_macs]),
     ('routing', 'cli', [t3_reads_the_account_pool, new_work_goes_to_the_allowance_that_resets_first, request_without_task_id_is_served]),
     ('exhaustion', 'cli', [exhausted_task_moves_on_its_next_turn]),

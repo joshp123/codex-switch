@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/joshp123/codex-switch/internal/accounts"
 	"github.com/joshp123/codex-switch/internal/store"
 )
 
@@ -27,7 +28,7 @@ func (handler *TrafficRelayHandler) observeRejectedResponse(routedRequest *route
 			io.Reader
 			io.Closer
 		}{io.MultiReader(bytes.NewReader(head), upstreamResponse.Body), upstreamResponse.Body}
-		log.Printf("%s: OpenAI answered %s %s with HTTP %d%s", subject, upstreamResponse.Request.Method, upstreamResponse.Request.URL.Path, upstreamResponse.StatusCode, describeRejection(upstreamResponse.Header, head))
+		log.Printf("%s: OpenAI answered %s %s with HTTP %d%s", subject, upstreamResponse.Request.Method, upstreamResponse.Request.URL.Path, upstreamResponse.StatusCode, describeRejection(upstreamResponse.Header, head, routedRequest.routeDecision.Credentials.AccessToken))
 		return nil
 	}
 	if upstreamResponse.StatusCode == http.StatusUnauthorized {
@@ -54,14 +55,19 @@ func (handler *TrafficRelayHandler) observeRejectedResponse(routedRequest *route
 		log.Printf("%s: OpenAI says this account does not offer %s; Codex retries, and the retry goes to an account that offers it or waits for one", subject, routedRequest.modelSlug)
 		return errUpstreamRejectedBeforeAdmission
 	}
-	log.Printf("%s: OpenAI rejected %s with HTTP %d%s", subject, routedRequest.modelSlug, upstreamResponse.StatusCode, describeRejection(upstreamResponse.Header, body))
+	log.Printf("%s: OpenAI rejected %s with HTTP %d%s", subject, routedRequest.modelSlug, upstreamResponse.StatusCode, describeRejection(upstreamResponse.Header, body, routedRequest.routeDecision.Credentials.AccessToken))
 	return nil
 }
 
 // describeRejection quotes why a request was refused: Cloudflare's challenge
 // when Cloudflare stopped it before OpenAI, OpenAI's API error when the body is
-// one, otherwise the page title or the start of the text, on one line.
-func describeRejection(header http.Header, body []byte) string {
+// one, otherwise the page title or the start of the text, on one line. The
+// access token the request carried is removed, whatever the provider quoted.
+func describeRejection(header http.Header, body []byte, accessToken string) string {
+	return accounts.WithoutSecrets(describeRejectionText(header, body), accessToken)
+}
+
+func describeRejectionText(header http.Header, body []byte) string {
 	if mitigation := header.Get("Cf-Mitigated"); mitigation != "" {
 		return fmt.Sprintf(": Cloudflare stopped the request before OpenAI (cf-mitigated: %s, cf-ray: %s)", mitigation, header.Get("Cf-Ray"))
 	}

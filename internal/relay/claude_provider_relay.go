@@ -55,7 +55,7 @@ func (handler *TrafficRelayHandler) observeClaudeRejection(request *routedRelayR
 	case http.StatusTooManyRequests:
 		head := peekResponseBody(response)
 		limited := describeModelRequest(request.taskID, request.client, request.routeDecision.DisplayName) + ": Anthropic limited " + request.modelSlug +
-			" (" + describeClaudeLimitHeaders(response.Header) + ")" + describeRejection(response.Header, head)
+			" (" + describeClaudeLimitHeaders(response.Header) + ")" + describeRejection(response.Header, head, request.routeDecision.Credentials.AccessToken)
 		answerClaudeRejection(response, handler.taskRouter, request.modelSlug, limited)
 	case http.StatusUnauthorized:
 		handler.taskRouter.ReportUnauthorizedTurn(request.routeDecision.AccountKey, request.routeDecision.Credentials)
@@ -65,7 +65,7 @@ func (handler *TrafficRelayHandler) observeClaudeRejection(request *routedRelayR
 		response.Header.Set("X-Should-Retry", "true")
 	default:
 		head := peekResponseBody(response)
-		log.Printf("%s: Anthropic answered %s with HTTP %d%s", describeModelRequest(request.taskID, request.client, request.routeDecision.DisplayName), request.modelSlug, response.StatusCode, describeRejection(response.Header, head))
+		log.Printf("%s: Anthropic answered %s with HTTP %d%s", describeModelRequest(request.taskID, request.client, request.routeDecision.DisplayName), request.modelSlug, response.StatusCode, describeRejection(response.Header, head, request.routeDecision.Credentials.AccessToken))
 	}
 	return nil
 }
@@ -84,7 +84,7 @@ func (handler *TrafficRelayHandler) passClaudeFastModeRefusal(request *routedRel
 	head := peekResponseBody(response)
 	log.Printf("%s: Anthropic refused fast mode for %s (%s)%s; Claude Code retries at standard speed on the same account",
 		describeModelRequest(request.taskID, request.client, request.routeDecision.DisplayName), request.modelSlug,
-		describeClaudeLimitHeaders(response.Header), describeRejection(response.Header, head))
+		describeClaudeLimitHeaders(response.Header), describeRejection(response.Header, head, request.routeDecision.Credentials.AccessToken))
 	return nil
 }
 

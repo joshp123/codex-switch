@@ -36,7 +36,8 @@ Before a release, also run the smoke test (see below).
 | resets | Claude grants appear in status; the reset command checks pool availability and the next reset, and retries a response the published release lost with the same request ID, as after an update. |
 | reset-rollback | The reset command spends the credit of the account with the most of its week left, not the credit that expires first. A reset it leaves pending when the provider drops its reply completes with the published release, as after a rollback. |
 | auto-reset | Status shows each Codex account's reset credits. With every Codex account out and work waiting on two proxies, as on two Macs, neither spends a credit while an account refills within 30 minutes. Then both ask for the same credit with the same request ID, the credit of the account with the most of its week left; OpenAI spends it once, neither asks for another, and the work on both resumes there. |
-| expiry-reset | On two proxies, a credit in its last hour is kept while its account has used 20% of its week or less, or no more than the share of the week that has passed; otherwise both ask for it with the same request ID, it is spent once, and the account's second credit is then kept. |
+| lagging-reset | With every Codex account out and work waiting on two proxies, OpenAI's usage reading still shows the reset account at its limit after a credit is spent. Neither proxy, nor the reset command, spends another credit, and the work on both resumes once the reading catches up. |
+| expiry-reset | On two proxies, a credit in its last hour is kept while its account has used no more of its week than the share of the week that has passed, or when OpenAI finds nothing to reset; otherwise both ask for it with the same request ID, it is spent once, and the account's second credit is then kept. |
 | routing | New Codex tasks and Pi sessions go to an account whose week has not started, then to the weekly allowance that resets first. They and their Codex forks stay on their account when another account becomes first, and move for a hard reserve. |
 | routing | A request without a task ID is served. |
 | exhaustion | When a task's account runs out, its next turn moves to another account. No model work is replayed, no tool effect repeats, and Codex shows no error. |
@@ -47,7 +48,7 @@ Before a release, also run the smoke test (see below).
 | claude-fast-mode | When Anthropic refuses fast mode for want of usage credits, Claude Code carries on at standard speed on the same account. A usage limit on a fast-mode request still moves the task. |
 | claude-failover | When a Claude task's account reaches its usage limit, the task's next prompt is answered by another account and Claude Code shows no limit. |
 | claude-limited | With every Claude account at its usage limit, Claude Code stops at once and says when the limit resets, and the next task gets the same answer from the proxy without a request to Anthropic. |
-| claude-sign-out | When Anthropic refuses to refresh an expired Claude login, the proxy's sign-out line gives Anthropic's HTTP status, error code and message, and no token. |
+| claude-sign-out | When Anthropic refuses to refresh an expired Claude login with a message that quotes the refresh token, the proxy's sign-out line gives Anthropic's HTTP status, error code and message, and the proxy log holds no token. |
 | retire | After a candidate slow to start, a retiring proxy still finishes a reply it holds, closes an idle HTTP connection at once and a silent tunnel after its grace. A transferring tunnel keeps going until the switch limit, when the old process has gone. |
 | outage | During a provider outage, launchd restarts a killed proxy, and a failed request is enough to start a waiting update. A candidate that cannot read the accounts stops, and its build is not skipped. |
 | failed-release | Provider errors and client cancellations do not count against a candidate. Malformed upstream responses do: the candidate steps aside and status shows the skipped build. |
@@ -88,18 +89,28 @@ number of requests, refused WebSockets, a WebSocket ended at OpenAI's one-hour l
 and usage-read errors, a Claude throttle with a one-second Retry-After as
 Anthropic sent on 31 October 2026, and a Claude five-hour limit. It refuses
 every fast-mode Claude request as Anthropic does for an account without usage
-credits. It holds reset credits and spends them as OpenAI does: once per
-request ID, `nothing_to_reset` for an account under 20% used, and `no_credit`
-for a credit spent by another request, expired or never held. It can hold
-requests to spend a credit, so a test can see two proxies decide from the same
-accounts. It logs every model request with a fingerprint of its bytes, so the
+credits. It refuses every Claude login refresh with Anthropic's error, and its
+message quotes the refresh token sent. It holds reset credits and spends them
+as OpenAI does: once per request ID, and `no_credit` for a credit spent by
+another request, expired or never held. It answers `nothing_to_reset` for an
+account under 20% used; OpenAI documents no such level, so the test picks one
+to make that answer happen. It can hold requests to spend a credit, so a test
+can see two proxies decide from the same accounts, and can make its usage
+reading lag behind a spend. It logs every model request with a fingerprint of its bytes, so the
 test can see that none was sent twice, and every usage read with the level it
 reported, so the test can wait until the proxy has read a level.
 
 It also serves HTTPS with a certificate authority made for each run. Codex
 sends its own ChatGPT requests, such as its account check, only to an HTTPS
-origin, and trusts only that authority, so none of its requests reach a real
-service.
+origin, and trusts only that authority.
+
+Codex also reads the machine's own configuration, `/etc/codex/config.toml`, and
+a release build cannot skip it. The test's Codex configuration turns off
+plugins, whose sync fetches from GitHub, and every MCP server that file starts.
+The file's other settings, such as features and skills, still apply. The
+clients run without the proxy variables of the shell that started the test,
+such as `HTTPS_PROXY`, so no client request goes through a proxy outside the
+test. With these, the test's Codex opens no connection outside the machine.
 
 Timers are shortened; their live values are unchanged:
 
