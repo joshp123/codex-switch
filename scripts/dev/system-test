@@ -104,7 +104,8 @@ def main():
     if rig.ROOT.exists():
         previous = rig.ROOT.with_name(f'system-test.previous.{time.time_ns()}')
         os.rename(rig.ROOT, previous)
-        subprocess.Popen(['trash', str(previous)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        # The previous run's evidence is about 800 MB of the test's own output; delete it rather than fill the Bin.
+        subprocess.Popen(['rm', '-rf', str(previous)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
     rig.ROOT.mkdir(parents=True)
     try:
         rig.build()

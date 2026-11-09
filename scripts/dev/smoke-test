@@ -8,6 +8,7 @@ cheapest models. scripts/dev/system-test checks behaviour; this checks that
 the services still accept the proxy's requests. It leaves nothing running.
 """
 import os
+import subprocess
 import sys
 import time
 import uuid
@@ -27,7 +28,9 @@ def main():
     expected = ['Codex', *(['Pi'] if rig.PI else []), 'Claude Code']
     try:
         if rig.RUN.exists():
-            os.rename(rig.RUN, rig.RUN.with_name(f'smoke-test.previous.{time.time_ns()}'))
+            previous = rig.RUN.with_name(f'smoke-test.previous.{time.time_ns()}')
+            os.rename(rig.RUN, previous)
+            subprocess.Popen(['rm', '-rf', str(previous)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         rig.build()
         rig.prepare_real_services()
         rig.start_proxy()
