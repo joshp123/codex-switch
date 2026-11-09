@@ -89,6 +89,18 @@ func (reset unconfirmedReset) waitingFor(readings []codexAccountReading, now tim
 	return ""
 }
 
+// readingExpected is whether OpenAI's reading should soon show the reset: the
+// account is signed in, the reading does not show it yet, and it was asked
+// for less than readingLagWarning ago.
+func (reset unconfirmedReset) readingExpected(readings []codexAccountReading, now time.Time) bool {
+	for _, reading := range readings {
+		if reading.account.Key == reset.AccountKey {
+			return !reading.signedOut && !readingShowsReset(reading.allowance, reset.AskedAt) && now.Sub(reset.AskedAt) < readingLagWarning
+		}
+	}
+	return false
+}
+
 // readingShowsReset reports whether an account's reading was taken after a
 // reset asked for at askedAt. A reset starts every allowance window again:
 // OpenAI reports a window that has not started as beginning at the read, and

@@ -30,6 +30,13 @@ const (
 	// expiringCreditWindow is a credit's last stretch before it expires, when
 	// spending it beats losing it.
 	expiringCreditWindow = time.Hour
+	// expiringCreditMinimumUsed is the least of its week an account must have
+	// used for a credit about to expire to be spent on it. Spending restarts
+	// the week, so below this a reset gives back too little to be worth it.
+	expiringCreditMinimumUsed = 20.0
+	// expiringRefusalWait is how long the proxy waits before it asks again
+	// about a credit about to expire, after OpenAI found nothing to reset.
+	expiringRefusalWait = 10 * time.Minute
 )
 
 // ResetDecision is what a reset request did, in words for the person or the
@@ -135,9 +142,9 @@ type resetChoice struct {
 // 30 minutes. The credit then goes to the account with the most of its week
 // left, the one that would refill last, using its credit that expires first.
 //
-// A credit in its last hour is spent when its account has used more of its
-// week than the share of the week that has passed. OpenAI decides whether
-// there is anything to reset: when there is not, it keeps the credit.
+// A credit in its last hour is spent when its account has used more than 20%
+// of its week, and more than the share of the week that has passed. When
+// OpenAI finds nothing to reset, the credit is kept.
 //
 // With no credit to spend it returns why, or "" when no need arose.
 func chooseResetCredit(readings []codexAccountReading, now time.Time, rules resetRules) (resetChoice, bool, string) {
@@ -233,6 +240,8 @@ func chooseExpiringCredit(readings []codexAccountReading, now time.Time) (resetC
 			}
 			used, passed := week.UsedPercent, weekPassedPercent(week, now)
 			switch {
+			case used <= expiringCreditMinimumUsed:
+				keep = append(keep, expiring{reading, credit, fmt.Sprintf("%s has used %.0f%% of its week, and a credit about to expire is spent only above %.0f%%", name, used, expiringCreditMinimumUsed)})
 			case used <= passed:
 				keep = append(keep, expiring{reading, credit, fmt.Sprintf("%s has used %.0f%% of its week, no more than the %.0f%% of the week that has passed", name, used, passed)})
 			default:
@@ -375,6 +384,11 @@ func spendResetCredit(ctx context.Context, directory string, origin *url.URL, cl
 				return err
 			}
 		}
+		if refusedAt, refused := resetRefusedAt(directory, expiringResetRefusedFilename, expiringRefusalWait, time.Now()); refused && rules.beforeExpiry {
+			rules.beforeExpiry = false
+			decision.Message = fmt.Sprintf("No reset: OpenAI found nothing to reset with the credit about to expire at %s. It is asked again after %s.",
+				logtime.Format(refusedAt), logtime.Format(refusedAt.Add(expiringRefusalWait)))
+		}
 		if refusedAt, refused := poolResetRefusedAt(directory, time.Now()); refused && rules.whenPoolOut {
 			// OpenAI just found nothing to reset for this need; only a credit
 			// about to expire is still worth asking about.
@@ -403,8 +417,12 @@ func spendResetCredit(ctx context.Context, directory string, origin *url.URL, cl
 		if err := completeReset(ctx, directory, origin, client, pendingPath, pending, choice.why, &decision); err != nil {
 			return err
 		}
-		if choice.poolOut && !decision.Spent {
+		switch {
+		case decision.Spent:
+		case choice.poolOut:
 			return os.WriteFile(filepath.Join(directory, poolResetRefusedFilename), nil, 0o600)
+		default:
+			return os.WriteFile(filepath.Join(directory, expiringResetRefusedFilename), nil, 0o600)
 		}
 		return nil
 	})
@@ -417,9 +435,17 @@ func spendResetCredit(ctx context.Context, directory string, origin *url.URL, cl
 // make, when it could draw usage credits.
 const poolResetRefusedFilename = "pool-reset-refused"
 
+// expiringResetRefusedFilename marks when OpenAI last spent nothing with a
+// credit about to expire.
+const expiringResetRefusedFilename = "expiring-reset-refused"
+
 func poolResetRefusedAt(directory string, now time.Time) (time.Time, bool) {
-	info, err := os.Stat(filepath.Join(directory, poolResetRefusedFilename))
-	if err != nil || now.Sub(info.ModTime()) >= poolRefillWait {
+	return resetRefusedAt(directory, poolResetRefusedFilename, poolRefillWait, now)
+}
+
+func resetRefusedAt(directory, filename string, wait time.Duration, now time.Time) (time.Time, bool) {
+	info, err := os.Stat(filepath.Join(directory, filename))
+	if err != nil || now.Sub(info.ModTime()) >= wait {
 		return time.Time{}, false
 	}
 	return info.ModTime(), true

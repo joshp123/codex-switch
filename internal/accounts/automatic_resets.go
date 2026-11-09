@@ -140,7 +140,10 @@ func (monitor *Monitor) ResetCreditComesFirst() bool {
 	}
 	now := time.Now()
 	readings := monitor.latestCodexReadings()
-	if unconfirmed, err := readUnconfirmedReset(monitor.dataDirectory); err != nil || (unconfirmed != nil && unconfirmed.waitingFor(readings, now) != "") {
+	// A reset OpenAI's reading does not show yet holds usage credits back
+	// only while the reading can be expected: for 30 minutes, with the
+	// account signed in. It still stops another reset for as long as it takes.
+	if unconfirmed, err := readUnconfirmedReset(monitor.dataDirectory); err != nil || (unconfirmed != nil && unconfirmed.readingExpected(readings, now)) {
 		return true
 	}
 	if on, err := AutomaticResetsOn(monitor.dataDirectory); err != nil || !on {

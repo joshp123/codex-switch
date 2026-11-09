@@ -189,9 +189,12 @@ def run_group(name):
             system.usage_credits = dict(USAGE_CREDITS)
         if name == "routing":
             system.credits = [f'credit account-1 routing-credit {int(time.time()) + 20 * DAY}']
+        if name == "expiry-refused":
+            system.credits, system.extra = expiring_credits(), ["reset-nothing"]
+            system.weekly['account-1'], system.resets['account-1'] = 60, int(time.time() + 3.5 * DAY)
         if name == "expiry-reset":
             system.credits = expiring_credits()
-            # 15% used with a fifteenth of the week gone: the proxies ask, and the fake providers find nothing to reset.
+            # 15% used with a fifteenth of the week gone: ahead of its week, but under the 20% a credit about to expire needs.
             system.weekly['account-1'], system.resets['account-1'] = 15, int(time.time() + 6.5 * DAY)
         system.apply()  # before the proxy's first allowance read
         rig.start_fake_providers()
@@ -1488,19 +1491,18 @@ def expiring_credits():
 
 def expiring_credit_is_spent_once_by_the_authority(system):
     """Of two Macs, only the one with automatic resets on spends a credit in its last hour. It keeps the credit while
-    its account has used no more of its week than the share of the week that has passed, or when OpenAI finds nothing
-    to reset; a later attempt, under a new request ID, spends it once"""
+    its account has used 20% of its week or less, or no more than the share of the week that has passed, without
+    asking OpenAI; then spends it once"""
     automatic_resets(True)
     other = rig.OtherMac()
-    nothing = 'not spent, because OpenAI found nothing to reset'
-    rig.wait_for(lambda: nothing in rig.proxy_log(), 'this Mac to ask OpenAI to spend the credit, and keep it when it finds nothing to reset')
-    # Under the 20% at which the fake OpenAI resets, so an attempt already under way when this lands spends nothing.
-    system.weekly['account-1'], system.resets['account-1'] = 18, int(time.time() + 3.5 * DAY)
+    rig.wait_for(lambda: 'has used 15% of its week, and a credit about to expire is spent only above 20%' in rig.proxy_log(),
+                 'this Mac to keep the credit of an account that has used little of its week')
+    system.weekly['account-1'], system.resets['account-1'] = 40, int(time.time() + 3.5 * DAY)
     system.apply()
-    rig.wait_for(lambda: 'has used 18% of its week, no more than the 50% of the week that has passed' in rig.proxy_log(),
+    rig.wait_for(lambda: 'has used 40% of its week, no more than the 50% of the week that has passed' in rig.proxy_log(),
                  'this Mac to keep the credit of an account behind its week')
-    if spends():
-        raise Failure('A credit OpenAI found nothing to reset with, or one that gains less than it loses, was spent.')
+    if rig.fake_provider_events('reset-claim'):
+        raise Failure('OpenAI was asked to spend a credit that gains less than it loses.')
     system.weekly['account-1'] = 60
     system.apply()
     # Once the first credit is spent the account has used nothing, so the second is kept.
@@ -1511,10 +1513,21 @@ def expiring_credit_is_spent_once_by_the_authority(system):
         raise Failure(f'Expected one spend of expiring-first, each request under its own ID; OpenAI saw {claims} and spent {spends()}.')
     if 'Reset credit' in other.proxy_log() or 'Keeping reset credit' in other.proxy_log() or 'Automatic Codex resets are off' not in other.proxy_log():
         raise Failure('The Mac with automatic resets off decided about a credit.')
-    return (f'At 15% used with a fifteenth of the week gone, this Mac asked OpenAI to spend the expiring credit; it found nothing '
-            f'to reset, and the credit was kept. At 18% used with half the week gone, it kept the credit without asking. At 60% '
-            f'it asked again under a new request ID and OpenAI spent it, once; the account\'s second credit was then kept. '
-            f'Each of the {len(claims)} requests had its own ID; the other Mac, with automatic resets off, decided nothing.')
+    return ('At 15% used, and at 40% used with half the week gone, this Mac kept the expiring credit without asking OpenAI. At 60% '
+            f'it asked and OpenAI spent it, once, in {len(claims)} request; the account\'s second credit was then kept. '
+            'The other Mac, with automatic resets off, decided nothing.')
+
+
+def refused_expiring_credit_is_not_asked_for_in_a_loop(system):
+    """When OpenAI finds nothing to reset with a credit about to expire, the proxy asks once and waits before it asks again"""
+    automatic_resets(True)
+    rig.wait_for(lambda: 'It is asked again after' in rig.proxy_log(), 'the proxy to say when it asks about the expiring credit again')
+    reads = len(rig.fake_provider_events('usage-read', account='account-1'))
+    rig.wait_for(lambda: len(rig.fake_provider_events('usage-read', account='account-1')) >= reads + 5, 'five more account reads')
+    claims = rig.fake_provider_events('reset-claim')
+    if len(claims) != 1 or spends():
+        raise Failure(f'OpenAI was asked {len(claims)} times and spent {spends()}.')
+    return 'OpenAI found nothing to reset with the expiring credit. Over the next five account reads the proxy did not ask again.'
 
 
 def rollback_and_back_spends_no_second_credit(system):
@@ -1909,6 +1922,7 @@ GROUPS = [
                         a_signed_out_account_pauses_resets_and_says_why_once, a_claude_refresh_failure_quoting_the_refresh_token_is_not_shown]),
     ('low-credit-balance', 'cli', [low_credit_balance_leaves_included_allowance_usable, low_credit_balance_blocks_until_weekly_reset]),
     ('reset-refused', 'cli', [refused_reset_lets_work_draw_usage_credits]),
+    ('expiry-refused', 'cli', [refused_expiring_credit_is_not_asked_for_in_a_loop]),
     ('usage-credits', 'cli', [status_shows_each_accounts_usage_credits, usage_credits_wait_while_an_account_has_included_allowance,
                               usage_credits_are_drawn_when_every_allowance_is_out, usage_credits_stop_at_the_floor, reset_credits_come_first]),
     ('routing', 'cli', [t3_reads_the_account_pool, new_work_goes_to_the_allowance_that_resets_first, request_without_task_id_is_served]),

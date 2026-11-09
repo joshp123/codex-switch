@@ -299,9 +299,10 @@ The proxy with automatic resets on spends a credit in two cases:
   most of its week left, using that account's credit that expires first. If
   OpenAI finds nothing to reset, the proxy keeps the credit, lets the work
   draw usage credits, and asks again after 30 minutes.
-- A credit is in its last hour, and its account has used more of its week
-  than the share of its week that has passed. If OpenAI finds nothing to
-  reset, it keeps the credit.
+- A credit is in its last hour, and its account has used more than 20% of its
+  week and more than the share of its week that has passed. If OpenAI finds
+  nothing to reset, the proxy keeps the credit and asks again after 10
+  minutes.
 
 Each spend is logged with the credit, the account and the reason. OpenAI's
 usage reading can lag behind a spend, so after one the proxy spends no other
