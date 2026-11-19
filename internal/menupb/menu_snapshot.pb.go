@@ -637,7 +637,10 @@ type Account struct {
 	UnavailableUntil *timestamppb.Timestamp `protobuf:"bytes,12,opt,name=unavailable_until,json=unavailableUntil,proto3" json:"unavailable_until,omitempty"`
 	// The account takes new work although its included allowance is used up:
 	// OpenAI draws its usage credits for it.
-	DrawsCredits  bool `protobuf:"varint,13,opt,name=draws_credits,json=drawsCredits,proto3" json:"draws_credits,omitempty"`
+	DrawsCredits bool `protobuf:"varint,13,opt,name=draws_credits,json=drawsCredits,proto3" json:"draws_credits,omitempty"`
+	// When a Claude sign-in ends and the account must sign in again. Anthropic
+	// sets it when the sign-in is approved; renewals do not move it.
+	SignInEndsAt  *timestamppb.Timestamp `protobuf:"bytes,14,opt,name=sign_in_ends_at,json=signInEndsAt,proto3" json:"sign_in_ends_at,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -761,6 +764,13 @@ func (x *Account) GetDrawsCredits() bool {
 		return x.DrawsCredits
 	}
 	return false
+}
+
+func (x *Account) GetSignInEndsAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.SignInEndsAt
+	}
+	return nil
 }
 
 type AllowanceObservation struct {
@@ -1405,7 +1415,7 @@ const file_menu_snapshot_proto_rawDesc = "" +
 	"successful\x18\x02 \x01(\x03R\n" +
 	"successful\x12\x16\n" +
 	"\x06failed\x18\x03 \x01(\x03R\x06failed\x12 \n" +
-	"\vinterrupted\x18\x04 \x01(\x03R\vinterrupted\"\xb7\x04\n" +
+	"\vinterrupted\x18\x04 \x01(\x03R\vinterrupted\"\xfa\x04\n" +
 	"\aAccount\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05email\x18\x02 \x01(\tR\x05email\x12\x12\n" +
@@ -1420,7 +1430,8 @@ const file_menu_snapshot_proto_rawDesc = "" +
 	" \x01(\x0e2\x1b.codex_switch.menu.ProviderR\bprovider\x12%\n" +
 	"\x0ereserve_status\x18\v \x01(\tR\rreserveStatus\x12G\n" +
 	"\x11unavailable_until\x18\f \x01(\v2\x1a.google.protobuf.TimestampR\x10unavailableUntil\x12#\n" +
-	"\rdraws_credits\x18\r \x01(\bR\fdrawsCredits\"\xad\x03\n" +
+	"\rdraws_credits\x18\r \x01(\bR\fdrawsCredits\x12A\n" +
+	"\x0fsign_in_ends_at\x18\x0e \x01(\v2\x1a.google.protobuf.TimestampR\fsignInEndsAt\"\xad\x03\n" +
 	"\x14AllowanceObservation\x12;\n" +
 	"\vobserved_at\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
 	"observedAt\x12\x18\n" +
@@ -1554,25 +1565,26 @@ var file_menu_snapshot_proto_depIdxs = []int32{
 	10, // 15: codex_switch.menu.Account.allowance:type_name -> codex_switch.menu.AllowanceObservation
 	0,  // 16: codex_switch.menu.Account.provider:type_name -> codex_switch.menu.Provider
 	19, // 17: codex_switch.menu.Account.unavailable_until:type_name -> google.protobuf.Timestamp
-	19, // 18: codex_switch.menu.AllowanceObservation.observed_at:type_name -> google.protobuf.Timestamp
-	12, // 19: codex_switch.menu.AllowanceObservation.windows:type_name -> codex_switch.menu.AllowanceWindow
-	11, // 20: codex_switch.menu.AllowanceObservation.stored_resets:type_name -> codex_switch.menu.StoredReset
-	2,  // 21: codex_switch.menu.StoredReset.kind:type_name -> codex_switch.menu.ResetKind
-	19, // 22: codex_switch.menu.StoredReset.expires_at:type_name -> google.protobuf.Timestamp
-	19, // 23: codex_switch.menu.AllowanceWindow.reset_at:type_name -> google.protobuf.Timestamp
-	19, // 24: codex_switch.menu.CompletedTask.last_completed_at:type_name -> google.protobuf.Timestamp
-	3,  // 25: codex_switch.menu.ReportingPeriod.kind:type_name -> codex_switch.menu.ReportingPeriodKind
-	19, // 26: codex_switch.menu.ReportingPeriod.started_at:type_name -> google.protobuf.Timestamp
-	19, // 27: codex_switch.menu.ReportingPeriod.ended_at:type_name -> google.protobuf.Timestamp
-	17, // 28: codex_switch.menu.ReportingPeriod.accounts:type_name -> codex_switch.menu.AccountTotal
-	16, // 29: codex_switch.menu.ReportingPeriod.task_usage:type_name -> codex_switch.menu.TaskUsageReport
-	13, // 30: codex_switch.menu.TaskUsageReport.tasks:type_name -> codex_switch.menu.CompletedTask
-	0,  // 31: codex_switch.menu.ProviderBurn.provider:type_name -> codex_switch.menu.Provider
-	32, // [32:32] is the sub-list for method output_type
-	32, // [32:32] is the sub-list for method input_type
-	32, // [32:32] is the sub-list for extension type_name
-	32, // [32:32] is the sub-list for extension extendee
-	0,  // [0:32] is the sub-list for field type_name
+	19, // 18: codex_switch.menu.Account.sign_in_ends_at:type_name -> google.protobuf.Timestamp
+	19, // 19: codex_switch.menu.AllowanceObservation.observed_at:type_name -> google.protobuf.Timestamp
+	12, // 20: codex_switch.menu.AllowanceObservation.windows:type_name -> codex_switch.menu.AllowanceWindow
+	11, // 21: codex_switch.menu.AllowanceObservation.stored_resets:type_name -> codex_switch.menu.StoredReset
+	2,  // 22: codex_switch.menu.StoredReset.kind:type_name -> codex_switch.menu.ResetKind
+	19, // 23: codex_switch.menu.StoredReset.expires_at:type_name -> google.protobuf.Timestamp
+	19, // 24: codex_switch.menu.AllowanceWindow.reset_at:type_name -> google.protobuf.Timestamp
+	19, // 25: codex_switch.menu.CompletedTask.last_completed_at:type_name -> google.protobuf.Timestamp
+	3,  // 26: codex_switch.menu.ReportingPeriod.kind:type_name -> codex_switch.menu.ReportingPeriodKind
+	19, // 27: codex_switch.menu.ReportingPeriod.started_at:type_name -> google.protobuf.Timestamp
+	19, // 28: codex_switch.menu.ReportingPeriod.ended_at:type_name -> google.protobuf.Timestamp
+	17, // 29: codex_switch.menu.ReportingPeriod.accounts:type_name -> codex_switch.menu.AccountTotal
+	16, // 30: codex_switch.menu.ReportingPeriod.task_usage:type_name -> codex_switch.menu.TaskUsageReport
+	13, // 31: codex_switch.menu.TaskUsageReport.tasks:type_name -> codex_switch.menu.CompletedTask
+	0,  // 32: codex_switch.menu.ProviderBurn.provider:type_name -> codex_switch.menu.Provider
+	33, // [33:33] is the sub-list for method output_type
+	33, // [33:33] is the sub-list for method input_type
+	33, // [33:33] is the sub-list for extension type_name
+	33, // [33:33] is the sub-list for extension extendee
+	0,  // [0:33] is the sub-list for field type_name
 }
 
 func init() { file_menu_snapshot_proto_init() }

@@ -468,6 +468,17 @@ nonisolated struct CSSwitch_Account: @unchecked Sendable {
     set {_uniqueStorage()._drawsCredits = newValue}
   }
 
+  /// When a Claude sign-in ends and the account must sign in again. Anthropic
+  /// sets it when the sign-in is approved; renewals do not move it.
+  var signInEndsAt: SwiftProtobuf.Google_Protobuf_Timestamp {
+    get {_storage._signInEndsAt ?? SwiftProtobuf.Google_Protobuf_Timestamp()}
+    set {_uniqueStorage()._signInEndsAt = newValue}
+  }
+  /// Returns true if `signInEndsAt` has been explicitly set.
+  var hasSignInEndsAt: Bool {_storage._signInEndsAt != nil}
+  /// Clears the value of `signInEndsAt`. Subsequent reads from it will return its default value.
+  mutating func clearSignInEndsAt() {_uniqueStorage()._signInEndsAt = nil}
+
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
   init() {}
@@ -1035,7 +1046,7 @@ nonisolated extension CSSwitch_ModelRequestCounts: SwiftProtobuf.Message, SwiftP
 
 nonisolated extension CSSwitch_Account: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".Account"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}key\0\u{1}email\0\u{1}plan\0\u{1}state\0\u{1}allowance\0\u{3}account_number\0\u{1}usable\0\u{3}unavailable_reason\0\u{3}offers_configured_model\0\u{1}provider\0\u{3}reserve_status\0\u{3}unavailable_until\0\u{3}draws_credits\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}key\0\u{1}email\0\u{1}plan\0\u{1}state\0\u{1}allowance\0\u{3}account_number\0\u{1}usable\0\u{3}unavailable_reason\0\u{3}offers_configured_model\0\u{1}provider\0\u{3}reserve_status\0\u{3}unavailable_until\0\u{3}draws_credits\0\u{3}sign_in_ends_at\0")
 
   fileprivate class _StorageClass {
     var _key: String = String()
@@ -1051,6 +1062,7 @@ nonisolated extension CSSwitch_Account: SwiftProtobuf.Message, SwiftProtobuf._Me
     var _reserveStatus: String = String()
     var _unavailableUntil: SwiftProtobuf.Google_Protobuf_Timestamp? = nil
     var _drawsCredits: Bool = false
+    var _signInEndsAt: SwiftProtobuf.Google_Protobuf_Timestamp? = nil
 
       // This property is used as the initial default value for new instances of the type.
       // The type itself is protecting the reference to its storage via CoW semantics.
@@ -1074,6 +1086,7 @@ nonisolated extension CSSwitch_Account: SwiftProtobuf.Message, SwiftProtobuf._Me
       _reserveStatus = source._reserveStatus
       _unavailableUntil = source._unavailableUntil
       _drawsCredits = source._drawsCredits
+      _signInEndsAt = source._signInEndsAt
     }
   }
 
@@ -1105,6 +1118,7 @@ nonisolated extension CSSwitch_Account: SwiftProtobuf.Message, SwiftProtobuf._Me
         case 11: try { try decoder.decodeSingularStringField(value: &_storage._reserveStatus) }()
         case 12: try { try decoder.decodeSingularMessageField(value: &_storage._unavailableUntil) }()
         case 13: try { try decoder.decodeSingularBoolField(value: &_storage._drawsCredits) }()
+        case 14: try { try decoder.decodeSingularMessageField(value: &_storage._signInEndsAt) }()
         default: break
         }
       }
@@ -1156,6 +1170,9 @@ nonisolated extension CSSwitch_Account: SwiftProtobuf.Message, SwiftProtobuf._Me
       if _storage._drawsCredits != false {
         try visitor.visitSingularBoolField(value: _storage._drawsCredits, fieldNumber: 13)
       }
+      try { if let v = _storage._signInEndsAt {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 14)
+      } }()
     }
     try unknownFields.traverse(visitor: &visitor)
   }
@@ -1178,6 +1195,7 @@ nonisolated extension CSSwitch_Account: SwiftProtobuf.Message, SwiftProtobuf._Me
         if _storage._reserveStatus != rhs_storage._reserveStatus {return false}
         if _storage._unavailableUntil != rhs_storage._unavailableUntil {return false}
         if _storage._drawsCredits != rhs_storage._drawsCredits {return false}
+        if _storage._signInEndsAt != rhs_storage._signInEndsAt {return false}
         return true
       }
       if !storagesAreEqual {return false}

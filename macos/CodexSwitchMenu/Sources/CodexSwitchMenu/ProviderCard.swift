@@ -70,13 +70,18 @@ private struct AccountIdentities: View {
                     Text(hideIdentity ? UsageFormatting.privateEmail(account.email) : account.email)
                         .fixedSize()
                     // One line; the panel widens to fit the longest.
-                    Text(([account.planTitle] + resets(account) + [state(account)].compactMap { $0 }).joined(separator: " · "))
+                    Text(([account.planTitle] + signInEnd(account) + resets(account) + [state(account)].compactMap { $0 }).joined(separator: " · "))
                         .fixedSize()
                 }
                 .font(density.identityFont)
                 .foregroundStyle(.secondary)
             }
         }
+    }
+
+    /// "sign-in ends 17 Dec": when a Claude account must sign in again.
+    private func signInEnd(_ account: CSSwitch_Account) -> [String] {
+        account.hasSignInEndsAt ? ["sign-in ends " + UsageFormatting.expiryDay(account.signInEndsAt.date, now: now)] : []
     }
 
     /// The resets the account holds, such as "3 Fable resets expiring 9 Mar

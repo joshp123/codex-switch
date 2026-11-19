@@ -33,6 +33,9 @@ type claudeAuthFile struct {
 	OrganizationID string    `json:"organization_id"`
 	Email          string    `json:"email"`
 	Plan           string    `json:"plan"`
+	// SignInEndsAt is when Anthropic stops renewing this sign-in, about four
+	// weeks after it was approved; renewals do not move it.
+	SignInEndsAt time.Time `json:"sign_in_ends_at,omitzero"`
 }
 
 func (auth claudeAuthFile) credentials() Credentials {
@@ -58,7 +61,8 @@ func readClaudePoolAccount(data []byte, folder string, index int) (PoolAccount, 
 	}
 	identity := auth.credentials().AccountID
 	return PoolAccount{Key: AccountKeyFor(ProviderClaude, auth.Email), Folder: folder, Index: index, Provider: ProviderClaude, ID: identity,
-		AccountID: identity, OrganizationID: auth.OrganizationID, Email: auth.Email, Plan: claudePlanName(auth.Plan)}, nil
+		AccountID: identity, OrganizationID: auth.OrganizationID, Email: auth.Email, Plan: claudePlanName(auth.Plan),
+		SignInEndsAt: auth.SignInEndsAt}, nil
 }
 
 // claudeUltraPlan is Anthropic's name for the plan its rate-limit tier still
@@ -137,6 +141,9 @@ func (s *savedLogin) claudeCredentials(ctx context.Context, rejected Credentials
 			}
 			auth.AccessToken, auth.RefreshToken = refreshed.AccessToken, refreshed.RefreshToken
 			auth.ExpiresAt = time.Now().Add(time.Duration(refreshed.ExpiresIn) * time.Second)
+			if refreshed.RefreshTokenExpiresIn > 0 {
+				auth.SignInEndsAt = time.Now().Add(time.Duration(refreshed.RefreshTokenExpiresIn) * time.Second)
+			}
 			if err := writeAtomic(filepath.Join(s.home, "auth.json"), auth); err != nil {
 				return temporary(err)
 			}
@@ -151,7 +158,9 @@ type claudeTokenResponse struct {
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token"`
 	ExpiresIn    int    `json:"expires_in"`
-	Account      struct {
+	// RefreshTokenExpiresIn is how long until the sign-in ends.
+	RefreshTokenExpiresIn int `json:"refresh_token_expires_in"`
+	Account               struct {
 		UUID         string `json:"uuid"`
 		EmailAddress string `json:"email_address"`
 	} `json:"account"`

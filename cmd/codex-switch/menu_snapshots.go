@@ -419,6 +419,9 @@ func readServingMenuSnapshot(dataDirectory string, router *routing.TaskRouter, m
 		if identity.Provider == accountapi.ProviderClaude {
 			account.Provider = menupb.Provider_PROVIDER_CLAUDE
 			account.OffersConfiguredModel = true
+			if !identity.SignInEndsAt.IsZero() {
+				account.SignInEndsAt = timestamppb.New(identity.SignInEndsAt)
+			}
 		}
 		if !sample.ObservedAt.IsZero() {
 			heldResets, storedResets := accountapi.HeldResets(fact, snapshot.GeneratedAt.AsTime())

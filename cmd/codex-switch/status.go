@@ -171,6 +171,9 @@ func writeCurrentStatus(output io.Writer, snapshot *menupb.MenuSnapshot) {
 			}
 		}
 		fmt.Fprintf(output, "\n%s · %s\n", label, state)
+		if account.SignInEndsAt != nil {
+			fmt.Fprintf(output, "  sign-in ends %s\n", account.SignInEndsAt.AsTime().Local().Format("Mon 2 Jan 2006 15:04"))
+		}
 		for _, line := range storedResetLines(account.GetAllowance()) {
 			fmt.Fprintf(output, "  %s\n", line)
 		}

@@ -76,7 +76,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	providers := &providers{controlPath: *controlPath, aliases: aliases, requestsDirectory: *requestsDirectory,
+	providers := &providers{dataDirectory: *dataDirectory, controlPath: *controlPath, aliases: aliases, requestsDirectory: *requestsDirectory,
 		redeemedBy: map[string]string{}, resetAccounts: map[string]bool{}, resetAnswers: map[string]string{}, creditsDrawn: map[string]float64{}}
 	if _, err := providers.readControls(); err != nil {
 		log.Fatal(err)
@@ -146,6 +146,7 @@ func writeCertificateAuthority(path string) (tls.Certificate, error) {
 }
 
 type providers struct {
+	dataDirectory     string
 	controlPath       string
 	requestsDirectory string
 	aliases           map[string]string // ChatGPT account ID, or claudeAlias of a Claude access token, to account-N
@@ -200,6 +201,7 @@ type providers struct {
 //	                                Code VERSION or newer; see below
 //	claude-fable-limited account-N  the Claude account's Fable allowance has run out; its other models carry on
 //	claude-refresh-unavailable      Claude login refreshes receive HTTP 503 instead of invalid_grant, with the same message
+//	claude-sign-in-ends SECONDS     Claude login refreshes succeed, and say the sign-in ends SECONDS from now
 //
 // A credit is spent as OpenAI spends one: once, for one redeem_request_id; a
 // repeat of that request is already_redeemed, and any other request for it, or
@@ -267,6 +269,9 @@ type controls struct {
 	claudeGrantMinimum string
 	claudeFableLimited map[string]bool
 	claudeRefresh503   bool
+	// claudeSignInEnds is the refresh_token_expires_in a successful Claude
+	// login refresh carries; zero means refreshes are refused.
+	claudeSignInEnds int64
 }
 
 type fakeCredit struct {
@@ -311,6 +316,12 @@ func (providers *providers) readControls() (controls, error) {
 			parsed.resetTokenCode = true
 		case len(fields) == 1 && fields[0] == "claude-refresh-unavailable":
 			parsed.claudeRefresh503 = true
+		case len(fields) == 2 && fields[0] == "claude-sign-in-ends":
+			seconds, err := strconv.ParseInt(fields[1], 10, 64)
+			if err != nil || seconds <= 0 {
+				return controls{}, fmt.Errorf("invalid control line %q", scanner.Text())
+			}
+			parsed.claudeSignInEnds = seconds
 		case len(fields) == 1 && fields[0] == "token-quoting-failure":
 			parsed.quoteInFailure = true
 		case len(fields) == 1 && fields[0] == "hold-resets":
@@ -1094,6 +1105,16 @@ func (providers *providers) serveAnthropic(writer http.ResponseWriter, request *
 			RefreshToken string `json:"refresh_token"`
 		}
 		_ = json.NewDecoder(request.Body).Decode(&refresh)
+		if controls.claudeSignInEnds > 0 {
+			if accessToken := providers.claudeAccessTokenFor(refresh.RefreshToken); accessToken != "" {
+				// The access token stays the same: Claude requests are told apart by it.
+				providers.logRequest("claude-refresh-granted", request, http.StatusOK)
+				granted, _ := json.Marshal(map[string]any{"token_type": "Bearer", "access_token": accessToken, "refresh_token": refresh.RefreshToken,
+					"expires_in": 28800, "refresh_token_expires_in": controls.claudeSignInEnds})
+				writeJSON(writer, http.StatusOK, granted)
+				return
+			}
+		}
 		status := http.StatusBadRequest
 		if controls.claudeRefresh503 {
 			status = http.StatusServiceUnavailable
@@ -1286,6 +1307,21 @@ func writeClaudeRejection(writer http.ResponseWriter, request *http.Request, lim
 	}
 	body, _ := json.Marshal(map[string]any{"type": "error", "error": map[string]string{"type": "rate_limit_error", "message": message + quotedCredentials(request)}})
 	writeJSON(writer, http.StatusTooManyRequests, body)
+}
+
+// claudeAccessTokenFor finds the stored Claude login that holds refreshToken.
+func (providers *providers) claudeAccessTokenFor(refreshToken string) string {
+	paths, _ := filepath.Glob(filepath.Join(providers.dataDirectory, "account-*", "auth.json"))
+	for _, path := range paths {
+		var auth struct {
+			AccessToken  string `json:"access_token"`
+			RefreshToken string `json:"refresh_token"`
+		}
+		if data, err := os.ReadFile(path); err == nil && json.Unmarshal(data, &auth) == nil && refreshToken != "" && auth.RefreshToken == refreshToken {
+			return auth.AccessToken
+		}
+	}
+	return ""
 }
 
 func loadAccountAliases(dataDirectory string) (map[string]string, error) {

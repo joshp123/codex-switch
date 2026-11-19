@@ -633,6 +633,32 @@ def claude_sign_out_logs_what_anthropic_said(system):
             f'{line.split(" ", 1)[1]}')
 
 
+def status_shows_when_a_claude_sign_in_ends(system):
+    """When Anthropic renews a Claude login, the proxy keeps the end date Anthropic gives the sign-in, and status shows it"""
+    require_available_claude_accounts(1)
+    account = rig.CLAUDE_ACCOUNTS[0]
+    path = rig.RUN / 'data' / account / 'auth.json'
+    four_weeks = 28 * 86400
+    with simulating(system, f'claude-sign-in-ends {four_weeks}'):
+        auth = json.loads(path.read_text())
+        # The stored token runs out, so the proxy must refresh it.
+        auth['expires_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(time.time() - 60))
+        path.with_name('auth.json.next').write_text(json.dumps(auth))
+        os.replace(path.with_name('auth.json.next'), path)
+        renewed_at = time.time()
+        stored = rig.wait_for(lambda: json.loads(path.read_text()).get('sign_in_ends_at'), f'the proxy to store when {account}\'s sign-in ends', timeout=15)
+    ends = datetime.datetime.fromisoformat(re.sub(r'(\.\d{6})\d*', r'\1', stored))
+    if abs(ends.timestamp() - (renewed_at + four_weeks)) > 60:
+        raise Failure(f'Anthropic said the sign-in ends in 28 days; the proxy stored {stored}.')
+    shown = f'sign-in ends {ends.astimezone().strftime("%a %-d %b %Y %H:%M")}'
+    try:
+        status = rig.wait_for(lambda: (lambda text: text if shown in text else None)(rig.proxy_command('status')), f'status to show "{shown}"', timeout=15)
+    except Failure:
+        raise Failure(f'Status did not show "{shown}":\n{rig.proxy_command("status")}')
+    block = next(part for part in status.split('\n\n') if auth['email'] in part)
+    return f'Anthropic renewed {account} and said its sign-in ends in 28 days. The proxy stored {stored}, and status showed:\n{block.strip()}'
+
+
 def require_available_claude_accounts(count):
     """The fake Claude accounts, every one with allowance left."""
     if not rig.CLAUDE:
@@ -1960,6 +1986,7 @@ GROUPS = [
     ('claude-failover', 'cli', [claude_limit_moves_the_task_to_a_free_account]),
     ('claude-limited', 'cli', [claude_limit_reaches_the_client_at_once]),
     ('claude-sign-out', 'cli', [claude_sign_out_logs_what_anthropic_said]),
+    ('claude-sign-in-end', 'cli', [status_shows_when_a_claude_sign_in_ends]),
     ('retire', 'cli', [retiring_proxy_keeps_only_working_connections]),
     ('outage', 'cli', [provider_outage_blocks_neither_restart_nor_release]),
     ('failed-release', 'cli', [failed_release_steps_aside]),

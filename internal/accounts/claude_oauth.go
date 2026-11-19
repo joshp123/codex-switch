@@ -105,6 +105,9 @@ func SignInClaude(dataDirectory string, replacing store.AccountKey) (PoolAccount
 	}
 	value := claudeAuthFile{Provider: ProviderClaude, AccessToken: token.AccessToken, RefreshToken: token.RefreshToken, ExpiresAt: time.Now().Add(time.Duration(token.ExpiresIn) * time.Second),
 		AccountID: token.Account.UUID, OrganizationID: token.Organization.UUID, Email: token.Account.EmailAddress}
+	if token.RefreshTokenExpiresIn > 0 {
+		value.SignInEndsAt = time.Now().Add(time.Duration(token.RefreshTokenExpiresIn) * time.Second)
+	}
 	if err := readClaudeProfile(ctx, client, &value); err != nil {
 		return PoolAccount{}, err
 	}

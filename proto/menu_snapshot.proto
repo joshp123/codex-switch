@@ -61,6 +61,9 @@ message Account {
   // The account takes new work although its included allowance is used up:
   // OpenAI draws its usage credits for it.
   bool draws_credits = 13;
+  // When a Claude sign-in ends and the account must sign in again. Anthropic
+  // sets it when the sign-in is approved; renewals do not move it.
+  google.protobuf.Timestamp sign_in_ends_at = 14;
 }
 enum Provider {
   PROVIDER_UNSPECIFIED = 0;

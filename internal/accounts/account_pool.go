@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/joshp123/codex-switch/internal/store"
 )
@@ -45,6 +46,9 @@ type PoolAccount struct {
 	// as ChatGPT-Account-ID; for Claude it joins the account and organization IDs.
 	AccountID string
 	Email     string
+	// SignInEndsAt is when a Claude sign-in ends and the account must sign in
+	// again; zero when Anthropic has not said.
+	SignInEndsAt time.Time
 }
 
 // ReadPool returns every signed-in account in dataDirectory, ordered by

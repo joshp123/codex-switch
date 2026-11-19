@@ -61,6 +61,7 @@ Before a release, also run the smoke test (see below).
 | claude-failover | When a Claude task's account reaches its usage limit, the task's next prompt is answered by another account and Claude Code shows no limit. |
 | claude-limited | With every Claude account at its usage limit, Claude Code stops at once and says when the limit resets, and the next task gets the same answer from the proxy without a request to Anthropic. |
 | claude-sign-out | When Anthropic refuses to refresh an expired Claude login with a message that quotes the refresh token, the proxy's sign-out line gives Anthropic's HTTP status, error code and message, and the proxy log holds no token. |
+| claude-sign-in-end | When Anthropic renews a Claude login, the proxy stores the date Anthropic gives for the end of that sign-in, and status shows it under the account. |
 | retire | After a candidate slow to start, a retiring proxy still finishes a reply it holds, closes an idle HTTP connection at once and a silent tunnel after its grace. A transferring tunnel keeps going until the switch limit, when the old process has gone. |
 | outage | During a provider outage, launchd restarts a killed proxy, and a failed request is enough to start a waiting update. A candidate that cannot read the accounts stops, and its build is not skipped. |
 | failed-release | Provider errors and client cancellations do not count against a candidate. Malformed upstream responses do: the candidate steps aside and status shows the skipped build. |
