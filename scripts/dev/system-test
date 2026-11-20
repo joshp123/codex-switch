@@ -16,7 +16,9 @@ import contextlib
 import datetime
 import json
 import os
+import plistlib
 import re
+import shlex
 import signal
 import socket
 import subprocess
@@ -1256,6 +1258,96 @@ def queued_releases_install_newest(system):
     return f'The newest build {expected} serves after the queued installers finished; builds never went backwards and at most two proxy processes ran.'
 
 
+def installer_does_not_bind_proxy_to_caller_app(system):
+    """An installer run from another app does not attribute the proxy launchd job to that app's coalition"""
+    status_code, completed = rig.post_without_task_id(system.base, 'Reply with the word warm.')
+    if status_code != 200 or not completed:
+        raise Failure(f'Warmup request failed with HTTP {status_code}.')
+    record_taskless_usage(system, completed)
+
+    old = rig.deploy_status()['pid']
+    host_bundle_id = f'{rig.LABEL}.host'
+    host_app = rig.RUN / 'HostApp.app'
+    macos_dir = host_app / 'Contents' / 'MacOS'
+    macos_dir.mkdir(parents=True)
+    with (host_app / 'Contents' / 'Info.plist').open('wb') as handle:
+        plistlib.dump({
+            'CFBundleExecutable': 'host',
+            'CFBundleIdentifier': host_bundle_id,
+            'CFBundlePackageType': 'APPL',
+            'LSUIElement': True,
+        }, handle)
+
+    install_out = rig.RUN / 'logs/host-install.out'
+    install_err = rig.RUN / 'logs/host-install.err'
+    install_status = rig.RUN / 'logs/host-install.status'
+    env = installer_environment()
+    exports = '\n'.join(
+        f'export {key}={shlex.quote(env[key])}'
+        for key in ('HOME', 'PATH', 'CODEX_SWITCH_LAUNCHD_LABEL', 'CODEX_SWITCH_LISTEN',
+                    'CODEX_SWITCH_PROVING_SECONDS', 'CODEX_SWITCH_SWITCH_LIMIT_SECONDS')
+        if key in env
+    )
+    host_script = macos_dir / 'host'
+    host_script.write_text(
+        '#!/bin/sh\n'
+        f'{exports}\n'
+        f'{shlex.quote(str(rig.REPO / "deploy/install-proxy.sh"))} {shlex.quote(str(rig.RUN / "candidate"))} '
+        f'>{shlex.quote(str(install_out))} 2>{shlex.quote(str(install_err))}\n'
+        'status=$?\n'
+        f'printf "%s\\n" "$status" >{shlex.quote(str(install_status))}.next\n'
+        f'/bin/mv -f {shlex.quote(str(install_status))}.next {shlex.quote(str(install_status))}\n'
+    )
+    host_script.chmod(0o700)
+
+    started = time.strftime('%Y-%m-%d %H:%M:%S')
+    opened = subprocess.run(['/usr/bin/open', '-n', '-g', str(host_app)], capture_output=True, text=True, timeout=15)
+    if opened.returncode:
+        raise Failure(f'Could not launch simulated host app: {opened.stderr}')
+
+    new = wait_for_candidate(old)
+    status_code, completed = rig.post_without_task_id(system.base, 'Reply with the word proved.')
+    if status_code != 200 or not completed:
+        raise Failure(f'Proving request failed with HTTP {status_code}.')
+    record_taskless_usage(system, completed)
+
+    rig.wait_for(install_status.exists, 'the host app installer to finish', timeout=60)
+    if install_status.read_text().strip() != '0':
+        raise Failure(f'Installer inside host app failed: {install_err.read_text()[-400:]}')
+
+    predicate = f'process == "launchd" AND (eventMessage CONTAINS "attributed" OR eventMessage CONTAINS "{rig.LABEL}")'
+    def launchd_log():
+        return subprocess.run(
+            ['/usr/bin/log', 'show', '--start', started, '--predicate', predicate, '--style', 'compact'],
+            capture_output=True, text=True, timeout=15,
+        ).stdout
+
+    rig.wait_for(lambda: f'removing service: application.{host_bundle_id}.' in launchd_log(),
+                 'launchd to record the host app exiting', timeout=15)
+    time.sleep(0.5)
+    logs = launchd_log().splitlines()
+
+    host_removed = next(index for index, line in enumerate(logs) if f'removing service: application.{host_bundle_id}.' in line)
+    attributed_after_host = [line for line in logs[host_removed + 1:] if f'/{rig.LABEL}.' in line and '=>' in line]
+    if attributed_after_host:
+        raise Failure('The proxy job was attributed to the host app coalition:\n' + '\n'.join(attributed_after_host))
+
+    bootstrap_removed = any(f'removing service: application.{rig.LABEL}.bootstrap.' in line for line in logs)
+    attributed_to_bootstrap = [line for line in logs[:host_removed] if f'/{rig.LABEL}.' in line and '=>' in line]
+    if not bootstrap_removed or not attributed_to_bootstrap:
+        raise Failure('Expected launchd to attribute the proxy job to CodexSwitchBootstrap.app, saw:\n' + '\n'.join(logs[-20:]))
+
+    serving = rig.deploy_status()
+    if not serving or serving['pid'] != new:
+        raise Failure(f'After the host app exited, expected process {new} to keep serving; deploy-status reported {serving!r}.')
+    status_code, completed = rig.post_without_task_id(system.base, 'Reply with the word alive.')
+    if status_code != 200 or not completed:
+        raise Failure(f'Post-exit request failed with HTTP {status_code}.')
+    record_taskless_usage(system, completed)
+    return (f'The installer ran inside a simulated host app; launchd attributed process {new} to {rig.LABEL}.bootstrap,\n'
+            f'not the host app, and the proxy kept serving after the host app exited.')
+
+
 def every_response_recorded_once(system):
     """Each completed response is recorded once, with its account, task and tokens"""
     problems, total = [], 0
@@ -1312,15 +1404,14 @@ def reset_command(build, *args):
 
 def reset_credits():
     """One credit on each Codex account. account-2's expires first, but account-3 refills last (System.resets), so it has
-    the most of its week left: this build spends account-3's credit, and the published release, which took the credit
-    that expires first, spent account-2's."""
+    the most of its week left: both this build and the published release (v0.1.11+) spend account-3's credit."""
     now = int(time.time())
     return [f'credit account-1 credit-account-1 {now + 3 * DAY}', f'credit account-2 credit-account-2 {now + 2 * DAY}',
             f'credit account-3 credit-account-3 {now + 4 * DAY}']
 
 
 # The credit each build spends from reset_credits when every account is out.
-CHOSEN_CREDIT = {'cli': ('account-3', 'credit-account-3'), 'published-release': ('account-2', 'credit-account-2')}
+CHOSEN_CREDIT = {'cli': ('account-3', 'credit-account-3'), 'published-release': ('account-3', 'credit-account-3')}
 
 
 def lose_a_reset_and_retry(system, lost_by, retried_by):
@@ -1381,10 +1472,11 @@ def stored_resets(system):
         raise Failure('A retry spent a credit after another account could work again.')
     lose_a_reset_and_retry(system, lost_by='published-release', retried_by='cli')
     # A reset account has used nothing.
-    rig.wait_for(lambda: rig.usage_reads('account-2', 0), 'the proxy to observe the reset account')
+    reset_account = CHOSEN_CREDIT['published-release'][0]
+    rig.wait_for(lambda: rig.usage_reads(reset_account, 0), 'the proxy to observe the reset account')
     task = rig.CodexTask('reset-resumed-work', 'Reply with the word resumed.').finish()
     system.record_codex_task('work after reset', task.thread)
-    if rig.pinned_account(task.thread) != 'account-2':
+    if rig.pinned_account(task.thread) != reset_account:
         raise Failure(f'Work after the reset used {rig.pinned_account(task.thread)}, not the reset account.')
     return 'Status listed each Codex account\'s reset with its expiry; available and near-reset pools spent none. A refused redemption spent nothing once another account could work. This build retried the response the published release lost with the same request ID, and work resumed on that account.'
 
@@ -1991,6 +2083,7 @@ GROUPS = [
     ('outage', 'cli', [provider_outage_blocks_neither_restart_nor_release]),
     ('failed-release', 'cli', [failed_release_steps_aside]),
     ('queue', 'cli', [queued_releases_install_newest]),
+    ('installer-coalition', 'cli', [installer_does_not_bind_proxy_to_caller_app]),
 ]
 
 if __name__ == '__main__':

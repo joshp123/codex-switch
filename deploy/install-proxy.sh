@@ -64,6 +64,47 @@ job_pid() { /bin/launchctl print "$domain/$1" 2>/dev/null | /usr/bin/awk '$1 == 
 job_loaded() { /bin/launchctl print "$domain/$1" >/dev/null 2>&1; }
 slot_plist() { printf '%s/Library/LaunchAgents/%s.%s.plist' "$HOME" "$label" "$1"; }
 slot_binary() { printf '%s.%s' "$binary" "$1"; }
+# Bootstrap through a tiny background-only app bundle so launchd attributes the
+# proxy job to that helper's coalition rather than the caller (such as an IDE
+# or terminal). Otherwise force-quitting the caller removes the proxy job.
+bootstrap_job() {
+  bootstrap_plist=$1
+  bootstrap_app="$(dirname "$binary")/CodexSwitchBootstrap.app"
+  /bin/mkdir -p -m 700 "$bootstrap_app/Contents/MacOS"
+  bootstrap_info="$bootstrap_app/Contents/Info.plist"
+  /bin/rm -f "$bootstrap_info.next"
+  /usr/bin/plutil -create xml1 "$bootstrap_info.next"
+  /usr/bin/plutil -insert CFBundleExecutable -string bootstrap "$bootstrap_info.next"
+  /usr/bin/plutil -insert CFBundleIdentifier -string "$label.bootstrap" "$bootstrap_info.next"
+  /usr/bin/plutil -insert CFBundlePackageType -string APPL "$bootstrap_info.next"
+  /usr/bin/plutil -insert LSBackgroundOnly -bool true "$bootstrap_info.next"
+  /bin/mv -f "$bootstrap_info.next" "$bootstrap_info"
+  bootstrap_script="$bootstrap_app/Contents/MacOS/bootstrap"
+  cat > "$bootstrap_script.next" <<'EOF'
+#!/bin/sh
+/bin/launchctl bootstrap "$1" "$2" >"$3" 2>&1
+status=$?
+printf '%s\n' "$status" >"$4.next"
+/bin/mv -f "$4.next" "$4"
+EOF
+  /bin/chmod 700 "$bootstrap_script.next"
+  /bin/mv -f "$bootstrap_script.next" "$bootstrap_script"
+  bootstrap_output="$workspace/bootstrap.out"
+  bootstrap_status="$workspace/bootstrap.status"
+  /bin/rm -f "$bootstrap_output" "$bootstrap_status" "$bootstrap_status.next"
+  /usr/bin/open -n -g "$bootstrap_app" --args "$domain" "$bootstrap_plist" "$bootstrap_output" "$bootstrap_status"
+  bootstrap_waited=0
+  while [ ! -f "$bootstrap_status" ]; do
+    bootstrap_waited=$((bootstrap_waited + 1))
+    if [ "$bootstrap_waited" -ge 600 ]; then
+      echo "proxy bootstrap helper did not report a status" >&2
+      return 1
+    fi
+    /bin/sleep 0.05
+  done
+  if [ -s "$bootstrap_output" ]; then /bin/cat "$bootstrap_output" >&2; fi
+  return "$(cat "$bootstrap_status")"
+}
 stop_job() {
   stop_label=$1
   stop_binary=$2
@@ -122,7 +163,7 @@ if [ "$active" != legacy ] && [ "$active" != none ]; then
 fi
 [ ! -e "$data/switch-started" ] || /usr/bin/trash "$data/switch-started"
 if [ "$active" != none ] && ! job_loaded "$active_label"; then
-  /bin/launchctl bootstrap "$domain" "$active_plist"
+  bootstrap_job "$active_plist"
 fi
 if [ "$active" != none ]; then
   /bin/mkdir -p "$(dirname "$command_link")"
@@ -230,7 +271,7 @@ else
 fi
 switch_started=$(/bin/date +%s)
 printf '%s\n' "$switch_started" > "$data/switch-started"
-/bin/launchctl bootstrap "$domain" "$temporary_plist"
+bootstrap_job "$temporary_plist"
 readiness_result=0
 wait_for_job "$next_label" true || readiness_result=$?
 if [ "$readiness_result" -ne 0 ]; then

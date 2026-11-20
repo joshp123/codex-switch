@@ -872,8 +872,10 @@ func (providers *providers) conversationFor(request codexRequest) conversation {
 	}
 	for _, raw := range request.Input {
 		var item struct {
-			Type    string `json:"type"`
-			Role    string `json:"role"`
+			Type    string          `json:"type"`
+			Role    string          `json:"role"`
+			Name    string          `json:"name"`
+			Output  json.RawMessage `json:"output"`
 			Content []struct {
 				Text string `json:"text"`
 			} `json:"content"`
@@ -890,10 +892,17 @@ func (providers *providers) conversationFor(request codexRequest) conversation {
 			lines := scriptLines(text.String())
 			switch {
 			case lines != "" && lines != current.script:
-				current.prompt, current.script, current.results = text.String(), lines, 0
+				current.prompt, current.script, current.results = lines, lines, 0
 			case lines == "" && current.script == "" && (replyWithWord.MatchString(text.String()) || !replyWithWord.MatchString(current.prompt)):
 				// Codex sends instructions and context as user messages too.
 				current.prompt = text.String()
+			}
+		case item.Type == "function_call_output" && item.Name == "goal_objective":
+			var goalOutput string
+			if json.Unmarshal(item.Output, &goalOutput) == nil {
+				if lines := scriptLines(goalOutput); lines != "" && lines != current.script {
+					current.prompt, current.script, current.results = lines, lines, 0
+				}
 			}
 		case strings.HasSuffix(item.Type, "_call_output"):
 			current.results++
@@ -904,13 +913,55 @@ func (providers *providers) conversationFor(request codexRequest) conversation {
 
 func scriptLines(text string) string {
 	var lines []string
-	for _, line := range strings.Split(text, "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "RUN: ") || strings.HasPrefix(line, "REPLY: ") || line == "GOAL COMPLETE" {
-			lines = append(lines, line)
+	appendLines := func(block string) {
+		for _, line := range strings.Split(block, "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "RUN: ") || strings.HasPrefix(line, "REPLY: ") || line == "GOAL COMPLETE" {
+				lines = append(lines, line)
+			}
 		}
 	}
+	for _, line := range strings.Split(text, "\n") {
+		if _, quoted, ok := strings.Cut(line, "User set the goal: "); ok {
+			if objective, ok := unquoteRustDebug(strings.TrimSpace(quoted)); ok {
+				appendLines(objective)
+				continue
+			}
+		}
+		appendLines(line)
+	}
 	return strings.Join(lines, "\n")
+}
+
+// unquoteRustDebug decodes Rust's Debug-formatted string literal (as Codex
+// formats goal objectives), which escapes single quotes as \' in addition to
+// JSON escapes.
+func unquoteRustDebug(quoted string) (string, bool) {
+	if len(quoted) < 2 || quoted[0] != '"' || quoted[len(quoted)-1] != '"' {
+		return "", false
+	}
+	var out strings.Builder
+	for i := 1; i < len(quoted)-1; i++ {
+		if quoted[i] != '\\' || i+1 >= len(quoted)-1 {
+			out.WriteByte(quoted[i])
+			continue
+		}
+		i++
+		switch quoted[i] {
+		case 'n':
+			out.WriteByte('\n')
+		case 'r':
+			out.WriteByte('\r')
+		case 't':
+			out.WriteByte('\t')
+		case '\\', '"', '\'':
+			out.WriteByte(quoted[i])
+		default:
+			out.WriteByte('\\')
+			out.WriteByte(quoted[i])
+		}
+	}
+	return out.String(), true
 }
 
 // codexOutputItem is the model's output for one step. gpt-6-luna's catalogue

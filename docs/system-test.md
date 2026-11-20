@@ -66,6 +66,7 @@ Before a release, also run the smoke test (see below).
 | outage | During a provider outage, launchd restarts a killed proxy, and a failed request is enough to start a waiting update. A candidate that cannot read the accounts stops, and its build is not skipped. |
 | failed-release | Provider errors and client cancellations do not count against a candidate. Malformed upstream responses do: the candidate steps aside and status shows the skipped build. |
 | queue | Two releases queued during a switch converge on the newest, with at most two proxy processes and no downgrade. |
+| installer-coalition | An installer run from another app attributes the proxy launchd job to its background-only bootstrap helper rather than the caller app's coalition, and the proxy stays running after the caller app exits. |
 | every group | Each completed response is recorded once, with its account, task and tokens. |
 | every group | No proxy log or launchd output holds any part of a credential in the run's logins: 16 characters of one in a row. Lines the published releases wrote, which predate this check, are left out. |
 
