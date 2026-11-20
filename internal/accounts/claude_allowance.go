@@ -377,7 +377,8 @@ func claudeLimitClaimEndingAt(fact AccountRoutingFact, model string, reset time.
 			continue
 		}
 		ending = append(ending, window)
-		if claudeWindowAtLimit(window) || (fact.Reserve.HardPercent > 0 && window.UsedPercent >= float64(100-fact.Reserve.HardPercent)) {
+		accountWide := window.ModelID == "" && window.ModelName == ""
+		if claudeWindowAtLimit(window) || (accountWide && fact.Reserve.HardPercent > 0 && window.UsedPercent >= float64(100-fact.Reserve.HardPercent)) {
 			holding = append(holding, window)
 		}
 	}

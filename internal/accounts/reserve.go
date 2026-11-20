@@ -71,8 +71,9 @@ func SetAccountReserve(dataDirectory, target string, reserve AccountReserve) (Po
 	return selected, err
 }
 
-// ReserveUnavailableReason applies to the whole account, including windows
-// specific to another model. Expired windows no longer hold the account back.
+// ReserveUnavailableReason applies to the account's overall allowance windows
+// (5-hour and weekly), not model-specific sub-limits such as Fable. Expired
+// windows no longer hold the account back.
 func ReserveUnavailableReason(fact AccountRoutingFact, now time.Time) string {
 	if reserveReached(fact, fact.Reserve.HardPercent, now) {
 		return fmt.Sprintf("held back · %d%% reserve", fact.Reserve.HardPercent)
@@ -99,6 +100,9 @@ func reserveReached(fact AccountRoutingFact, percent int, now time.Time) bool {
 		return false
 	}
 	for _, window := range fact.AllowanceSample.Windows {
+		if window.ModelID != "" || window.ModelName != "" {
+			continue
+		}
 		if window.ResetsAt.After(now) && window.UsedPercent >= float64(100-percent) {
 			return true
 		}
