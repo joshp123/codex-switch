@@ -12,20 +12,34 @@ private let snapshotLogger = Logger(
 @MainActor
 @Observable
 final class OverviewStore {
+    enum ConnectionState: Equatable, Sendable {
+        case starting
+        case connected(version: String, confirmedAt: Date?)
+        case disconnected
+
+        var isConnected: Bool {
+            if case .connected = self { return true }
+            return false
+        }
+    }
+
     private(set) var latestOverview: OverviewSnapshot?
+    private(set) var connectionState: ConnectionState = .starting
     var latestSnapshot: CSSwitch_MenuSnapshot? { latestOverview?.menuSnapshot }
     /// When the proxy last confirmed the snapshot the menu shows.
     var lastUpdatedAt: Date? {
         guard let composedAt = latestSnapshot?.generatedAt.date else { return nil }
-        return max(composedAt, confirmedAt ?? composedAt)
+        if case let .connected(_, confirmedAt?) = connectionState {
+            return max(composedAt, confirmedAt)
+        }
+        return composedAt
     }
-    private var confirmedAt: Date?
     private(set) var isRefreshing = false
-    private(set) var currentCheckSucceeded = false
+    var currentCheckSucceeded: Bool { connectionState.isConnected }
 
     private var activeRefreshTask: Task<Void, Never>?
-    /// The version of the snapshot shown, which the proxy is asked to improve on.
-    private var version: String?
+    private var nextRequestSequence: UInt64 = 0
+    private var appliedRequestSequence: UInt64 = 0
     private let client: any SnapshotLoading
     private let cacheFile: URL
 
@@ -59,18 +73,27 @@ final class OverviewStore {
     /// Waits until the proxy has a newer snapshot, or confirms the one shown is
     /// current, and takes it. Returns false when the proxy could not be reached.
     func waitForChange() async -> Bool {
-        await fetch(after: version)
+        let shownVersion: String? = if case let .connected(version, _) = connectionState, !version.isEmpty {
+            version
+        } else {
+            nil
+        }
+        return await fetch(after: shownVersion)
     }
 
     private func fetch(after shownVersion: String?) async -> Bool {
+        nextRequestSequence &+= 1
+        let sequence = nextRequestSequence
+
         let data: Data
         let latestVersion: String
         let snapshot: CSSwitch_MenuSnapshot
         do {
             switch try await client.loadSnapshot(after: shownVersion) {
             case let .current(confirmedAt):
-                if !currentCheckSucceeded { currentCheckSucceeded = true }
-                self.confirmedAt = confirmedAt
+                guard sequence >= appliedRequestSequence else { return true }
+                appliedRequestSequence = sequence
+                connectionState = .connected(version: shownVersion ?? "", confirmedAt: confirmedAt)
                 return true
             case let .changed(changedData, changedVersion):
                 data = changedData
@@ -80,14 +103,16 @@ final class OverviewStore {
         } catch is CancellationError {
             return true
         } catch {
-            currentCheckSucceeded = false
+            guard sequence >= appliedRequestSequence else { return currentCheckSucceeded }
+            appliedRequestSequence = sequence
+            connectionState = .disconnected
             snapshotLogger.error("Menu snapshot fetch failed: \(String(describing: error), privacy: .public)")
             return false
         }
 
-        if !currentCheckSucceeded { currentCheckSucceeded = true }
-        version = latestVersion
-        confirmedAt = nil
+        guard sequence >= appliedRequestSequence else { return true }
+        appliedRequestSequence = sequence
+        connectionState = .connected(version: latestVersion, confirmedAt: nil)
         latestOverview = OverviewSnapshot(menuSnapshot: snapshot)
         do {
             try FileManager.default.createDirectory(

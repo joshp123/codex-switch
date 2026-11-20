@@ -108,7 +108,7 @@ struct CodexSwitchPanel: View {
                                 expanded: $topTasksExpanded
                             )
                         } else {
-                            EmptyPanelState()
+                            EmptyPanelState(connectionState: store.connectionState)
                         }
                     }
                     .padding(.horizontal, UsageTheme.outerInset)
@@ -138,13 +138,12 @@ struct CodexSwitchPanel: View {
                 ))
                 .onPreferenceChange(PanelContentHeightKey.self) { height in
                     contentHeight = height
-                    // Measured at regular density; fall back to compact only when the pool itself overflows.
-                    // A point short of the screen counts as not fitting, so the panel never sits exactly on the limit.
-                    if density == .regular, !topTasksExpanded, height >= maximumHeight - PanelSizing.footerHeight - 1 {
-                        density = .compact
-                    }
+                    updateDensity()
                 }
-                .onPreferenceChange(PanelHeightAboveTasksKey.self) { heightAboveTasks = $0 }
+                .onPreferenceChange(PanelHeightAboveTasksKey.self) { height in
+                    heightAboveTasks = height
+                    updateDensity()
+                }
                 .onChange(of: selectedPeriod) { _, _ in
                     scrollProxy.scrollTo(PanelScrollAnchor.top, anchor: .top)
                 }
@@ -166,6 +165,21 @@ struct CodexSwitchPanel: View {
                overview.supports(.tokens, period: selectedPeriod) {
                 selectedMetric = .tokens
             }
+        }
+    }
+
+    /// Measured at regular density; fall back to compact only when the pool itself overflows.
+    /// A point short of the screen counts as not fitting, so the panel never sits exactly on the limit.
+    private func updateDensity() {
+        guard density == .regular else { return }
+        let limit = maximumHeight - PanelSizing.footerHeight - 1
+        let poolHeight = topTasksExpanded
+            ? (heightAboveTasks > 0
+                ? heightAboveTasks + Self.topInset + Self.bottomInset + density.sectionGap + RoutedTasksSection.height(rows: 0, density: density)
+                : 0)
+            : contentHeight
+        if poolHeight >= limit {
+            density = .compact
         }
     }
 }
@@ -210,10 +224,23 @@ private struct PanelHeightAboveTasksKey: PreferenceKey {
 }
 
 private struct EmptyPanelState: View {
+    let connectionState: OverviewStore.ConnectionState
+
     var body: some View {
-        ProgressView()
-            .controlSize(.small)
+        switch connectionState {
+        case .disconnected:
+            HStack(spacing: 6) {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.secondary)
+                Text("Not connected")
+            }
+            .font(UsageTheme.detailEmphasisFont)
             .frame(maxWidth: .infinity, minHeight: 80)
+        case .starting, .connected:
+            ProgressView()
+                .controlSize(.small)
+                .frame(maxWidth: .infinity, minHeight: 80)
+        }
     }
 }
 

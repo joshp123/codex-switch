@@ -15,27 +15,35 @@ private final class MenuBarPanel: NSPanel {
 
 @MainActor
 final class StatusBarController: NSObject {
+    private enum PanelState {
+        case closed
+        case open(anchorTopLeft: NSPoint, eventMonitors: [Any], refreshTask: Task<Void, Never>)
+    }
+
     private let store: OverviewStore
     private let updates: UpdateController?
+    private let onProxyUnreachable: (() -> Void)?
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let panel: MenuBarPanel
     private let panelController: NSHostingController<CodexSwitchPanel>
     private let closedPanelStore = OverviewStore(client: ClosedPanelSnapshots(), cacheFile: URL(filePath: "/dev/null"))
     private var refreshTask: Task<Void, Never>?
-    private var eventMonitors: [Any] = []
+    private var panelState: PanelState = .closed
     private var resizeObserver: NSObjectProtocol?
-    /// Where the panel's top-left corner sits while it is shown, so it grows
-    /// downward when its content changes height.
-    private var anchorTopLeft: NSPoint = .zero
     /// What the status item shows now; it is drawn again only when this changes.
     private var shownValues: [MenuBarAccountValue]?
 
     /// Space between the menu bar and the panel, and between the panel and the screen's edges.
     private static let screenMargin: CGFloat = 6
 
-    init(store: OverviewStore, updates: UpdateController? = nil) {
+    init(
+        store: OverviewStore,
+        updates: UpdateController? = nil,
+        onProxyUnreachable: (() -> Void)? = nil
+    ) {
         self.store = store
         self.updates = updates
+        self.onProxyUnreachable = onProxyUnreachable
         panelController = NSHostingController(
             rootView: CodexSwitchPanel(
                 store: closedPanelStore,
@@ -93,10 +101,20 @@ final class StatusBarController: NSObject {
         // The proxy answers when its snapshot changes, so the menu does
         // nothing while nothing changes.
         refreshTask = Task { [weak self] in
+            var consecutiveFailures = 0
             await self?.store.refresh()
+            if let self, !self.store.currentCheckSucceeded {
+                consecutiveFailures = 1
+            }
             self?.updateStatusItem()
             while let self, !Task.isCancelled {
-                if !(await self.store.waitForChange()) {
+                if await self.store.waitForChange() {
+                    consecutiveFailures = 0
+                } else {
+                    consecutiveFailures += 1
+                    if consecutiveFailures >= 2 {
+                        self.onProxyUnreachable?()
+                    }
                     try? await Task.sleep(for: .seconds(5))
                 }
                 self.updateStatusItem()
@@ -107,21 +125,21 @@ final class StatusBarController: NSObject {
     func stop() {
         refreshTask?.cancel()
         refreshTask = nil
+        if let resizeObserver {
+            NotificationCenter.default.removeObserver(resizeObserver)
+            self.resizeObserver = nil
+        }
         store.cancelRefresh()
         closePanel()
     }
 
     @objc private func togglePanel() {
         guard statusItem.button != nil else { return }
-        if panel.isVisible {
+        switch panelState {
+        case .open:
             closePanel()
-        } else {
+        case .closed:
             showPanel()
-            Task { [weak self] in
-                guard let self else { return }
-                await self.store.refresh()
-                self.updateStatusItem()
-            }
         }
     }
 
@@ -129,6 +147,10 @@ final class StatusBarController: NSObject {
     /// kept inside the screen when the item sits near its edge.
     func showPanel() {
         guard let button = statusItem.button, let buttonWindow = button.window else { return }
+        if case let .open(_, existingMonitors, existingRefreshTask) = panelState {
+            for monitor in existingMonitors { NSEvent.removeMonitor(monitor) }
+            existingRefreshTask.cancel()
+        }
         let screen = buttonWindow.screen ?? NSScreen.main
         let visibleFrame = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1_512, height: 945)
         let buttonFrame = buttonWindow.convertToScreen(button.convert(button.bounds, to: nil))
@@ -141,21 +163,31 @@ final class StatusBarController: NSObject {
         let width = min(size.width, visibleFrame.width - 2 * Self.screenMargin)
         let x = min(max(buttonFrame.midX - width / 2, visibleFrame.minX + Self.screenMargin),
                     visibleFrame.maxX - width - Self.screenMargin)
-        anchorTopLeft = NSPoint(x: x, y: top)
+        let anchorTopLeft = NSPoint(x: x, y: top)
         panel.setFrame(NSRect(x: anchorTopLeft.x, y: anchorTopLeft.y - size.height, width: width, height: size.height),
                        display: false)
         panel.makeKeyAndOrderFront(nil)
-        startDismissMonitors()
+        let monitors = makeDismissMonitors()
+        let openRefreshTask = Task { [weak self] in
+            guard let self else { return }
+            await self.store.refresh()
+            self.updateStatusItem()
+        }
+        panelState = .open(anchorTopLeft: anchorTopLeft, eventMonitors: monitors, refreshTask: openRefreshTask)
     }
 
     private func closePanel() {
-        stopDismissMonitors()
+        if case let .open(_, eventMonitors, openRefreshTask) = panelState {
+            for monitor in eventMonitors { NSEvent.removeMonitor(monitor) }
+            openRefreshTask.cancel()
+        }
+        panelState = .closed
         panel.orderOut(nil)
         panelController.rootView = CodexSwitchPanel(store: closedPanelStore, maximumHeight: panelController.rootView.maximumHeight, updates: updates)
     }
 
     private func keepAnchored() {
-        guard panel.isVisible else { return }
+        guard case let .open(anchorTopLeft, _, _) = panelState, panel.isVisible else { return }
         let frame = panel.frame
         let anchored = NSRect(x: anchorTopLeft.x, y: anchorTopLeft.y - frame.height, width: frame.width, height: frame.height)
         if anchored != frame { panel.setFrame(anchored, display: true) }
@@ -164,8 +196,8 @@ final class StatusBarController: NSObject {
     /// A click anywhere outside the panel, other than on the status item
     /// (whose own action toggles) or in one of the panel's own menus, or
     /// Escape, closes it.
-    private func startDismissMonitors() {
-        stopDismissMonitors()
+    private func makeDismissMonitors() -> [Any] {
+        var monitors: [Any] = []
         let clicks: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
         if let local = NSEvent.addLocalMonitorForEvents(matching: clicks.union(.keyDown), handler: { [weak self] event in
             let isEscape = event.type == .keyDown && event.keyCode == 53
@@ -179,18 +211,14 @@ final class StatusBarController: NSObject {
             }
             return isEscape ? nil : event
         }) {
-            eventMonitors.append(local)
+            monitors.append(local)
         }
         if let global = NSEvent.addGlobalMonitorForEvents(matching: clicks, handler: { [weak self] _ in
             Task { @MainActor [weak self] in self?.closePanel() }
         }) {
-            eventMonitors.append(global)
+            monitors.append(global)
         }
-    }
-
-    private func stopDismissMonitors() {
-        for monitor in eventMonitors { NSEvent.removeMonitor(monitor) }
-        eventMonitors = []
+        return monitors
     }
 
     private func updateStatusItem() {

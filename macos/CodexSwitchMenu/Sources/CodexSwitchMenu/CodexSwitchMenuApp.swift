@@ -48,9 +48,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") != nil {
             updates = UpdateController()
         }
-        statusBarController = StatusBarController(store: store, updates: updates)
-        if launchConfiguration.usesManagedDataDirectory,
-           Bundle.main.object(forInfoDictionaryKey: "CSManagesProxy") as? Bool == true {
+        let managesProxy = launchConfiguration.usesManagedDataDirectory &&
+            Bundle.main.object(forInfoDictionaryKey: "CSManagesProxy") as? Bool == true
+        statusBarController = StatusBarController(
+            store: store,
+            updates: updates,
+            onProxyUnreachable: managesProxy ? { [weak self] in self?.proxyInstallation.recoverIfNeeded() } : nil
+        )
+        if managesProxy {
             proxyInstallation.start(
                 dataDirectory: launchConfiguration.dataDirectory,
                 environment: launchConfiguration.installationEnvironment
@@ -82,6 +87,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        proxyInstallation.stop()
         statusBarController?.stop()
     }
 }
