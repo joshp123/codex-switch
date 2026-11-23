@@ -77,6 +77,7 @@ type RelayHandlerOptions struct {
 	HTTPTransport        http.RoundTripper
 	OnFailure            func()
 	OnModelRequest       func()
+	OnCompletedReply     func()
 }
 
 // TrafficRelayHandler stays alive with admitted streams so deployment does not cut off model work.
@@ -101,6 +102,7 @@ type TrafficRelayHandler struct {
 	stopping              chan struct{}
 	onFailure             func()
 	onModelRequest        func()
+	onCompletedReply      func()
 	wsModelMutex          sync.Mutex
 	pendingWebSocketModel map[store.TaskID]string
 }
@@ -149,6 +151,7 @@ func CreateTrafficRelayHandler(options RelayHandlerOptions) (*TrafficRelayHandle
 		stopping:              make(chan struct{}),
 		onFailure:             options.OnFailure,
 		onModelRequest:        options.OnModelRequest,
+		onCompletedReply:      options.OnCompletedReply,
 		pendingWebSocketModel: make(map[store.TaskID]string),
 	}
 	relayHandler.reverseProxy = relayHandler.createBytePreservingReverseProxy()
@@ -332,6 +335,7 @@ func (handler *TrafficRelayHandler) serveAuthenticatedTraffic(response http.Resp
 			}
 		}
 		observer.onModelRequest = handler.onModelRequest
+		observer.onCompletedReply = handler.onCompletedReply
 		observer.onWebSocketWait = handler.rememberPendingWebSocketModel
 		routedRequest.responseObserver = observer
 		if request.Method == http.MethodPost {

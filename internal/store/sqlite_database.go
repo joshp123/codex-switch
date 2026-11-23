@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -22,7 +23,11 @@ type StoreDatabase struct {
 func OpenStoreDatabase(databasePath string) (*StoreDatabase, error) {
 	dsn := databasePath
 	if dsn != ":memory:" && !strings.HasPrefix(dsn, "file:") {
-		dsn = (&url.URL{Scheme: "file", Path: databasePath, RawQuery: "_pragma=busy_timeout(5000)"}).String()
+		if absPath, absErr := filepath.Abs(databasePath); absErr == nil {
+			dsn = (&url.URL{Scheme: "file", Path: absPath, RawQuery: "_pragma=busy_timeout(5000)"}).String()
+		} else {
+			dsn = (&url.URL{Scheme: "file", Opaque: databasePath, RawQuery: "_pragma=busy_timeout(5000)"}).String()
+		}
 	}
 	sqlDatabase, err := sql.Open("sqlite", dsn)
 	if err != nil {

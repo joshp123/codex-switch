@@ -177,10 +177,11 @@ func serveRelay(tcpListenAddress string) {
 		CacheAffinity:        storeDatabase,
 		ClientCapability:     capability,
 		TaskRouter:           taskRouter,
-		CompletionLedger:     composeAfterCompletedResponse{ledger: storeDatabase, snapshots: snapshots, activity: activity},
+		CompletionLedger:     composeAfterCompletedResponse{ledger: storeDatabase, snapshots: snapshots},
 		RequestCounters:      storeDatabase,
 		OnFailure:            func() { activity.failures.Add(1) },
 		OnModelRequest:       func() { activity.lastRequest.Store(time.Now().UnixNano()) },
+		OnCompletedReply:     func() { activity.lastCompleted.Store(time.Now().UnixNano()) },
 	})
 	if err != nil {
 		log.Fatal(err)

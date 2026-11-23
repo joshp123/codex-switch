@@ -157,11 +157,15 @@ func (m *GeminiUsageMonitor) storeAccounts(accounts []GeminiAccountUsage) {
 type geminiAuthSource struct {
 	email     string
 	tokenPath string // empty for native $HOME/.gemini/antigravity-cli
+	fallback  string // distinct key suffix when email is empty
 }
 
 func (s geminiAuthSource) label() string {
 	if s.email != "" {
 		return s.email
+	}
+	if s.fallback != "" {
+		return s.fallback
 	}
 	return "local"
 }
@@ -169,6 +173,9 @@ func (s geminiAuthSource) label() string {
 func (s geminiAuthSource) key() store.AccountKey {
 	if s.email != "" {
 		return AccountKeyFor(ProviderGemini, s.email)
+	}
+	if s.fallback != "" {
+		return store.AccountKey("gemini:" + s.fallback)
 	}
 	return store.AccountKey("gemini:local")
 }
@@ -179,17 +186,27 @@ func discoverGeminiSources(homeDir string) []geminiAuthSource {
 	}
 	var sources []geminiAuthSource
 	seenEmails := map[string]bool{}
+	unnamedCount := 0
 	add := func(email, tokenPath string) {
 		normalized := strings.ToLower(strings.TrimSpace(email))
+		fallback := ""
 		if normalized != "" {
 			if seenEmails[normalized] {
 				return
 			}
 			seenEmails[normalized] = true
+		} else {
+			unnamedCount++
+			if unnamedCount == 1 {
+				fallback = "local"
+			} else {
+				fallback = fmt.Sprintf("local-%d", unnamedCount)
+			}
 		}
 		sources = append(sources, geminiAuthSource{
 			email:     strings.TrimSpace(email),
 			tokenPath: tokenPath,
+			fallback:  fallback,
 		})
 	}
 
@@ -341,21 +358,14 @@ func runAgyUsageCLI(parent context.Context, agyBin, tokenPath string) ([]byte, e
 		return nil, fmt.Errorf("start agy: %w", err)
 	}
 	waitErr := cmd.Wait()
-	if ctx.Err() != nil && cmd.Process != nil {
-		// Reap any child that was mid-fork when the first SIGKILL hit the process group.
+	if cmd.Process != nil {
+		// Unconditionally reap any child still alive in the process group after Wait returns.
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 	if authRequired.Load() {
 		return nil, errGeminiAuthRequired
 	}
 	if waitErr != nil {
-		detail := strings.TrimSpace(stderrBuf.String())
-		if detail == "" {
-			detail = strings.TrimSpace(stdoutBuf.String())
-		}
-		if detail != "" {
-			return nil, fmt.Errorf("agy /usage failed: %w: %s", waitErr, detail)
-		}
 		return nil, fmt.Errorf("agy /usage failed: %w", waitErr)
 	}
 	return stdoutBuf.Bytes(), nil
@@ -415,11 +425,11 @@ type agyUsageGroup struct {
 }
 
 type agyUsageBucket struct {
-	ID                string  `json:"id"`
-	Name              string  `json:"name"`
-	Window            string  `json:"window"`
-	RemainingFraction float64 `json:"remaining_fraction"`
-	ResetTime         string  `json:"reset_time"`
+	ID                string   `json:"id"`
+	Name              string   `json:"name"`
+	Window            string   `json:"window"`
+	RemainingFraction *float64 `json:"remaining_fraction"`
+	ResetTime         string   `json:"reset_time"`
 }
 
 func parseAgyUsageJSON(raw []byte, observedAt time.Time) (AllowanceSample, error) {
@@ -441,14 +451,14 @@ func parseAgyUsageJSON(raw []byte, observedAt time.Time) (AllowanceSample, error
 		modelID, modelName := geminiGroupIdentity(group.Name)
 		for _, bucket := range group.Buckets {
 			period := geminiWindowDuration(bucket.Window)
-			if period <= 0 {
+			if period <= 0 || bucket.RemainingFraction == nil || math.IsNaN(*bucket.RemainingFraction) || math.IsInf(*bucket.RemainingFraction, 0) {
 				continue
 			}
 			resetAt, err := parseGeminiResetTime(bucket.ResetTime)
 			if err != nil || resetAt.IsZero() {
 				continue
 			}
-			usedPercent := math.Min(100, math.Max(0, (1-bucket.RemainingFraction)*100))
+			usedPercent := math.Min(100, math.Max(0, (1-*bucket.RemainingFraction)*100))
 			bModelID, bModelName := modelID, modelName
 			if strings.HasPrefix(bucket.ID, "gemini-") {
 				bModelID, bModelName = "", ""

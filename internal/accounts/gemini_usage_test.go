@@ -162,3 +162,14 @@ func TestFindAgyExecutableDisabled(t *testing.T) {
 		t.Fatalf("findAgyExecutable = %q, want empty when disabled", got)
 	}
 }
+
+func TestParseAgyUsageJSONSkipsMissingRemainingFraction(t *testing.T) {
+	raw := []byte(`{"status":"SUCCESS","command":{"name":"usage","data":{"groups":[{"name":"Gemini Models","buckets":[{"id":"gemini-weekly","window":"weekly","reset_time":"2026-11-28T10:51:44Z"},{"id":"gemini-5h","window":"5h","remaining_fraction":0.75,"reset_time":"2026-11-23T14:24:30Z"}]}]}}}`)
+	sample, err := parseAgyUsageJSON(raw, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("parseAgyUsageJSON: %v", err)
+	}
+	if len(sample.Windows) != 1 || sample.LimitReached {
+		t.Fatalf("expected missing remaining_fraction skipped without limitReached, got %+v", sample)
+	}
+}

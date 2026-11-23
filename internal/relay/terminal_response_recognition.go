@@ -36,9 +36,10 @@ type terminalResponseObserver struct {
 	serviceTier     string
 	admissionMutex  sync.Mutex
 	requestCounters ModelRequestCounters
-	onFailure       func()
-	onModelRequest  func()
-	onWebSocketWait func(store.TaskID, string)
+	onFailure        func()
+	onModelRequest   func()
+	onCompletedReply func()
+	onWebSocketWait  func(store.TaskID, string)
 	requests        []*observedModelRequest
 
 	// A WebSocket's state during an update; see in_flight_request_drain.go.
@@ -135,6 +136,9 @@ func (observer *terminalResponseObserver) observeStructuredEvent(eventBytes []by
 		if event.Response.ID != "" {
 			observer.settleModelRequest(event.Response.ID, store.ModelRequestSuccessful)
 		}
+		if observer.onCompletedReply != nil {
+			observer.onCompletedReply()
+		}
 		observer.admittedRequests = max(0, observer.admittedRequests-1)
 		observer.activeResponses = max(0, observer.activeResponses-1)
 		observer.recordCompletedResponse(event.Response)
@@ -199,6 +203,9 @@ func (observer *terminalResponseObserver) observeHTTPJSONBody(bodyBytes []byte) 
 	}
 	if response.ID != "" && (response.Status == "completed" || response.Usage != nil) {
 		observer.settleModelRequest(response.ID, store.ModelRequestSuccessful)
+		if observer.onCompletedReply != nil {
+			observer.onCompletedReply()
+		}
 		observer.admittedRequests = 0
 	}
 	if response.Usage != nil {

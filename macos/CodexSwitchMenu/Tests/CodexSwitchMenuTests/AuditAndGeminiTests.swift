@@ -16,6 +16,9 @@ final class AuditAndGeminiTests: XCTestCase {
         try "http://127.0.0.1:2455/client/cap/codex-switch/menu-snapshot\n".write(to: client.urlFile, atomically: true, encoding: .utf8)
         XCTAssertEqual(try client.snapshotURL().host, "127.0.0.1")
 
+        try "http://127.0.0.2:2455/client/cap/codex-switch/menu-snapshot\n".write(to: client.urlFile, atomically: true, encoding: .utf8)
+        XCTAssertEqual(try client.snapshotURL().host, "127.0.0.2")
+
         try "http://example.com:2455/client/cap/codex-switch/menu-snapshot\n".write(to: client.urlFile, atomically: true, encoding: .utf8)
         XCTAssertThrowsError(try client.snapshotURL())
 

@@ -185,6 +185,9 @@ func (observer *terminalResponseObserver) observeClaudeUsage(payload []byte) {
 		return
 	}
 	observer.settleModelRequest("", store.ModelRequestSuccessful)
+	if observer.onCompletedReply != nil {
+		observer.onCompletedReply()
+	}
 	observer.admittedRequests = 0
 	record, err := observer.claudeUsage.Record(observer.taskID, observer.accountKey, time.Now().UTC())
 	if err != nil {

@@ -316,7 +316,7 @@ private struct PanelStatusHeader: View {
     private var heading: String {
         let count = snapshot.accounts.filter { $0.menuProvider.isRouted && $0.offersConfiguredModel }.count
         switch count {
-        case 0: return "No accounts"
+        case 0: return snapshot.accounts.isEmpty ? "No accounts" : "Usage overview"
         case 1: return "Balancing 1 account"
         default: return "Balancing \(count) accounts"
         }

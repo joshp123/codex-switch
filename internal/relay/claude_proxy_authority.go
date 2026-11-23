@@ -60,7 +60,7 @@ func CreateClaudeProxyCertificate(dataDirectory string) (tls.Certificate, error)
 	if err != nil {
 		return tls.Certificate{}, err
 	}
-	if !time.Now().Add(30 * 24 * time.Hour).Before(root.NotAfter) {
+	if !time.Now().Before(root.NotAfter) {
 		authorityPEM, err = generateClaudeProxyAuthority()
 		if err == nil {
 			err = writeClaudeAuthorityFile(privatePath, authorityPEM)

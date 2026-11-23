@@ -158,10 +158,22 @@ struct SnapshotClient: SnapshotLoading {
               url.scheme == "http",
               url.port != nil,
               let host = url.host?.lowercased(),
-              host == "127.0.0.1" || host == "::1" || host == "localhost" else {
+              Self.isLoopbackHost(host) else {
             throw SnapshotClientError.unreadableURLFile
         }
         return url
+    }
+
+    private static func isLoopbackHost(_ host: String) -> Bool {
+        if host == "localhost" || host == "::1" || host == "[::1]" {
+            return true
+        }
+        let octets = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard octets.count == 4, octets[0] == "127" else { return false }
+        return octets.allSatisfy { part in
+            guard let value = Int(part) else { return false }
+            return (0...255).contains(value)
+        }
     }
 }
 
