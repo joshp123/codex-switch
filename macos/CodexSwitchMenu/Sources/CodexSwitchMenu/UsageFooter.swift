@@ -5,6 +5,7 @@ struct UsageFooter: View {
     let store: OverviewStore
     var updates: UpdateController? = nil
     var onRefresh: (() -> Void)? = nil
+    @AppStorage(MenuBarDisplayMode.storageKey) private var menuBarDisplayMode: MenuBarDisplayMode = .pooledAverage
 
     var body: some View {
         HStack {
@@ -23,6 +24,21 @@ struct UsageFooter: View {
                     }
                 }
                 .disabled(store.isRefreshing)
+                Menu("Menu bar") {
+                    ForEach(MenuBarDisplayMode.allCases) { mode in
+                        Button {
+                            menuBarDisplayMode = mode
+                            UserDefaults.standard.set(mode.rawValue, forKey: MenuBarDisplayMode.storageKey)
+                            onRefresh?()
+                        } label: {
+                            if mode == menuBarDisplayMode {
+                                Label(mode.title, systemImage: "checkmark")
+                            } else {
+                                Text(mode.title)
+                            }
+                        }
+                    }
+                }
                 if let updates {
                     Button("Check for Updates…") {
                         updates.checkForUpdates()

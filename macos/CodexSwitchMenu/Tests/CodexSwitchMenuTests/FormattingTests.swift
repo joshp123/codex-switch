@@ -70,13 +70,25 @@ final class FormattingTests: XCTestCase {
     }
 
     @MainActor
-    func testMenuBarShowsEachAccountNumberAndRoundedAllowance() {
-        let layout = StatusStripRenderer.layout(for: [
-            MenuBarAccountValue(provider: .chatgpt, number: 1, freePercent: 74.6),
-            MenuBarAccountValue(provider: .chatgpt, number: 2, freePercent: 25.4),
-        ])
+    func testMenuBarDisplayModesCondenseProviders() {
+        let accounts = [
+            MenuBarAccountValue(provider: .chatgpt, number: 1, freePercent: 34),
+            MenuBarAccountValue(provider: .chatgpt, number: 2, freePercent: 63),
+            MenuBarAccountValue(provider: .claude, number: 1, freePercent: 37),
+            MenuBarAccountValue(provider: .claude, number: 2, freePercent: 100),
+            MenuBarAccountValue(provider: .claude, number: 3, freePercent: 100),
+            MenuBarAccountValue(provider: .gemini, number: 1, freePercent: 66),
+        ]
 
-        XCTAssertEqual(layout.badges, ["1", "2"])
-        XCTAssertEqual(layout.values, ["75%", "25%"])
+        let pooled = StatusStripRenderer.layout(for: accounts, mode: .pooledAverage, locale: locale)
+        XCTAssertEqual(pooled.marks.map(\.provider), [.chatgpt, .claude, .gemini])
+        XCTAssertEqual(pooled.values, ["49%", "79%", "66%"])
+
+        let bars = StatusStripRenderer.layout(for: accounts, mode: .miniBars, locale: locale)
+        XCTAssertEqual(bars.marks.map(\.provider), [.chatgpt, .claude, .gemini])
+        XCTAssertLessThan(bars.imageSize.width, pooled.imageSize.width)
+
+        let left = StatusStripRenderer.layout(for: accounts, mode: .accountsLeft, locale: locale)
+        XCTAssertEqual(left.values, ["1.0/2", "2.4/3", "66%"])
     }
 }

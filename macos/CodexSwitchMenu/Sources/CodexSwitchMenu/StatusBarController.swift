@@ -33,6 +33,7 @@ final class StatusBarController: NSObject {
     private var resizeObserver: NSObjectProtocol?
     /// What the status item shows now; it is drawn again only when this changes.
     private var shownValues: [MenuBarAccountValue]?
+    private var shownDisplayMode: MenuBarDisplayMode?
 
     /// Space between the menu bar and the panel, and between the panel and the screen's edges.
     private static let screenMargin: CGFloat = 6
@@ -246,8 +247,10 @@ final class StatusBarController: NSObject {
         guard let button = statusItem.button else { return }
         let accounts = store.latestSnapshot?.accounts ?? []
         let values = MenuBarAccountValue.values(for: accounts)
-        guard values != shownValues else { return }
+        let displayMode = MenuBarDisplayMode.current()
+        guard values != shownValues || displayMode != shownDisplayMode else { return }
         shownValues = values
+        shownDisplayMode = displayMode
 
         if values.isEmpty {
             showIdentity(button: button, toolTip: "Codex Switch")
@@ -257,7 +260,7 @@ final class StatusBarController: NSObject {
         let toolTip = values.map { account in
             "\(account.provider.title) \(account.number): \(UsageFormatting.percent(account.freePercent)) left"
         }.joined(separator: "\n")
-        guard let image = StatusStripRenderer.image(for: values) else {
+        guard let image = StatusStripRenderer.image(for: values, mode: displayMode) else {
             showIdentity(button: button, toolTip: toolTip)
             return
         }

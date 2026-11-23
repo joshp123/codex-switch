@@ -66,11 +66,16 @@ final class PanelRenderTests: XCTestCase {
                                   maximumHeight: Self.laptopHeight, to: output.appending(path: "panel-real-tokens-light.png"))
 
         let values = MenuBarAccountValue.values(for: real.accounts)
-        let strip = try XCTUnwrap(StatusStripRenderer.image(for: values))
+        let strip = try XCTUnwrap(StatusStripRenderer.image(for: values, mode: .pooledAverage))
         try writeMenuBar(strip, background: NSColor(white: 0.93, alpha: 1), ink: .black,
                          to: output.appending(path: "menubar-light.png"))
         try writeMenuBar(strip, background: NSColor(white: 0.12, alpha: 1), ink: .white,
                          to: output.appending(path: "menubar-dark.png"))
+        for (name, mode) in [("pooled", MenuBarDisplayMode.pooledAverage), ("bars", .miniBars), ("accounts", .accountsLeft)] {
+            let modeStrip = try XCTUnwrap(StatusStripRenderer.image(for: values, mode: mode))
+            try writeMenuBar(modeStrip, background: NSColor(white: 0.12, alpha: 1), ink: .white,
+                             to: output.appending(path: "menubar-\(name)-dark.png"))
+        }
 
         // Rendering must never bring this process to the front; whichever app the owner has in front may change meanwhile.
         XCTAssertNotEqual(NSWorkspace.shared.frontmostApplication?.processIdentifier, ProcessInfo.processInfo.processIdentifier)
