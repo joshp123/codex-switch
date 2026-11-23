@@ -50,11 +50,11 @@ final class AuditAndGeminiTests: XCTestCase {
         XCTAssertNotNil(CSSwitch_Provider.gemini.mark)
 
         var account = CSSwitch_Account()
-        account.key = "gemini:user@example.com"
+        account.key = "gemini:local"
         account.accountNumber = 1
-        account.email = "user@example.com"
         account.plan = "Antigravity"
         account.provider = .gemini
+        account.state = .ready
         account.offersConfiguredModel = true
         account.usable = false
         account.unavailableReason = "usage only"
@@ -95,5 +95,9 @@ final class AuditAndGeminiTests: XCTestCase {
 
         let barValues = MenuBarAccountValue.values(for: [account])
         XCTAssertEqual(barValues, [MenuBarAccountValue(provider: .gemini, number: 1, freePercent: 70)])
+
+        var failed = account
+        failed.state = .usageCheckFailed
+        XCTAssertEqual(MenuBarAccountValue.values(for: [failed]), [])
     }
 }

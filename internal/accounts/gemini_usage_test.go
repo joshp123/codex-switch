@@ -61,24 +61,7 @@ func TestParseAgyUsageJSON(t *testing.T) {
 	}
 }
 
-func TestGeminiUsageMonitorDiscoversT3AndDeduplicates(t *testing.T) {
-	home := t.TempDir()
-	// Native login and two T3 provider dirs (one duplicate email, one distinct).
-	writeToken := func(rel, email string) {
-		t.Helper()
-		full := filepath.Join(home, rel)
-		if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(full, []byte(`{"id_token_email":"`+email+`"}`), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	writeToken(".gemini/antigravity-cli/antigravity-oauth-token", "first@example.com")
-	writeToken(".t3/userdata/providers/antigravity/aaa/antigravity-acp/antigravity-oauth-token", "FIRST@example.com")
-	writeToken(".t3/userdata/providers/antigravity/bbb/antigravity-acp/antigravity-oauth-token", "second@example.com")
-
-	// Fake agy CLI verifies isolation for T3 token symlink and returns valid JSON.
+func TestGeminiUsageMonitorRunsNativeCLIWithoutTouchingFiles(t *testing.T) {
 	fakeAgy := filepath.Join(t.TempDir(), "agy")
 	script := `#!/bin/sh
 if [ "$1" != "-p" ] || [ "$2" != "/usage" ] || [ "$3" != "--output-format" ] || [ "$4" != "json" ]; then
@@ -95,7 +78,7 @@ EOF
 
 	changed := false
 	monitor := &GeminiUsageMonitor{
-		homeDir:       home,
+		homeDir:       t.TempDir(),
 		agyExecutable: fakeAgy,
 		interval:      time.Minute,
 		now:           func() time.Time { return time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC) },
@@ -107,11 +90,11 @@ EOF
 		t.Fatal("expected onChange callback after first refresh")
 	}
 	accounts := monitor.ReadAccounts()
-	if len(accounts) != 2 {
-		t.Fatalf("got %d accounts, want 2 (deduplicated)", len(accounts))
+	if len(accounts) != 1 {
+		t.Fatalf("got %d accounts, want 1", len(accounts))
 	}
-	if accounts[0].Key != "gemini:first@example.com" || accounts[1].Key != "gemini:second@example.com" {
-		t.Fatalf("unexpected keys: %q, %q", accounts[0].Key, accounts[1].Key)
+	if accounts[0].Key != "gemini:local" || accounts[0].Email != "" {
+		t.Fatalf("unexpected account identity: %+v", accounts[0])
 	}
 	if accounts[0].UnavailableReason != "usage only" || len(accounts[0].AllowanceSample.Windows) != 1 {
 		t.Fatalf("unexpected account[0]: %+v", accounts[0])
@@ -119,16 +102,6 @@ EOF
 }
 
 func TestGeminiUsageMonitorAbortsImmediatelyOnAuthRequired(t *testing.T) {
-	home := t.TempDir()
-	tokenPath := filepath.Join(home, ".t3/userdata/providers/antigravity/aaa/antigravity-acp/antigravity-oauth-token")
-	if err := os.MkdirAll(filepath.Dir(tokenPath), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(tokenPath, []byte(`{"id_token_email":"signedout@example.com"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	// Fake agy mimics real agy hanging 30s after printing Authentication required.
 	fakeAgy := filepath.Join(t.TempDir(), "agy")
 	script := `#!/bin/sh
 echo "Authentication required. Please visit the URL to log in:" >&2
@@ -139,7 +112,7 @@ sleep 30
 	}
 
 	monitor := &GeminiUsageMonitor{
-		homeDir:       home,
+		homeDir:       t.TempDir(),
 		agyExecutable: fakeAgy,
 		interval:      time.Minute,
 		now:           time.Now,
@@ -150,9 +123,8 @@ sleep 30
 	if elapsed > 3*time.Second {
 		t.Fatalf("expected fast abort on Authentication required, took %s", elapsed)
 	}
-	accounts := monitor.ReadAccounts()
-	if len(accounts) != 1 || accounts[0].State != AccountSignInRequired {
-		t.Fatalf("expected AccountSignInRequired, got %+v", accounts)
+	if accounts := monitor.ReadAccounts(); len(accounts) != 0 {
+		t.Fatalf("expected unsigned native CLI omitted, got %+v", accounts)
 	}
 }
 

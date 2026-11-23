@@ -30,8 +30,8 @@ const (
 
 var errGeminiAuthRequired = errors.New("Antigravity CLI requires sign-in")
 
-// GeminiAccountUsage is a read-only usage snapshot for one Gemini/Antigravity
-// account, obtained strictly by running the official `agy -p "/usage"` CLI.
+// GeminiAccountUsage is a read-only usage snapshot for the native Antigravity
+// CLI login, obtained strictly by running `agy -p "/usage" --output-format json`.
 type GeminiAccountUsage struct {
 	Key               store.AccountKey
 	Email             string
@@ -42,9 +42,9 @@ type GeminiAccountUsage struct {
 }
 
 // GeminiUsageMonitor periodically reads Gemini allowance from the official
-// Antigravity CLI (`agy -p "/usage" --output-format json`). It never reads
-// OAuth tokens, replicates login, calls Google APIs directly, or routes
-// Gemini traffic.
+// Antigravity CLI (`agy -p "/usage" --output-format json`) using the user's
+// native CLI session. It never reads OAuth token files, replicates login,
+// calls Google APIs directly, or routes Gemini traffic.
 type GeminiUsageMonitor struct {
 	homeDir       string
 	agyExecutable string
@@ -57,8 +57,8 @@ type GeminiUsageMonitor struct {
 	lastSignature string
 }
 
-// NewGeminiUsageMonitor constructs a background reader for Antigravity CLI
-// usage. Setting CODEX_SWITCH_AGY_BIN=none disables it completely.
+// NewGeminiUsageMonitor constructs a background reader for native Antigravity
+// CLI usage. Setting CODEX_SWITCH_AGY_BIN=none disables it completely.
 func NewGeminiUsageMonitor(onChange func()) *GeminiUsageMonitor {
 	home, _ := os.UserHomeDir()
 	return &GeminiUsageMonitor{
@@ -114,30 +114,21 @@ func (m *GeminiUsageMonitor) refreshOnce(ctx context.Context) {
 	if m.agyExecutable == "" || ctx.Err() != nil {
 		return
 	}
-	sources := discoverGeminiSources(m.homeDir)
-	if len(sources) == 0 {
+	previous := m.ReadAccounts()
+	var prevAccount *GeminiAccountUsage
+	if len(previous) > 0 {
+		prevAccount = &previous[0]
+	}
+
+	account, present, err := m.readNativeCLI(ctx, prevAccount)
+	if err != nil {
+		log.Printf("Gemini usage: %v", err)
+	}
+	if !present {
 		m.storeAccounts(nil)
 		return
 	}
-	previousByKey := map[store.AccountKey]GeminiAccountUsage{}
-	for _, existing := range m.ReadAccounts() {
-		previousByKey[existing.Key] = existing
-	}
-
-	var next []GeminiAccountUsage
-	for _, source := range sources {
-		if ctx.Err() != nil {
-			return
-		}
-		account, present, err := m.readSource(ctx, source, previousByKey)
-		if err != nil {
-			log.Printf("Gemini usage (%s): %v", source.label(), err)
-		}
-		if present {
-			next = append(next, account)
-		}
-	}
-	m.storeAccounts(next)
+	m.storeAccounts([]GeminiAccountUsage{account})
 }
 
 func (m *GeminiUsageMonitor) storeAccounts(accounts []GeminiAccountUsage) {
@@ -154,146 +145,37 @@ func (m *GeminiUsageMonitor) storeAccounts(accounts []GeminiAccountUsage) {
 	}
 }
 
-type geminiAuthSource struct {
-	email     string
-	tokenPath string // empty for native $HOME/.gemini/antigravity-cli
-	fallback  string // distinct key suffix when email is empty
-}
-
-func (s geminiAuthSource) label() string {
-	if s.email != "" {
-		return s.email
-	}
-	if s.fallback != "" {
-		return s.fallback
-	}
-	return "local"
-}
-
-func (s geminiAuthSource) key() store.AccountKey {
-	if s.email != "" {
-		return AccountKeyFor(ProviderGemini, s.email)
-	}
-	if s.fallback != "" {
-		return store.AccountKey("gemini:" + s.fallback)
-	}
-	return store.AccountKey("gemini:local")
-}
-
-func discoverGeminiSources(homeDir string) []geminiAuthSource {
-	if homeDir == "" {
-		return nil
-	}
-	var sources []geminiAuthSource
-	seenEmails := map[string]bool{}
-	unnamedCount := 0
-	add := func(email, tokenPath string) {
-		normalized := strings.ToLower(strings.TrimSpace(email))
-		fallback := ""
-		if normalized != "" {
-			if seenEmails[normalized] {
-				return
-			}
-			seenEmails[normalized] = true
-		} else {
-			unnamedCount++
-			if unnamedCount == 1 {
-				fallback = "local"
-			} else {
-				fallback = fmt.Sprintf("local-%d", unnamedCount)
-			}
-		}
-		sources = append(sources, geminiAuthSource{
-			email:     strings.TrimSpace(email),
-			tokenPath: tokenPath,
-			fallback:  fallback,
-		})
-	}
-
-	// 1. Native agy file-backed login.
-	nativeToken := filepath.Join(homeDir, ".gemini", "antigravity-cli", "antigravity-oauth-token")
-	if info, err := os.Stat(nativeToken); err == nil && !info.IsDir() {
-		add(readAntigravityEmailOnly(nativeToken), "")
-	}
-
-	// 2. T3 Code Antigravity provider logins.
-	pattern := filepath.Join(homeDir, ".t3", "userdata", "providers", "antigravity", "*", "antigravity-acp", "antigravity-oauth-token")
-	matches, _ := filepath.Glob(pattern)
-	sort.Strings(matches)
-	for _, match := range matches {
-		if info, err := os.Stat(match); err == nil && !info.IsDir() {
-			add(readAntigravityEmailOnly(match), match)
-		}
-	}
-
-	// 3. Native Keychain-backed agy login (no token file on disk, but CLI config dir exists).
-	if len(sources) == 0 {
-		nativeDir := filepath.Join(homeDir, ".gemini", "antigravity-cli")
-		if info, err := os.Stat(nativeDir); err == nil && info.IsDir() {
-			sources = append(sources, geminiAuthSource{})
-		}
-	}
-
-	return sources
-}
-
-// readAntigravityEmailOnly extracts only the non-secret display email from an
-// Antigravity token file; it never decodes or retains any OAuth tokens.
-func readAntigravityEmailOnly(path string) string {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	var meta struct {
-		IDTokenEmail string `json:"id_token_email"`
-	}
-	if json.Unmarshal(data, &meta) != nil {
-		return ""
-	}
-	return strings.TrimSpace(meta.IDTokenEmail)
-}
-
-func (m *GeminiUsageMonitor) readSource(ctx context.Context, source geminiAuthSource, previousByKey map[store.AccountKey]GeminiAccountUsage) (GeminiAccountUsage, bool, error) {
-	output, err := runAgyUsageCLI(ctx, m.agyExecutable, source.tokenPath)
-	key := source.key()
+func (m *GeminiUsageMonitor) readNativeCLI(ctx context.Context, prev *GeminiAccountUsage) (GeminiAccountUsage, bool, error) {
+	output, err := runAgyUsageCLI(ctx, m.agyExecutable)
+	const key = store.AccountKey("gemini:local")
 	if errors.Is(err, errGeminiAuthRequired) {
-		if source.email == "" && source.tokenPath == "" {
-			// Native directory existed without an active login; omit silently.
-			return GeminiAccountUsage{}, false, nil
+		if prev != nil {
+			return GeminiAccountUsage{
+				Key:               key,
+				Plan:              "Antigravity",
+				State:             AccountSignInRequired,
+				UnavailableReason: "sign in to Antigravity again",
+			}, true, nil
 		}
-		account := GeminiAccountUsage{
-			Key:               key,
-			Email:             source.email,
-			Plan:              "Antigravity",
-			State:             AccountSignInRequired,
-			UnavailableReason: "sign in to Antigravity again",
-		}
-		return account, true, nil
+		return GeminiAccountUsage{}, false, nil
 	}
 	if err != nil {
-		if prev, ok := previousByKey[key]; ok {
-			prev.State = AccountUsageCheckFailed
-			prev.UnavailableReason = "Antigravity usage check failed"
-			return prev, true, err
+		if prev != nil {
+			stale := *prev
+			stale.State = AccountUsageCheckFailed
+			stale.UnavailableReason = "Antigravity usage check failed"
+			return stale, true, err
 		}
-		if source.email == "" && source.tokenPath == "" {
-			return GeminiAccountUsage{}, false, err
-		}
-		return GeminiAccountUsage{
-			Key:               key,
-			Email:             source.email,
-			Plan:              "Antigravity",
-			State:             AccountUsageCheckFailed,
-			UnavailableReason: "Antigravity usage check failed",
-		}, true, err
+		return GeminiAccountUsage{}, false, err
 	}
 
 	sample, err := parseAgyUsageJSON(output, m.now().UTC())
 	if err != nil {
-		if prev, ok := previousByKey[key]; ok {
-			prev.State = AccountUsageCheckFailed
-			prev.UnavailableReason = "Antigravity usage check failed"
-			return prev, true, err
+		if prev != nil {
+			stale := *prev
+			stale.State = AccountUsageCheckFailed
+			stale.UnavailableReason = "Antigravity usage check failed"
+			return stale, true, err
 		}
 		return GeminiAccountUsage{}, false, err
 	}
@@ -304,7 +186,6 @@ func (m *GeminiUsageMonitor) readSource(ctx context.Context, source geminiAuthSo
 	}
 	return GeminiAccountUsage{
 		Key:               key,
-		Email:             source.email,
 		Plan:              "Antigravity",
 		State:             state,
 		UnavailableReason: "usage only",
@@ -312,32 +193,12 @@ func (m *GeminiUsageMonitor) readSource(ctx context.Context, source geminiAuthSo
 	}, true, nil
 }
 
-func runAgyUsageCLI(parent context.Context, agyBin, tokenPath string) ([]byte, error) {
+func runAgyUsageCLI(parent context.Context, agyBin string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(parent, geminiCLIReadTimeout)
 	defer cancel()
 
-	env := os.Environ()
-	if tokenPath != "" {
-		tempHome, err := os.MkdirTemp("", "codex-switch-agy-*")
-		if err != nil {
-			return nil, fmt.Errorf("create temp home: %w", err)
-		}
-		defer os.RemoveAll(tempHome)
-		cliDir := filepath.Join(tempHome, ".gemini", "antigravity-cli")
-		if err := os.MkdirAll(cliDir, 0o700); err != nil {
-			return nil, fmt.Errorf("create temp agy dir: %w", err)
-		}
-		if err := os.Symlink(tokenPath, filepath.Join(cliDir, "antigravity-oauth-token")); err != nil {
-			return nil, fmt.Errorf("link agy token file: %w", err)
-		}
-		env = withEnvOverrides(env, map[string]string{
-			"HOME":           tempHome,
-			"SSH_CONNECTION": "1",
-		})
-	}
-
 	cmd := exec.CommandContext(ctx, agyBin, "-p", "/usage", "--output-format", "json")
-	cmd.Env = env
+	cmd.Env = cleanAgyEnv(os.Environ())
 	cmd.Stdin = nil
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.WaitDelay = 200 * time.Millisecond
@@ -401,12 +262,6 @@ func (b *agyOutputBuffer) Bytes() []byte {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return append([]byte(nil), b.buf.Bytes()...)
-}
-
-func (b *agyOutputBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
 }
 
 type agyUsageEnvelope struct {
@@ -557,19 +412,16 @@ func findAgyExecutable(homeDir string) string {
 	return ""
 }
 
-func withEnvOverrides(base []string, overrides map[string]string) []string {
-	result := make([]string, 0, len(base)+len(overrides))
+// cleanAgyEnv strips inherited ANTIGRAVITY_* harness variables and SSH session
+// markers so `agy` always runs against this Mac's native CLI Keychain login.
+func cleanAgyEnv(base []string) []string {
+	cleaned := make([]string, 0, len(base))
 	for _, entry := range base {
-		name, _, found := strings.Cut(entry, "=")
-		if found {
-			if _, replaced := overrides[name]; replaced {
-				continue
-			}
+		name, _, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(name, "ANTIGRAVITY_") || name == "SSH_CONNECTION" || name == "SSH_CLIENT" || name == "SSH_TTY" {
+			continue
 		}
-		result = append(result, entry)
+		cleaned = append(cleaned, entry)
 	}
-	for name, value := range overrides {
-		result = append(result, name+"="+value)
-	}
-	return result
+	return cleaned
 }

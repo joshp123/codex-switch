@@ -67,7 +67,8 @@ private struct AccountIdentities: View {
                             .monospacedDigit()
                     }
                     .frame(width: density.numberWidth, alignment: .leading)
-                    Text(hideIdentity ? UsageFormatting.privateEmail(account.email) : account.email)
+                    let identityLabel = account.email.isEmpty ? "Local CLI" : (hideIdentity ? UsageFormatting.privateEmail(account.email) : account.email)
+                    Text(identityLabel)
                         .fixedSize()
                     // One line; the panel widens to fit the longest.
                     Text(([account.planTitle] + signInEnd(account) + resets(account) + [state(account)].compactMap { $0 }).joined(separator: " · "))
