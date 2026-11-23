@@ -252,7 +252,8 @@ def update_waits_for_work(system):
     old = rig.deploy_status()['pid']
     update = start_installer('candidate', 'no-work-update')
     time.sleep(2)
-    if update.poll() is not None or not rig.deploy_status() or rig.deploy_status()['pid'] != old:
+    status = rig.deploy_status()
+    if update.poll() is not None or not status or status['pid'] != old:
         raise Failure('The installer exited or switched before any model reply completed.')
     rig.stop_process_group(update)
     if rig.deploy_status()['pid'] != old:
@@ -1176,7 +1177,8 @@ def failed_release_steps_aside(system):
                  'the canceled response to close', timeout=30)
     system.extra = []
     system.apply()
-    if rig.deploy_status()['pid'] != new or rig.deploy_status()['failures'] != 0:
+    status = rig.deploy_status()
+    if not status or status['pid'] != new or status['failures'] != 0:
         raise Failure('A client cancellation counted against the candidate.')
 
     system.extra = ['break-responses']
@@ -1184,7 +1186,7 @@ def failed_release_steps_aside(system):
     began = time.monotonic()
     tasks = [rig.CodexTask(f'failure-task-{number}', f'Reply with the number {number}.') for number in range(3)]
     try:
-        rig.wait_for(lambda: rig.deploy_status() and rig.deploy_status()['pid'] == old,
+        rig.wait_for(lambda: (status := rig.deploy_status()) is not None and status['pid'] == old,
                      'the old slot to resume serving after malformed responses', timeout=60)
     finally:
         system.extra = []

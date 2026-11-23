@@ -57,11 +57,17 @@ ACCOUNT_READ_SECONDS, CONNECTION_DRAIN_SECONDS, MENU_SNAPSHOT_SECONDS = 1, 1, 1
 CLAUDE_USAGE_READ_SECONDS = None
 MODEL = 'gpt-6-luna'
 LABEL = 'dev.codex-switch.system-test-' + hashlib.sha256(str(RUN).encode()).hexdigest()[:10]
-# A second proxy, as on Josh's other Mac, signed in to the same accounts.
-OTHER_MAC = RUN / 'other-mac'
-OTHER_MAC_LABEL = LABEL + '.other-mac'
-# Every launchd job a system may start: the proxy, the installer's two slots and the other Mac's proxy.
-LABELS = (LABEL, LABEL + '.a', LABEL + '.b', OTHER_MAC_LABEL)
+def other_mac_dir():
+    return RUN / 'other-mac'
+
+
+def other_mac_label():
+    return LABEL + '.other-mac'
+
+
+def labels():
+    """Every launchd job a system may start: the proxy, the installer's two slots and the other Mac's proxy."""
+    return (LABEL, LABEL + '.a', LABEL + '.b', other_mac_label())
 # Pi has no ChatGPT login of its own here: it needs a JWT-shaped key with a
 # chatgpt_account_id claim. The proxy replaces the credentials it carries.
 PI_PLACEHOLDER_KEY = 'eyJhbGciOiJub25lIn0.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiY29kZXgtc3dpdGNoIn19.codex-switch'
@@ -216,7 +222,7 @@ def start_proxy():
         'StandardOutPath': str(RUN / 'logs/launchd.log'),
         'StandardErrorPath': str(RUN / 'logs/launchd.log'),
     }))
-    for label in LABELS:
+    for label in labels():
         subprocess.run(['launchctl', 'bootout', f'gui/{os.getuid()}/{label}'], capture_output=True)
     subprocess.run(['launchctl', 'bootstrap', f'gui/{os.getuid()}', str(plist)], check=True)
     wait_for(deploy_status, 'the proxy to serve (see data/proxy.log)', timeout=60, interval=0.05)
@@ -253,7 +259,8 @@ class OtherMac:
     so its folders name each account differently: account-1 here is account-3 on the first proxy."""
 
     def __init__(self):
-        self.data, self.home = OTHER_MAC / 'data', OTHER_MAC / 'home'
+        other_mac, label = other_mac_dir(), other_mac_label()
+        self.data, self.home = other_mac / 'data', other_mac / 'home'
         for part in (self.data, self.home, self.home / 'Library/LaunchAgents'):
             part.mkdir(parents=True)
         for number, account in enumerate(reversed(CODEX_ACCOUNTS), 1):
@@ -263,16 +270,16 @@ class OtherMac:
         with socket.socket() as reservation:
             reservation.bind(('127.0.0.1', 0))
             self.listen = f'127.0.0.1:{reservation.getsockname()[1]}'
-        plist = self.home / 'Library/LaunchAgents' / f'{OTHER_MAC_LABEL}.plist'
+        plist = self.home / 'Library/LaunchAgents' / f'{label}.plist'
         plist.write_bytes(plistlib.dumps({
-            'Label': OTHER_MAC_LABEL,
+            'Label': label,
             'ProgramArguments': [str(RUN / 'cli'), 'serve', '--listen', self.listen],
             'EnvironmentVariables': dict(proxy_environment(), CODEX_SWITCH_DATA_DIR=str(self.data), CODEX_HOME=str(self.home),
-                                         PI_CODING_AGENT_DIR=str(OTHER_MAC / 'pi')),
+                                         PI_CODING_AGENT_DIR=str(other_mac / 'pi')),
             'KeepAlive': True, 'ThrottleInterval': 1, 'RunAtLoad': True, 'ExitTimeOut': 0,
             'StandardOutPath': str(RUN / 'logs/other-mac-launchd.log'), 'StandardErrorPath': str(RUN / 'logs/other-mac-launchd.log'),
         }))
-        subprocess.run(['launchctl', 'bootout', f'gui/{os.getuid()}/{OTHER_MAC_LABEL}'], capture_output=True)
+        subprocess.run(['launchctl', 'bootout', f'gui/{os.getuid()}/{label}'], capture_output=True)
         subprocess.run(['launchctl', 'bootstrap', f'gui/{os.getuid()}', str(plist)], check=True)
         wait_for(lambda: menu_snapshot_served(self.data), "the other Mac's first menu snapshot", timeout=60, interval=0.05)
         write_codex_config(self.home, f'http://{self.listen}/client/{(self.data / "client-capability").read_text().strip()}/backend-api/codex')
@@ -329,7 +336,7 @@ def clean_up():
     for process in started_processes:
         if process.args[0] != fake_providers:
             stop_process_group(process)
-    for label in LABELS:
+    for label in labels():
         subprocess.run(['launchctl', 'bootout', f'gui/{os.getuid()}/{label}'], capture_output=True)
     for pid in run_processes(exclude=fake_providers):
         try:
@@ -347,7 +354,7 @@ def clean_up():
             pass
     wait_for(lambda: not run_processes(), 'the run to stop', timeout=10, fail=False)
     leftovers = [f'process {pid}' for pid in run_processes()]
-    for label in LABELS:
+    for label in labels():
         if subprocess.run(['launchctl', 'print', f'gui/{os.getuid()}/{label}'], capture_output=True).returncode == 0:
             leftovers.append('launchd job ' + label)
     return leftovers
@@ -864,7 +871,8 @@ def proxy_output_files():
     return sorted({*RUN.glob('**/proxy.log'), *RUN.glob('**/*launchd.log')})
 
 
-def menu_snapshot_served(data=RUN / 'data'):
+def menu_snapshot_served(data=None):
+    data = RUN / 'data' if data is None else data
     try:
         with urllib.request.urlopen((data / 'menu-snapshot-url').read_text().strip(), timeout=5) as response:
             return response.status == 200
