@@ -29,6 +29,16 @@ struct RoutedTasksSection: View {
         return min(max(rows, 1), mostRows)
     }
 
+    /// Whether the period has any task row that will be displayed.
+    static func hasRows(snapshot: CSSwitch_MenuSnapshot, period: CSSwitch_ReportingPeriod?) -> Bool {
+        for task in period?.taskUsage.tasks ?? [] where task.hasTitle && !task.title.isEmpty {
+            if task.accountKeys.contains(where: { snapshot.account(key: $0) != nil }) {
+                return true
+            }
+        }
+        return false
+    }
+
     /// Tasks that share a name and provider, such as repeated `codex exec`
     /// runs in one repository, make one row.
     private var rows: [TaskRow] {

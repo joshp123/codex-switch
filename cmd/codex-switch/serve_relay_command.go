@@ -65,6 +65,9 @@ type deploymentActivity struct {
 func serveRelay(tcpListenAddress string) {
 	// Every generation appends to one log in the data directory, so a blue-green
 	// update keeps one timeline and the status command can name the file.
+	if err := os.MkdirAll(dataDir(), 0o700); err != nil {
+		log.Fatalf("create data directory: %v", err)
+	}
 	proxyLog, err := os.OpenFile(proxyLogPath(dataDir()), os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
 	if err != nil {
 		log.Fatalf("open proxy log: %v", err)
@@ -158,6 +161,13 @@ func serveRelay(tcpListenAddress string) {
 	if interval, set := secondsFromEnvironment("CODEX_SWITCH_MENU_SNAPSHOT_SECONDS"); set {
 		snapshots.interval = interval
 	}
+	geminiMonitor := accountapi.NewGeminiUsageMonitor(snapshots.notifyWorkDone)
+	if interval, set := secondsFromEnvironment("CODEX_SWITCH_GEMINI_USAGE_READ_SECONDS"); set {
+		geminiMonitor.SetInterval(interval)
+	}
+	snapshots.gemini = geminiMonitor
+	background.Add(1)
+	go func() { defer background.Done(); geminiMonitor.Run(factsContext) }()
 	activity := &deploymentActivity{}
 	relayHandler, err := relay.CreateTrafficRelayHandler(relay.RelayHandlerOptions{
 		UpstreamOrigin:       upstreamOrigin,
@@ -271,7 +281,11 @@ func deployStatusOrRelay(capability string, relayHandler http.Handler, activity 
 	predecessorStatusPath := clientcapability.PathPrefix(capability) + "/status"
 	revision, dirty := buildRevision()
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.Method == http.MethodGet && request.URL.Path == statusPath {
+		if request.URL.Path == statusPath {
+			if request.Method != http.MethodGet {
+				writer.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
 			writer.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(writer).Encode(deployStatusResponse{Revision: revision, Dirty: dirty, PID: os.Getpid(), Build: buildNumberValue(), Failures: activity.failures.Load(),
 				LastRequest: timeFromNanoseconds(activity.lastRequest.Load()), LastCompleted: timeFromNanoseconds(activity.lastCompleted.Load())})

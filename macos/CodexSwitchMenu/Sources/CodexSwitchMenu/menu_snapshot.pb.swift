@@ -25,6 +25,7 @@ nonisolated enum CSSwitch_Provider: SwiftProtobuf.Enum, Swift.CaseIterable {
   case unspecified // = 0
   case chatgpt // = 1
   case claude // = 2
+  case gemini // = 3
   case UNRECOGNIZED(Int)
 
   init() {
@@ -36,6 +37,7 @@ nonisolated enum CSSwitch_Provider: SwiftProtobuf.Enum, Swift.CaseIterable {
     case 0: self = .unspecified
     case 1: self = .chatgpt
     case 2: self = .claude
+    case 3: self = .gemini
     default: self = .UNRECOGNIZED(rawValue)
     }
   }
@@ -45,6 +47,7 @@ nonisolated enum CSSwitch_Provider: SwiftProtobuf.Enum, Swift.CaseIterable {
     case .unspecified: return 0
     case .chatgpt: return 1
     case .claude: return 2
+    case .gemini: return 3
     case .UNRECOGNIZED(let i): return i
     }
   }
@@ -54,6 +57,7 @@ nonisolated enum CSSwitch_Provider: SwiftProtobuf.Enum, Swift.CaseIterable {
     .unspecified,
     .chatgpt,
     .claude,
+    .gemini,
   ]
 
 }
@@ -768,7 +772,7 @@ nonisolated struct CSSwitch_ProviderBurn: Sendable {
 fileprivate nonisolated let _protobuf_package = "codex_switch.menu"
 
 nonisolated extension CSSwitch_Provider: SwiftProtobuf._ProtoNameProviding {
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0PROVIDER_UNSPECIFIED\0\u{1}PROVIDER_CHATGPT\0\u{1}PROVIDER_CLAUDE\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0PROVIDER_UNSPECIFIED\0\u{1}PROVIDER_CHATGPT\0\u{1}PROVIDER_CLAUDE\0\u{1}PROVIDER_GEMINI\0")
 }
 
 nonisolated extension CSSwitch_AccountState: SwiftProtobuf._ProtoNameProviding {

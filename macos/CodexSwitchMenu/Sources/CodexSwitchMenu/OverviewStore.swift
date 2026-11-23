@@ -40,14 +40,17 @@ final class OverviewStore {
     private var activeRefreshTask: Task<Void, Never>?
     private var nextRequestSequence: UInt64 = 0
     private var appliedRequestSequence: UInt64 = 0
+    private var lastCachedData: Data?
     private let client: any SnapshotLoading
     private let cacheFile: URL
 
     init(client: any SnapshotLoading, cacheFile: URL) {
         self.client = client
         self.cacheFile = cacheFile
-        if let cached = try? MenuSnapshotDecoding.decode(Data(contentsOf: cacheFile)) {
+        if let cachedData = try? Data(contentsOf: cacheFile),
+           let cached = try? MenuSnapshotDecoding.decode(cachedData) {
             latestOverview = OverviewSnapshot(menuSnapshot: cached)
+            lastCachedData = cachedData
         }
     }
 
@@ -59,11 +62,15 @@ final class OverviewStore {
         }
 
         isRefreshing = true
-        let refreshTask = Task { _ = await self.fetch(after: nil) }
+        let refreshTask = Task { @MainActor in
+            defer {
+                self.activeRefreshTask = nil
+                self.isRefreshing = false
+            }
+            _ = await self.fetch(after: nil)
+        }
         activeRefreshTask = refreshTask
         await refreshTask.value
-        activeRefreshTask = nil
-        isRefreshing = false
     }
 
     func cancelRefresh() {
@@ -114,14 +121,17 @@ final class OverviewStore {
         appliedRequestSequence = sequence
         connectionState = .connected(version: latestVersion, confirmedAt: nil)
         latestOverview = OverviewSnapshot(menuSnapshot: snapshot)
-        do {
-            try FileManager.default.createDirectory(
-                at: cacheFile.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
-            try data.write(to: cacheFile, options: .atomic)
-        } catch {
-            snapshotLogger.error("Menu snapshot cache write failed: \(error.localizedDescription, privacy: .public)")
+        if data != lastCachedData {
+            do {
+                try FileManager.default.createDirectory(
+                    at: cacheFile.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
+                try data.write(to: cacheFile, options: .atomic)
+                lastCachedData = data
+            } catch {
+                snapshotLogger.error("Menu snapshot cache write failed: \(error.localizedDescription, privacy: .public)")
+            }
         }
         return true
     }

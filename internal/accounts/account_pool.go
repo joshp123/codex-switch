@@ -23,6 +23,7 @@ const (
 	ProviderCodex   Provider = ""
 	ProviderChatGPT Provider = ProviderCodex
 	ProviderClaude  Provider = "claude"
+	ProviderGemini  Provider = "gemini"
 )
 
 // PoolAccount is one signed-in subscription account. Pool accounts live in
@@ -96,8 +97,11 @@ func ReadPool(dataDirectory string) ([]PoolAccount, error) {
 // subscription, so the provider is part of the key.
 func AccountKeyFor(provider Provider, email string) store.AccountKey {
 	name := "chatgpt"
-	if provider == ProviderClaude {
+	switch provider {
+	case ProviderClaude:
 		name = "claude"
+	case ProviderGemini:
+		name = "gemini"
 	}
 	return store.AccountKey(name + ":" + strings.ToLower(email))
 }
@@ -229,8 +233,11 @@ func AccountDisplayName(pool []PoolAccount, key store.AccountKey) (string, int) 
 		numbers[account.Provider]++
 		if account.Key == key {
 			provider := "Codex"
-			if account.Provider == ProviderClaude {
+			switch account.Provider {
+			case ProviderClaude:
 				provider = "Claude"
+			case ProviderGemini:
+				provider = "Gemini"
 			}
 			number := numbers[account.Provider]
 			return fmt.Sprintf("%s %d", provider, number), number

@@ -5,8 +5,8 @@ import SwiftProtobuf
 enum SnapshotFetch: Sendable {
     /// A snapshot newer than the one the menu shows, as protobuf bytes, and its version.
     case changed(Data, version: String)
-    /// The snapshot the menu shows is still current, as of this time.
-    case current(confirmedAt: Date)
+    /// The snapshot the menu shows is still current, as of this time if the proxy reported one.
+    case current(confirmedAt: Date?)
 }
 
 protocol SnapshotLoading: Sendable {
@@ -61,14 +61,15 @@ struct LaunchConfiguration: Equatable, Sendable {
             managedDataDirectory = productionDataDirectory
             installationEnvironment = [:]
         }
-        if arguments.isEmpty {
+        let filtered = arguments.filter { !$0.hasPrefix("-psn_") }
+        if filtered.isEmpty {
             dataDirectory = managedDataDirectory
         } else {
-            guard arguments.count == 2, arguments[0] == "--data-dir" else {
+            guard filtered.count == 2, filtered[0] == "--data-dir" else {
                 throw LaunchConfigurationError.unexpectedArguments
             }
-            guard arguments[1].hasPrefix("/") else { throw LaunchConfigurationError.relativeDataDirectory }
-            dataDirectory = URL(filePath: arguments[1], directoryHint: .isDirectory)
+            guard filtered[1].hasPrefix("/") else { throw LaunchConfigurationError.relativeDataDirectory }
+            dataDirectory = URL(filePath: filtered[1], directoryHint: .isDirectory)
         }
         let readsManagedDataDirectory = dataDirectory.standardizedFileURL == managedDataDirectory.standardizedFileURL
         usesManagedDataDirectory = readsManagedDataDirectory
@@ -91,12 +92,27 @@ struct SnapshotClient: SnapshotLoading {
     private static let waitingTimeout: TimeInterval = 75
     private static let immediateTimeout: TimeInterval = 5
 
+    private final class NoRedirectDelegate: NSObject, URLSessionTaskDelegate, Sendable {
+        func urlSession(
+            _ session: URLSession,
+            task: URLSessionTask,
+            willPerformHTTPRedirection response: HTTPURLResponse,
+            newRequest request: URLRequest,
+            completionHandler: @escaping @Sendable (URLRequest?) -> Void
+        ) {
+            completionHandler(nil)
+        }
+    }
+
+    private static let noRedirectDelegate = NoRedirectDelegate()
+
     private static let session: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = waitingTimeout
         configuration.timeoutIntervalForResource = waitingTimeout
         configuration.urlCache = nil
-        return URLSession(configuration: configuration)
+        configuration.connectionProxyDictionary = [:]
+        return URLSession(configuration: configuration, delegate: noRedirectDelegate, delegateQueue: nil)
     }()
 
     func loadSnapshot(after version: String?) async throws -> SnapshotFetch {
@@ -122,17 +138,27 @@ struct SnapshotClient: SnapshotLoading {
             return .changed(data, version: latestVersion)
         case 304:
             let confirmed = http?.value(forHTTPHeaderField: "X-Snapshot-Composed-At")
-                .flatMap { try? Date($0, strategy: .iso8601.year().month().day().time(includingFractionalSeconds: true)) }
-            return .current(confirmedAt: confirmed ?? .now)
+                .flatMap(Self.parseComposedAt)
+            return .current(confirmedAt: confirmed)
         case let status:
             throw SnapshotClientError.status(status)
         }
     }
 
+    static func parseComposedAt(_ raw: String) -> Date? {
+        if let date = try? Date.ISO8601FormatStyle(includingFractionalSeconds: true).parse(raw) {
+            return date
+        }
+        return try? Date.ISO8601FormatStyle().parse(raw)
+    }
+
     func snapshotURL() throws -> URL {
         guard let contents = try? String(contentsOf: urlFile, encoding: .utf8),
               let url = URL(string: contents.trimmingCharacters(in: .whitespacesAndNewlines)),
-              url.scheme == "http" else {
+              url.scheme == "http",
+              url.port != nil,
+              let host = url.host?.lowercased(),
+              host == "127.0.0.1" || host == "::1" || host == "localhost" else {
             throw SnapshotClientError.unreadableURLFile
         }
         return url

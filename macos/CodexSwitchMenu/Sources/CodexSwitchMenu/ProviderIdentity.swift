@@ -4,14 +4,29 @@ import SwiftUI
 extension CSSwitch_Provider {
     var title: String {
         switch self {
+        case .chatgpt, .unspecified: "Codex"
         case .claude: "Claude"
-        default: "Codex"
+        case .gemini: "Gemini"
+        case .UNRECOGNIZED: "Unknown"
+        }
+    }
+
+    var isRouted: Bool {
+        switch self {
+        case .chatgpt, .claude, .unspecified: true
+        case .gemini, .UNRECOGNIZED: false
         }
     }
 
     /// The provider's own logo, as a template image.
     var mark: NSImage? {
-        let name = self == .claude ? "claude" : "openai"
+        let name: String? = switch self {
+        case .chatgpt, .unspecified: "openai"
+        case .claude: "claude"
+        case .gemini: "gemini"
+        case .UNRECOGNIZED: nil
+        }
+        guard let name else { return nil }
         let resources = Bundle.main.url(forResource: "CodexSwitchMenu_CodexSwitchMenu", withExtension: "bundle")
             .flatMap(Bundle.init(url:)) ?? .module
         guard let url = resources.url(forResource: name, withExtension: "svg", subdirectory: "Resources"),

@@ -4,6 +4,7 @@ import SwiftUI
 struct UsageFooter: View {
     let store: OverviewStore
     var updates: UpdateController? = nil
+    var onRefresh: (() -> Void)? = nil
 
     var body: some View {
         HStack {
@@ -16,7 +17,10 @@ struct UsageFooter: View {
             Spacer()
             Menu("Options") {
                 Button("Refresh now", systemImage: "arrow.clockwise") {
-                    Task { await store.refresh() }
+                    Task {
+                        await store.refresh()
+                        onRefresh?()
+                    }
                 }
                 .disabled(store.isRefreshing)
                 if let updates {

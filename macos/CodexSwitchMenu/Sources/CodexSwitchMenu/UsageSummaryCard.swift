@@ -53,7 +53,7 @@ private struct UsageBreakdown: View {
             HStack(spacing: 18) {
                 BreakdownRing(
                     shares: shares,
-                    total: format(total),
+                    total: ringFormat(total),
                     accessibilityLabel: "\(selectedMetric.title) \(format(total))"
                 )
                 VStack(alignment: .leading, spacing: density.legendGap) {
@@ -85,6 +85,13 @@ private struct UsageBreakdown: View {
     }
 
     private var total: Int64? { presentation.total(selectedMetric) }
+
+    private func ringFormat(_ amount: Int64) -> String {
+        switch selectedMetric {
+        case .cost: UsageFormatting.ringCost(amount)
+        case .tokens: UsageFormatting.tokens(amount)
+        }
+    }
 
     private func format(_ amount: Int64) -> String {
         switch selectedMetric {

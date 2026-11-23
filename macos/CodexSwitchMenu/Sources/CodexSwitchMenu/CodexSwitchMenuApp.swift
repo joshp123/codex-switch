@@ -26,7 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             launchConfiguration = try LaunchConfiguration(arguments: Array(CommandLine.arguments.dropFirst()))
         } catch {
             launchLogger.error("Invalid launch arguments: \(String(describing: error), privacy: .public)")
-            return
+            exit(2)
         }
         let application = NSApplication.shared
         let delegate = AppDelegate(launchConfiguration: launchConfiguration)

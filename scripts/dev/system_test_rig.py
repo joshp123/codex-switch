@@ -297,6 +297,7 @@ def proxy_environment():
     if not REAL_SERVICES:
         environment.update({'CODEX_SWITCH_UPSTREAM_ORIGIN': read('fake-providers-origin'), 'CODEX_SWITCH_CLAUDE_UPSTREAM_ORIGIN': read('fake-providers-origin'),
                             'CODEX_SWITCH_CLAUDE_TOKEN_ORIGIN': read('fake-providers-origin'),
+                            'CODEX_SWITCH_AGY_BIN': 'none',
                             'CODEX_SWITCH_ACCOUNT_READ_SECONDS': str(ACCOUNT_READ_SECONDS),
                             'CODEX_SWITCH_CONNECTION_DRAIN_SECONDS': str(CONNECTION_DRAIN_SECONDS),
                             'CODEX_SWITCH_MENU_SNAPSHOT_SECONDS': str(MENU_SNAPSHOT_SECONDS)})

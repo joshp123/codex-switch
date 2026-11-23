@@ -42,9 +42,23 @@ enum UsageTheme {
         Color(red: 0.96, green: 0.58, blue: 0.48),
         Color(red: 0.62, green: 0.46, blue: 0.26),
     ]
+    private static let geminiColours: [Color] = [
+        Color(red: 0.08, green: 0.64, blue: 0.62),
+        Color(red: 0.22, green: 0.74, blue: 0.70),
+        Color(red: 0.05, green: 0.48, blue: 0.50),
+        Color(red: 0.36, green: 0.80, blue: 0.74),
+        Color(red: 0.14, green: 0.56, blue: 0.58),
+        Color(red: 0.46, green: 0.72, blue: 0.74),
+    ]
 
     static func accountColour(_ provider: CSSwitch_Provider, _ number: Int) -> Color {
-        let family = provider == .claude ? claudeColours : codexColours
+        let family: [Color]
+        switch provider {
+        case .chatgpt, .unspecified: family = codexColours
+        case .claude: family = claudeColours
+        case .gemini: family = geminiColours
+        case .UNRECOGNIZED: return .secondary
+        }
         return family[(max(number, 1) - 1) % family.count]
     }
 }

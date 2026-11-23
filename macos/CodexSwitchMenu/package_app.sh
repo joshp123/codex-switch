@@ -53,8 +53,9 @@ if [[ -n $installation_root ]]; then
     display_name="Codex Switch Isolated"
     bundle_identifier=com.josh.codex-switch-menu.isolated
 fi
+resolved_executable=$(/bin/realpath "$destination/Contents/MacOS/CodexSwitchMenu" 2>/dev/null || printf '%s' "$destination/Contents/MacOS/CodexSwitchMenu")
 running_matching_app=$(
-    /bin/ps -axo pid=,comm= | /usr/bin/awk -v executable="$destination/Contents/MacOS/CodexSwitchMenu" '$2 == executable {print $1 " " $2}'
+    /bin/ps -axo pid=,comm= | /usr/bin/awk -v executable="$resolved_executable" '{pid=$1; sub(/^[[:space:]]*[0-9]+[[:space:]]+/, ""); if ($0 == executable) print pid " " $0}'
 )
 [[ -z $running_matching_app ]] || {
     print -u2 "refusing to replace $running_bundle_name while process $running_matching_app is running"

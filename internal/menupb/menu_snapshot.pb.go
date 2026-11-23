@@ -28,6 +28,7 @@ const (
 	Provider_PROVIDER_UNSPECIFIED Provider = 0
 	Provider_PROVIDER_CHATGPT     Provider = 1
 	Provider_PROVIDER_CLAUDE      Provider = 2
+	Provider_PROVIDER_GEMINI      Provider = 3
 )
 
 // Enum value maps for Provider.
@@ -36,11 +37,13 @@ var (
 		0: "PROVIDER_UNSPECIFIED",
 		1: "PROVIDER_CHATGPT",
 		2: "PROVIDER_CLAUDE",
+		3: "PROVIDER_GEMINI",
 	}
 	Provider_value = map[string]int32{
 		"PROVIDER_UNSPECIFIED": 0,
 		"PROVIDER_CHATGPT":     1,
 		"PROVIDER_CLAUDE":      2,
+		"PROVIDER_GEMINI":      3,
 	}
 )
 
@@ -1486,11 +1489,12 @@ const file_menu_snapshot_proto_rawDesc = "" +
 	"\x0e_cost_nano_usd\"s\n" +
 	"\fProviderBurn\x127\n" +
 	"\bprovider\x18\x01 \x01(\x0e2\x1b.codex_switch.menu.ProviderR\bprovider\x12*\n" +
-	"\x11accounts_per_week\x18\x02 \x01(\x01R\x0faccountsPerWeek*O\n" +
+	"\x11accounts_per_week\x18\x02 \x01(\x01R\x0faccountsPerWeek*d\n" +
 	"\bProvider\x12\x18\n" +
 	"\x14PROVIDER_UNSPECIFIED\x10\x00\x12\x14\n" +
 	"\x10PROVIDER_CHATGPT\x10\x01\x12\x13\n" +
-	"\x0fPROVIDER_CLAUDE\x10\x02*\xd6\x01\n" +
+	"\x0fPROVIDER_CLAUDE\x10\x02\x12\x13\n" +
+	"\x0fPROVIDER_GEMINI\x10\x03*\xd6\x01\n" +
 	"\fAccountState\x12\x1d\n" +
 	"\x19ACCOUNT_STATE_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13ACCOUNT_STATE_READY\x10\x01\x12\x19\n" +

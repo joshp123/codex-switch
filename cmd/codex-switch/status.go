@@ -111,8 +111,11 @@ func writeCurrentStatus(output io.Writer, snapshot *menupb.MenuSnapshot) {
 	pool := make([]accountapi.PoolAccount, 0, len(snapshot.Accounts))
 	for _, account := range snapshot.Accounts {
 		provider := accountapi.ProviderCodex
-		if account.Provider == menupb.Provider_PROVIDER_CLAUDE {
+		switch account.Provider {
+		case menupb.Provider_PROVIDER_CLAUDE:
 			provider = accountapi.ProviderClaude
+		case menupb.Provider_PROVIDER_GEMINI:
+			provider = accountapi.ProviderGemini
 		}
 		pool = append(pool, accountapi.PoolAccount{Key: store.AccountKey(account.Key), Provider: provider})
 	}
@@ -128,14 +131,19 @@ func writeCurrentStatus(output io.Writer, snapshot *menupb.MenuSnapshot) {
 		return strings.Join(names, ", ")
 	}
 	available := 0
+	routedTotal := 0
 	hasChatGPTAccount := false
 	for _, account := range snapshot.Accounts {
+		if account.Provider == menupb.Provider_PROVIDER_GEMINI {
+			continue
+		}
+		routedTotal++
 		hasChatGPTAccount = hasChatGPTAccount || account.Provider != menupb.Provider_PROVIDER_CLAUDE
 		if account.Usable {
 			available++
 		}
 	}
-	fmt.Fprintf(output, "%d of %d accounts can take new work.\n", available, len(snapshot.Accounts))
+	fmt.Fprintf(output, "%d of %d accounts can take new work.\n", available, routedTotal)
 	for _, burn := range snapshot.ProviderBurns {
 		providerName := "Codex"
 		if burn.Provider == menupb.Provider_PROVIDER_CLAUDE {
@@ -154,7 +162,16 @@ func writeCurrentStatus(output io.Writer, snapshot *menupb.MenuSnapshot) {
 	}
 	for _, account := range snapshot.Accounts {
 		state := "available"
-		if !account.Usable {
+		if account.Provider == menupb.Provider_PROVIDER_GEMINI {
+			switch account.State {
+			case menupb.AccountState_ACCOUNT_STATE_READY:
+				state = "usage only"
+			case menupb.AccountState_ACCOUNT_STATE_LIMITED:
+				state = "usage only · limit reached"
+			default:
+				state = "unavailable: " + oneLine(account.UnavailableReason)
+			}
+		} else if !account.Usable {
 			state = "unavailable: " + oneLine(account.UnavailableReason)
 			if account.UnavailableUntil != nil {
 				state += " until " + account.UnavailableUntil.AsTime().Local().Format("Mon 2 Jan 15:04")
@@ -324,6 +341,18 @@ func writeAccountTokenTable(output io.Writer, snapshot *menupb.MenuSnapshot, acc
 		fmt.Fprintf(writer, "\n%s\tToday\t7 Days\t30 Days\n", table.heading)
 		totals := make(map[menupb.ReportingPeriodKind]int64)
 		for _, account := range snapshot.Accounts {
+			if account.Provider == menupb.Provider_PROVIDER_GEMINI {
+				hasUsage := false
+				for _, kind := range periods {
+					if byPeriod[kind][account.Key] != nil {
+						hasUsage = true
+						break
+					}
+				}
+				if !hasUsage {
+					continue
+				}
+			}
 			fmt.Fprint(writer, accountDisplayName(account.Key))
 			for _, kind := range periods {
 				value := table.value(byPeriod[kind][account.Key])
@@ -342,16 +371,26 @@ func writeAccountTokenTable(output io.Writer, snapshot *menupb.MenuSnapshot, acc
 }
 
 func dollars(nanoUSD int64) string {
+	sign := ""
+	if nanoUSD < 0 {
+		sign = "-"
+		nanoUSD = -nanoUSD
+	}
 	cents := (nanoUSD + 5_000_000) / 10_000_000
-	return "$" + groupedTokens(cents/100) + fmt.Sprintf(".%02d", cents%100)
+	return sign + "$" + groupedTokens(cents/100) + fmt.Sprintf(".%02d", cents%100)
 }
 
 func groupedTokens(value int64) string {
 	digits := strconv.FormatInt(value, 10)
+	sign := ""
+	if strings.HasPrefix(digits, "-") {
+		sign = "-"
+		digits = digits[1:]
+	}
 	for index := len(digits) - 3; index > 0; index -= 3 {
 		digits = digits[:index] + "," + digits[index:]
 	}
-	return digits
+	return sign + digits
 }
 
 // taskLabel names a task by its title, shortened to one line, or by its ID.

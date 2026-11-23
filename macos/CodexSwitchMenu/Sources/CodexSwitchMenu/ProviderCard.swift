@@ -143,14 +143,18 @@ extension CSSwitch_AllowanceWindow {
 
     /// "Session", "Weekly", or the model the limit belongs to, such as "Fable".
     func title(for provider: CSSwitch_Provider) -> String {
-        guard modelID.isEmpty && modelName.isEmpty else { return modelName.isEmpty ? modelID : modelName }
-        return switch periodSeconds {
+        let periodTitle: String = switch periodSeconds {
         case 18_000 where provider == .claude: "Session"
         case 604_800: "Weekly"
         case let seconds where seconds % 86_400 == 0: "\(seconds / 86_400)-day"
         case let seconds where seconds % 3_600 == 0: "\(seconds / 3_600)-hour"
         default: "\(periodSeconds / 60)-minute"
         }
+        guard modelID.isEmpty && modelName.isEmpty else {
+            let model = modelName.isEmpty ? modelID : modelName
+            return provider == .gemini ? "\(model) · \(periodTitle)" : model
+        }
+        return periodTitle
     }
 
     /// Nothing left to use before the reset.

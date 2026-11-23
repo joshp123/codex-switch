@@ -57,6 +57,7 @@ type menuSnapshots struct {
 	database     *store.StoreDatabase
 	usageLedger  *usage.UsageLedger
 	codex        *codexstate.LocalReader
+	gemini       *accountapi.GeminiUsageMonitor
 	// interval is menuSnapshotInterval, which the system test shortens.
 	interval time.Duration
 
@@ -125,6 +126,13 @@ func (recorder composeAfterCompletedResponse) RecordCompletedResponse(record sto
 	return nil
 }
 
+func (snapshots *menuSnapshots) notifyWorkDone() {
+	select {
+	case snapshots.workDone <- struct{}{}:
+	default:
+	}
+}
+
 // StopWaiting answers every waiting reader at once, so a stopping generation
 // holds no request open and the menu moves to the next generation.
 func (snapshots *menuSnapshots) StopWaiting() {
@@ -138,28 +146,49 @@ func (snapshots *menuSnapshots) StopWaiting() {
 }
 
 func (snapshots *menuSnapshots) Run(ctx context.Context) {
+	var lastWorkCompose time.Time
 	for {
-		wait := time.After(snapshots.interval)
 		started := time.Now()
 		err := snapshots.compose(ctx)
 		if took := time.Since(started); took > 10*time.Second {
 			log.Printf("menu snapshot took %s to compose", took.Round(time.Second))
 		}
-		if err != nil && ctx.Err() == nil {
-			log.Printf("could not compose the menu snapshot: %v", err)
+		if err != nil {
+			if ctx.Err() == nil {
+				log.Printf("could not compose the menu snapshot: %v", err)
+			}
 			// Try again soon rather than leaving the menu a minute behind.
-			wait = time.After(5 * time.Second)
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-wait:
-		case <-snapshots.workDone:
-			delay := max(menuSnapshotAfterWork, time.Until(started.Add(snapshots.interval)))
+			retryWait := time.NewTimer(min(5*time.Second, snapshots.interval))
 			select {
 			case <-ctx.Done():
+				retryWait.Stop()
 				return
-			case <-time.After(delay):
+			case <-retryWait.C:
+			}
+			continue
+		}
+		wait := time.NewTimer(snapshots.interval)
+		select {
+		case <-ctx.Done():
+			wait.Stop()
+			return
+		case <-wait.C:
+		case <-snapshots.workDone:
+			wait.Stop()
+			delay := min(menuSnapshotAfterWork, snapshots.interval)
+			if !lastWorkCompose.IsZero() {
+				delay = max(delay, time.Until(lastWorkCompose.Add(snapshots.interval)))
+			}
+			if remaining := time.Until(started.Add(snapshots.interval)); remaining < delay {
+				delay = max(0, remaining)
+			}
+			lastWorkCompose = time.Now().Add(delay)
+			workWait := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				workWait.Stop()
+				return
+			case <-workWait.C:
 			}
 		}
 	}
@@ -197,6 +226,11 @@ func (snapshots *menuSnapshots) compose(ctx context.Context) error {
 	if hasChatGPTAccounts {
 		if err := snapshots.nameCodexTasks(ctx, snapshot); err != nil {
 			return err
+		}
+	}
+	if snapshots.gemini != nil {
+		for index, account := range snapshots.gemini.ReadAccounts() {
+			snapshot.Accounts = append(snapshot.Accounts, menuGeminiAccount(account, uint32(index+1)))
 		}
 	}
 	keepShownTaskRows(snapshot)
@@ -448,6 +482,39 @@ var menuResetKinds = map[accountapi.ResetKind]menupb.ResetKind{
 	accountapi.ResetFiveHour: menupb.ResetKind_RESET_KIND_FIVE_HOUR,
 	accountapi.ResetFull:     menupb.ResetKind_RESET_KIND_FULL,
 	accountapi.ResetFable:    menupb.ResetKind_RESET_KIND_FABLE,
+}
+
+func menuGeminiAccount(account accountapi.GeminiAccountUsage, number uint32) *menupb.Account {
+	entry := &menupb.Account{
+		Key:                   string(account.Key),
+		AccountNumber:         number,
+		Email:                 account.Email,
+		Plan:                  account.Plan,
+		State:                 menuAccountState(account.State),
+		Usable:                false,
+		UnavailableReason:     account.UnavailableReason,
+		OffersConfiguredModel: true,
+		Provider:              menupb.Provider_PROVIDER_GEMINI,
+	}
+	sample := account.AllowanceSample
+	if !sample.ObservedAt.IsZero() {
+		observation := &menupb.AllowanceObservation{
+			ObservedAt:   timestamppb.New(sample.ObservedAt),
+			Allowed:      sample.Allowed,
+			LimitReached: sample.LimitReached,
+		}
+		for _, window := range sample.Windows {
+			observation.Windows = append(observation.Windows, &menupb.AllowanceWindow{
+				PeriodSeconds: window.DurationSeconds,
+				UsedPercent:   window.UsedPercent,
+				ResetAt:       timestamppb.New(window.ResetsAt),
+				ModelId:       window.ModelID,
+				ModelName:     window.ModelName,
+			})
+		}
+		entry.Allowance = observation
+	}
+	return entry
 }
 
 func menuAccountState(state accountapi.AccountState) menupb.AccountState {

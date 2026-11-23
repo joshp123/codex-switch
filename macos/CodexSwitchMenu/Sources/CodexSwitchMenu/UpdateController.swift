@@ -1,3 +1,4 @@
+import AppKit
 import Combine
 import Foundation
 import Observation
@@ -26,6 +27,7 @@ final class UpdateController {
     }
 
     func checkForUpdates() {
+        NSApplication.shared.activate(ignoringOtherApps: true)
         controller.checkForUpdates(nil)
     }
 }

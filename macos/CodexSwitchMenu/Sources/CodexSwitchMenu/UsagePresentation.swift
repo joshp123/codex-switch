@@ -31,8 +31,8 @@ struct UsagePresentation: Equatable, Sendable {
             if !account.offersConfiguredModel, total.tokens == 0, total.costNanoUsd == 0 { return nil }
             return (account, total)
         }
-        totalTokens = period.accounts.reduce(0) { $0 + $1.tokens }
-        totalCostNanoUSD = period.accounts.allSatisfy(\.hasCostNanoUsd) ? period.accounts.reduce(0) { $0 + $1.costNanoUsd } : nil
+        totalTokens = totals.reduce(0) { $0 + $1.1.tokens }
+        totalCostNanoUSD = totals.allSatisfy(\.1.hasCostNanoUsd) ? totals.reduce(0) { $0 + $1.1.costNanoUsd } : nil
         func shares(metric: UsageMetric, total: Int64) -> [Share] {
             var cursor = 0.0
             return totals.map { account, item in

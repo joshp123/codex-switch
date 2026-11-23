@@ -29,6 +29,7 @@ final class StatusBarController: NSObject {
     private let closedPanelStore = OverviewStore(client: ClosedPanelSnapshots(), cacheFile: URL(filePath: "/dev/null"))
     private var refreshTask: Task<Void, Never>?
     private var panelState: PanelState = .closed
+    private var openGeneration: Int = 0
     private var resizeObserver: NSObjectProtocol?
     /// What the status item shows now; it is drawn again only when this changes.
     private var shownValues: [MenuBarAccountValue]?
@@ -102,15 +103,26 @@ final class StatusBarController: NSObject {
         // nothing while nothing changes.
         refreshTask = Task { [weak self] in
             var consecutiveFailures = 0
+            var rapidReturns = 0
             await self?.store.refresh()
             if let self, !self.store.currentCheckSucceeded {
                 consecutiveFailures = 1
             }
             self?.updateStatusItem()
             while let self, !Task.isCancelled {
+                let started = ContinuousClock.now
                 if await self.store.waitForChange() {
                     consecutiveFailures = 0
+                    if ContinuousClock.now - started < .seconds(1) {
+                        rapidReturns += 1
+                        if rapidReturns >= 2 {
+                            try? await Task.sleep(for: .seconds(1))
+                        }
+                    } else {
+                        rapidReturns = 0
+                    }
                 } else {
+                    rapidReturns = 0
                     consecutiveFailures += 1
                     if consecutiveFailures >= 2 {
                         self.onProxyUnreachable?()
@@ -151,12 +163,20 @@ final class StatusBarController: NSObject {
             for monitor in existingMonitors { NSEvent.removeMonitor(monitor) }
             existingRefreshTask.cancel()
         }
+        panelState = .closed
+        openGeneration &+= 1
         let screen = buttonWindow.screen ?? NSScreen.main
         let visibleFrame = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1_512, height: 945)
         let buttonFrame = buttonWindow.convertToScreen(button.convert(button.bounds, to: nil))
         let top = visibleFrame.maxY - Self.screenMargin
         let maximumHeight = top - visibleFrame.minY - Self.screenMargin
-        panelController.rootView = CodexSwitchPanel(store: store, maximumHeight: max(maximumHeight, 320), updates: updates)
+        panelController.rootView = CodexSwitchPanel(
+            store: store,
+            maximumHeight: max(maximumHeight, 320),
+            openGeneration: openGeneration,
+            updates: updates,
+            onRefresh: { [weak self] in self?.updateStatusItem() }
+        )
         panelController.view.layoutSubtreeIfNeeded()
         let size = panelController.view.fittingSize
         // As wide as the content needs, never wider than the screen.
@@ -166,14 +186,15 @@ final class StatusBarController: NSObject {
         let anchorTopLeft = NSPoint(x: x, y: top)
         panel.setFrame(NSRect(x: anchorTopLeft.x, y: anchorTopLeft.y - size.height, width: width, height: size.height),
                        display: false)
-        panel.makeKeyAndOrderFront(nil)
         let monitors = makeDismissMonitors()
         let openRefreshTask = Task { [weak self] in
             guard let self else { return }
             await self.store.refresh()
+            guard !Task.isCancelled else { return }
             self.updateStatusItem()
         }
         panelState = .open(anchorTopLeft: anchorTopLeft, eventMonitors: monitors, refreshTask: openRefreshTask)
+        panel.makeKeyAndOrderFront(nil)
     }
 
     private func closePanel() {
