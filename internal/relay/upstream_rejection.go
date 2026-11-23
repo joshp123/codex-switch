@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"regexp"
 	"strings"
 
 	"github.com/joshp123/codex-switch/internal/store"
@@ -84,6 +85,8 @@ func shortened(reason string) string {
 	return reason
 }
 
+var htmlTitlePattern = regexp.MustCompile(`(?is)<title\b[^>]*>(.*?)</title>`)
+
 func describeRejectionText(header http.Header, body []byte) string {
 	if mitigation := header.Get("Cf-Mitigated"); mitigation != "" {
 		return fmt.Sprintf(": Cloudflare stopped the request before OpenAI (cf-mitigated: %s, cf-ray: %s)", mitigation, header.Get("Cf-Ray"))
@@ -96,11 +99,8 @@ func describeRejectionText(header http.Header, body []byte) string {
 	if !strings.Contains(strings.ToLower(header.Get("Content-Type")), "html") {
 		return describeProviderReason(httpJSONResponseWire{Detail: text})
 	}
-	lower := strings.ToLower(text)
-	if start := strings.Index(lower, "<title>"); start >= 0 {
-		if end := strings.Index(lower[start:], "</title>"); end >= 0 {
-			return describeProviderReason(httpJSONResponseWire{Detail: "an HTML page titled " + lower[start+len("<title>"):start+end]})
-		}
+	if match := htmlTitlePattern.FindStringSubmatch(text); len(match) == 2 {
+		return describeProviderReason(httpJSONResponseWire{Detail: "an HTML page titled " + match[1]})
 	}
 	return ": an HTML page instead of an API error"
 }

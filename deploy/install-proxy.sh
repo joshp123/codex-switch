@@ -290,9 +290,9 @@ bootstrap_job "$temporary_plist"
 readiness_result=0
 wait_for_job "$next_label" true || readiness_result=$?
 if [ "$readiness_result" -ne 0 ]; then
-  switch_in_progress=false
   stop_job "$next_label" "$next_binary"
   /usr/bin/trash "$data/switch-started"
+  switch_in_progress=false
   if [ "$readiness_result" -eq 2 ] && [ "$active" != none ] && [ "$manual" = false ]; then printf '%s\n' "$chosen_build" >> "$data/skipped-builds"; echo "build $chosen_build was skipped"; exit 0; fi
   if [ "$readiness_result" -eq 3 ]; then echo "a provider could not be read; see $data/proxy.log; the switch is tried again" >&2; fi
   exit 1
@@ -302,10 +302,10 @@ candidate_pid=$pid
 /bin/ln -sf "$next_binary" "$command_link"
 if [ "$active" != none ]; then
   step_aside() {
-    switch_in_progress=false
     /bin/ln -sf "$active_binary" "$command_link"
     stop_job "$next_label" "$next_binary"
     /usr/bin/trash "$data/switch-started"
+    switch_in_progress=false
   }
   proof_started=$(/bin/date +%s)
   missed_checks=0

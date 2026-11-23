@@ -136,12 +136,9 @@ func (observer *terminalResponseObserver) observeStructuredEvent(eventBytes []by
 		if event.Response.ID != "" {
 			observer.settleModelRequest(event.Response.ID, store.ModelRequestSuccessful)
 		}
-		if observer.onCompletedReply != nil {
-			observer.onCompletedReply()
-		}
 		observer.admittedRequests = max(0, observer.admittedRequests-1)
 		observer.activeResponses = max(0, observer.activeResponses-1)
-		observer.recordCompletedResponse(event.Response)
+		observer.recordCompletedResponse(event.Response, true)
 		observer.noteResponseEnded()
 		return false
 	case "response.failed", "response.incomplete":
@@ -149,7 +146,7 @@ func (observer *terminalResponseObserver) observeStructuredEvent(eventBytes []by
 		observer.admittedRequests = max(0, observer.admittedRequests-1)
 		observer.logProviderFailure(event.Response.failureReason())
 		if event.Type == "response.incomplete" && event.Response.Usage != nil {
-			observer.recordCompletedResponse(event.Response)
+			observer.recordCompletedResponse(event.Response, false)
 		}
 		observer.activeResponses = max(0, observer.activeResponses-1)
 		observer.noteResponseEnded()
@@ -197,19 +194,16 @@ func (observer *terminalResponseObserver) observeHTTPJSONBody(bodyBytes []byte) 
 		observer.admittedRequests = 0
 		observer.logProviderFailure(response.failureReason())
 		if response.Status == "incomplete" && response.Usage != nil {
-			observer.recordCompletedResponse(response.completedResponseWire)
+			observer.recordCompletedResponse(response.completedResponseWire, false)
 		}
 		return
 	}
 	if response.ID != "" && (response.Status == "completed" || response.Usage != nil) {
 		observer.settleModelRequest(response.ID, store.ModelRequestSuccessful)
-		if observer.onCompletedReply != nil {
-			observer.onCompletedReply()
-		}
 		observer.admittedRequests = 0
 	}
 	if response.Usage != nil {
-		observer.recordCompletedResponse(response.completedResponseWire)
+		observer.recordCompletedResponse(response.completedResponseWire, true)
 	}
 }
 
@@ -293,7 +287,7 @@ func (observer *terminalResponseObserver) reportProviderUsageLimit(providerError
 	), true
 }
 
-func (observer *terminalResponseObserver) recordCompletedResponse(response completedResponseWire) {
+func (observer *terminalResponseObserver) recordCompletedResponse(response completedResponseWire, completed bool) {
 	if response.Generate != nil && !*response.Generate {
 		return
 	}
@@ -302,6 +296,9 @@ func (observer *terminalResponseObserver) recordCompletedResponse(response compl
 		response.Usage.InputTokens == nil || response.Usage.OutputTokens == nil {
 		log.Printf("%s: OpenAI completed response %q without complete token usage; its usage is not recorded", observer.describe(), response.ID)
 		return
+	}
+	if completed && observer.onCompletedReply != nil {
+		observer.onCompletedReply()
 	}
 	taskID := observer.taskID
 	if observer.forkSourceTaskID != "" {

@@ -418,7 +418,7 @@ func cleanAgyEnv(base []string) []string {
 	cleaned := make([]string, 0, len(base))
 	for _, entry := range base {
 		name, _, _ := strings.Cut(entry, "=")
-		if strings.HasPrefix(name, "ANTIGRAVITY_") || name == "SSH_CONNECTION" || name == "SSH_CLIENT" || name == "SSH_TTY" {
+		if strings.HasPrefix(name, "ANTIGRAVITY_") || strings.HasPrefix(name, "SSH_") {
 			continue
 		}
 		cleaned = append(cleaned, entry)

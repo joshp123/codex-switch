@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import SwiftProtobuf
 
@@ -165,15 +166,23 @@ struct SnapshotClient: SnapshotLoading {
     }
 
     private static func isLoopbackHost(_ host: String) -> Bool {
-        if host == "localhost" || host == "::1" || host == "[::1]" {
+        if host == "localhost" {
             return true
         }
-        let octets = host.split(separator: ".", omittingEmptySubsequences: false)
-        guard octets.count == 4, octets[0] == "127" else { return false }
-        return octets.allSatisfy { part in
-            guard let value = Int(part) else { return false }
-            return (0...255).contains(value)
+        let stripped = (host.hasPrefix("[") && host.hasSuffix("]"))
+            ? String(host.dropFirst().dropLast())
+            : host
+        var ipv4 = in_addr()
+        if inet_pton(AF_INET, stripped, &ipv4) == 1 {
+            return (UInt32(bigEndian: ipv4.s_addr) >> 24) == 127
         }
+        var ipv6 = in6_addr()
+        if inet_pton(AF_INET6, stripped, &ipv6) == 1 {
+            return withUnsafeBytes(of: &ipv6) { bytes in
+                bytes.prefix(15).allSatisfy { $0 == 0 } && bytes.last == 1
+            }
+        }
+        return false
     }
 }
 
