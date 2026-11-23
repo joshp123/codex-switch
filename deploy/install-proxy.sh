@@ -39,8 +39,18 @@ if [ -z "${CODEX_SWITCH_LOCKED_WORKSPACE:-}" ]; then
 fi
 workspace=$CODEX_SWITCH_LOCKED_WORKSPACE
 unset CODEX_SWITCH_LOCKED_WORKSPACE
+switch_in_progress=false
 cleanup() {
-  /usr/bin/trash "$workspace"
+  if [ "$switch_in_progress" = true ]; then
+    if [ "${active:-none}" != none ] && [ -n "${active_binary:-}" ]; then
+      /bin/ln -sf "$active_binary" "$command_link" 2>/dev/null || true
+    fi
+    if [ -n "${next_label:-}" ] && [ -n "${next_binary:-}" ]; then
+      stop_job "$next_label" "$next_binary" 2>/dev/null || true
+    fi
+    [ ! -e "$data/switch-started" ] || /usr/bin/trash "$data/switch-started" 2>/dev/null || true
+  fi
+  /usr/bin/trash "$workspace" 2>/dev/null || true
 }
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
@@ -57,8 +67,8 @@ switch_limit_seconds=${CODEX_SWITCH_SWITCH_LIMIT_SECONDS:-1800}
 state="$data/serving-slot"
 status_field() { printf '%s' "$1" | /usr/bin/plutil -extract "$2" raw -o - - 2>/dev/null; }
 serving_status() {
-  [ -f "$data/client-capability" ] || return 1
-  /usr/bin/curl -sf --max-time 2 "http://$listen/client/$(cat "$data/client-capability")/codex-switch/deploy-status"
+  [ -s "$data/client-capability" ] || return 1
+  printf 'url = "http://%s/client/%s/codex-switch/deploy-status"\n' "$listen" "$(cat "$data/client-capability")" | /usr/bin/curl -sf --max-time 2 -K -
 }
 job_pid() { /bin/launchctl print "$domain/$1" 2>/dev/null | /usr/bin/awk '$1 == "pid" && $2 == "=" {print $3; exit}'; }
 job_loaded() { /bin/launchctl print "$domain/$1" >/dev/null 2>&1; }
@@ -127,7 +137,7 @@ stop_job() {
   done
 }
 # Old installations are kept running in their original job during adoption.
-if [ -f "$state" ]; then
+if [ -f "$state" ] && [ -f "$(slot_plist "$(cat "$state")")" ]; then
   active=$(cat "$state")
   active_plist=$(slot_plist "$active")
   active_label="$label.$active"
@@ -217,6 +227,10 @@ choose_newest
 if [ "$active" != none ]; then
   active_build=$(status_field "$status" build || echo 0)
   case "$active_build" in ''|*[!0-9]*) active_build=0 ;; esac
+  if [ "$active_build" -eq 0 ] && [ -x "$active_binary" ]; then
+    active_build=$("$active_binary" print-build 2>/dev/null || echo 0)
+    case "$active_build" in ''|*[!0-9]*) active_build=0 ;; esac
+  fi
   if [ "$manual" = false ] && [ "$chosen_build" -le "$active_build" ]; then echo 'the newest proxy is already serving'; exit 0; fi
   if [ "$manual" = false ] && [ -f "$data/skipped-builds" ] && /usr/bin/grep -qxF "$chosen_build" "$data/skipped-builds"; then echo "build $chosen_build was skipped"; exit 0; fi
   if [ "$manual" = false ] && [ "$serving_answers" = true ]; then
@@ -271,10 +285,12 @@ else
 fi
 switch_started=$(/bin/date +%s)
 printf '%s\n' "$switch_started" > "$data/switch-started"
+switch_in_progress=true
 bootstrap_job "$temporary_plist"
 readiness_result=0
 wait_for_job "$next_label" true || readiness_result=$?
 if [ "$readiness_result" -ne 0 ]; then
+  switch_in_progress=false
   stop_job "$next_label" "$next_binary"
   /usr/bin/trash "$data/switch-started"
   if [ "$readiness_result" -eq 2 ] && [ "$active" != none ] && [ "$manual" = false ]; then printf '%s\n' "$chosen_build" >> "$data/skipped-builds"; echo "build $chosen_build was skipped"; exit 0; fi
@@ -286,28 +302,44 @@ candidate_pid=$pid
 /bin/ln -sf "$next_binary" "$command_link"
 if [ "$active" != none ]; then
   step_aside() {
+    switch_in_progress=false
     /bin/ln -sf "$active_binary" "$command_link"
     stop_job "$next_label" "$next_binary"
     /usr/bin/trash "$data/switch-started"
   }
   proof_started=$(/bin/date +%s)
+  missed_checks=0
   echo "proving build $chosen_build on real work"
   while :; do
     status=$(serving_status || true)
     current_pid=$(job_pid "$next_label")
-    failures=$(status_field "$status" failures || echo 0)
-    case "$failures" in ''|*[!0-9]*) failures=0 ;; esac
-    if ! kill -0 "$candidate_pid" 2>/dev/null || { [ -n "$current_pid" ] && [ "$current_pid" != "$candidate_pid" ]; } || [ "$failures" -ge 3 ]; then
+    status_pid=$(status_field "$status" pid || true)
+    if ! kill -0 "$candidate_pid" 2>/dev/null || { [ -n "$current_pid" ] && [ "$current_pid" != "$candidate_pid" ]; }; then
       [ "$manual" = true ] || printf '%s\n' "$chosen_build" >> "$data/skipped-builds"
       step_aside
       if [ "$manual" = true ]; then echo 'previous proxy failed; current proxy remains serving' >&2; exit 1; fi
       echo "build $chosen_build was skipped; the previous proxy remains serving"
       exit 0
     fi
-    if [ "$(status_field "$status" pid || true)" != "$candidate_pid" ]; then
+    if [ "$status_pid" != "$candidate_pid" ]; then
+      missed_checks=$((missed_checks + 1))
+      if [ "$missed_checks" -ge 5 ]; then
+        step_aside
+        echo "could not check the candidate; try again" >&2
+        exit 1
+      fi
+      sleep 1
+      continue
+    fi
+    missed_checks=0
+    failures=$(status_field "$status" failures || echo 0)
+    case "$failures" in ''|*[!0-9]*) failures=0 ;; esac
+    if [ "$failures" -ge 3 ]; then
+      [ "$manual" = true ] || printf '%s\n' "$chosen_build" >> "$data/skipped-builds"
       step_aside
-      echo "could not check the candidate; try again" >&2
-      exit 1
+      if [ "$manual" = true ]; then echo 'previous proxy failed; current proxy remains serving' >&2; exit 1; fi
+      echo "build $chosen_build was skipped; the previous proxy remains serving"
+      exit 0
     fi
     proved_for=$(($(/bin/date +%s) - proof_started))
     if [ "$proved_for" -ge "$proving_seconds" ]; then
@@ -329,6 +361,7 @@ fi
 /bin/mv -f "$next_plist.next" "$next_plist"
 printf '%s\n' "$next" > "$state.next"
 /bin/mv -f "$state.next" "$state"
+switch_in_progress=false
 if [ "$manual" = true ] && [ "${active_build:-0}" -gt 0 ] && [ "$active_build" -ne "$chosen_build" ]; then
   printf '%s\n' "$active_build" >> "$data/skipped-builds"
 fi

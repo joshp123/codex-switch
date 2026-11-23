@@ -53,16 +53,24 @@ func (monitor *Monitor) observeClaudeAccount(parent context.Context, account Poo
 		}
 		return fact
 	}
-	if fact.AccountState == AccountSignInRequired || fact.AccountState == AccountCredentialsUnavailable {
+	previouslySignedOut := fact.AccountState == AccountSignInRequired
+	credentialsChanged := fact.Credentials != credentials
+	if fact.AccountState == AccountCredentialsUnavailable || (previouslySignedOut && credentialsChanged) {
 		fact.AccountStateCause = nil
 	}
-	fact.Credentials, fact.AccountState = credentials, AccountReady
+	fact.Credentials = credentials
+	if !previouslySignedOut || credentialsChanged {
+		fact.AccountState = AccountReady
+	}
 	startedAt := time.Now()
 	cache, due, err := monitor.reserveClaudeUsageRead(login.home, startedAt)
 	if err != nil {
 		fact.AccountStateCause = err
 		updateClaudeSharedState(&fact, time.Now())
 		return fact
+	}
+	if previouslySignedOut && credentialsChanged {
+		due = true
 	}
 	fact.AllowanceSample = mergeClaudeAllowance(fact.AllowanceSample, cache.Sample)
 	fact.ClaudeRestrictions = mergeClaudeRestrictions(fact.ClaudeRestrictions, cache.Restrictions)
@@ -79,6 +87,7 @@ func (monitor *Monitor) observeClaudeAccount(parent context.Context, account Poo
 		}
 		fact.AccountStateCause = err
 		if err == nil {
+			fact.AccountState = AccountReady
 			fact.AllowanceSample = mergeClaudeAllowance(fact.AllowanceSample, sample)
 			fact.RefreshedAt = startedAt
 			clearClaudeRestrictionsFromSample(&fact, sample)
@@ -101,9 +110,18 @@ func clearClaudeRestrictionsFromSample(fact *AccountRoutingFact, sample Allowanc
 	fact.ClaudeRestrictions = mergeClaudeRestrictions(nil, fact.ClaudeRestrictions)
 	for scope, restriction := range fact.ClaudeRestrictions {
 		for _, window := range sample.Windows {
-			if claudeWindowRestrictionScope(window) == scope && !claudeWindowAtLimit(window) && window.ObservedAt.After(restriction.ObservedAt) {
-				fact.ClaudeRestrictions[scope] = ClaudeRestriction{ObservedAt: window.ObservedAt}
+			if claudeWindowAtLimit(window) || !window.ObservedAt.After(restriction.ObservedAt) {
+				continue
 			}
+			windowScope := claudeWindowRestrictionScope(window)
+			scopeMatches := windowScope == scope || (scope != "" && ClaudeModelFamily(window.ModelName) == scope)
+			if !scopeMatches {
+				continue
+			}
+			if restriction.Claim != "" && claudeWindowClaim(window) != restriction.Claim {
+				continue
+			}
+			fact.ClaudeRestrictions[scope] = ClaudeRestriction{ObservedAt: window.ObservedAt}
 		}
 	}
 }

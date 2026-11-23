@@ -252,7 +252,7 @@ func (s *savedLogin) refresh(ctx context.Context, auth *authFile) error {
 		auth.Tokens.RefreshToken = result.RefreshToken
 	}
 	if result.IDToken != "" {
-		if accountID := claim(result.IDToken, "chatgpt_account_id"); accountID != "" && accountID != auth.Tokens.AccountID {
+		if accountID := idTokenChatGPTAccountID(result.IDToken); accountID != "" && accountID != auth.Tokens.AccountID {
 			return signInRequired(errors.New("refreshed credentials belong to another account"))
 		}
 		auth.Tokens.IDToken = result.IDToken
@@ -264,6 +264,20 @@ func (s *savedLogin) refresh(ctx context.Context, auth *authFile) error {
 func expiresSoon(token string, margin time.Duration) bool {
 	exp, ok := claimNumber(token, "exp")
 	return !ok || time.Unix(exp, 0).Before(time.Now().Add(margin))
+}
+
+func idTokenChatGPTAccountID(token string) string {
+	payload, ok := jwtPayload(token)
+	if !ok {
+		return ""
+	}
+	if auth, ok := payload["https://api.openai.com/auth"].(map[string]any); ok {
+		if value, _ := auth["chatgpt_account_id"].(string); value != "" {
+			return value
+		}
+	}
+	value, _ := payload["chatgpt_account_id"].(string)
+	return value
 }
 
 func claim(token, name string) string {

@@ -73,6 +73,9 @@ func (ledger *UsageLedger) discoverPiSessions(sessionDirectory string, since tim
 			return nil
 		}
 		info, err := entry.Info()
+		if os.IsNotExist(err) {
+			return nil
+		}
 		if err != nil {
 			return err
 		}
@@ -80,7 +83,7 @@ func (ledger *UsageLedger) discoverPiSessions(sessionDirectory string, since tim
 			return nil
 		}
 		header, err := ledger.cachedPiSessionHeader(path)
-		if err == io.EOF || errors.Is(err, errNotPiSession) {
+		if err == io.EOF || errors.Is(err, errNotPiSession) || os.IsNotExist(err) {
 			return nil
 		}
 		if err != nil {

@@ -63,6 +63,21 @@ func proxyCompletion(response store.CompletedResponseRecord) reconciledCompletio
 	if response.CostNanoUSD != nil {
 		price := nanoUSD(*response.CostNanoUSD)
 		cost = &price
+	} else if cost == nil {
+		var cacheWrite int64
+		if response.CacheWriteInputTokens != nil {
+			cacheWrite = *response.CacheWriteInputTokens
+		}
+		if response.InputTokens >= response.CachedInputTokens+cacheWrite {
+			uncached := response.InputTokens - response.CachedInputTokens - cacheWrite
+			output, cacheRead := response.OutputTokens, response.CachedInputTokens
+			if price := claudeMessagePrice(response.ModelSlug, response.HarnessMode, "", claudeMessageUsage{
+				Input: &uncached, Output: &output, CacheRead: &cacheRead, CacheWrite: &cacheWrite,
+			}); price != nil {
+				n := nanoUSD(*price)
+				cost = &n
+			}
+		}
 	}
 	return reconciledCompletion{TaskID: string(response.TaskID), At: response.CompletedAt, LastCompletedAt: response.CompletedAt, AccountKey: response.AccountKey, Model: response.ModelSlug, Tokens: response.InputTokens + response.OutputTokens, Cost: cost, Fast: mode == harnessFast, ResponseID: response.CompletedResponseID}
 }

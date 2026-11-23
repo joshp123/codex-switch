@@ -3,6 +3,8 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"net/url"
+	"strings"
 	"sync"
 
 	_ "modernc.org/sqlite"
@@ -18,7 +20,11 @@ type StoreDatabase struct {
 
 // OpenStoreDatabase enables WAL before exposing the database to concurrent proxy generations.
 func OpenStoreDatabase(databasePath string) (*StoreDatabase, error) {
-	sqlDatabase, err := sql.Open("sqlite", databasePath)
+	dsn := databasePath
+	if dsn != ":memory:" && !strings.HasPrefix(dsn, "file:") {
+		dsn = (&url.URL{Scheme: "file", Path: databasePath, RawQuery: "_pragma=busy_timeout(5000)"}).String()
+	}
+	sqlDatabase, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open store database: %w", err)
 	}

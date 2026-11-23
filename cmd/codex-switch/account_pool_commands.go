@@ -21,6 +21,7 @@ func loginCommand(args []string) {
 	}
 	target := flags.Arg(0)
 	var replacing store.AccountKey
+	var replacingProvider accountapi.Provider
 	if target == "" {
 		fmt.Fprintln(stdout, "Sign in to the account you want to add")
 	} else {
@@ -31,6 +32,7 @@ func loginCommand(args []string) {
 		for _, account := range pool {
 			if target == string(account.Key) || target == account.DisplayName {
 				replacing = account.Key
+				replacingProvider = account.Provider
 				fmt.Fprintf(stdout, "Sign in again to %s\n", account.DisplayName)
 				break
 			}
@@ -38,10 +40,13 @@ func loginCommand(args []string) {
 		if replacing == "" {
 			log.Fatalf("unknown account %s", target)
 		}
+		if *claude && replacingProvider != accountapi.ProviderClaude {
+			log.Fatalf("%s is a Codex account; omit --claude to sign in again", target)
+		}
 	}
 	var published accountapi.PoolAccount
 	var err error
-	if *claude {
+	if *claude || replacingProvider == accountapi.ProviderClaude {
 		published, err = accountapi.SignInClaude(dataDir(), replacing)
 	} else {
 		published, err = accountapi.SignIn(dataDir(), *codex, replacing)

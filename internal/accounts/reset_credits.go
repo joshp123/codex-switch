@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -336,37 +337,48 @@ func spendResetCredit(ctx context.Context, directory string, origin *url.URL, cl
 				return fmt.Errorf("read pending reset: %w", err)
 			}
 			account, credentials, err := pendingResetAccount(ctx, directory, client, pending)
-			if err != nil {
-				return fmt.Errorf("reset outcome unknown; run the command again to retry: %w", err)
-			}
-			unspent, err := pendingCreditUnspent(ctx, origin, client, credentials, pending)
-			if err != nil {
-				return fmt.Errorf("reset outcome unknown; run the command again to retry: %w", err)
-			}
-			if !unspent {
-				if unconfirmed == nil || unconfirmed.CreditID != pending.CreditID {
-					// Another build began this reset. It wrote the file just before
-					// it asked, so the reset came after the file's time.
-					info, err := os.Stat(pendingPath)
-					if err != nil {
-						return err
-					}
-					if err := writeUnconfirmedReset(directory, unconfirmedReset{account.Key, pending.CreditID, info.ModTime().UTC()}); err != nil {
-						return err
-					}
+			if errors.Is(err, errPendingResetAccountRemoved) {
+				if removeErr := os.Remove(pendingPath); removeErr != nil && !os.IsNotExist(removeErr) {
+					return removeErr
 				}
-				return completeReset(ctx, directory, origin, client, pendingPath, pending, "it retries a reset whose reply was lost", &decision)
-			}
-			// The lost request never spent the credit, so the pool may no longer
-			// need it: decide again from current allowance.
-			if err := os.Remove(pendingPath); err != nil {
-				return err
-			}
-			if unconfirmed != nil && unconfirmed.CreditID == pending.CreditID {
-				if err := removeUnconfirmedReset(directory); err != nil {
+				if unconfirmed != nil && unconfirmed.CreditID == pending.CreditID {
+					if removeErr := removeUnconfirmedReset(directory); removeErr != nil {
+						return removeErr
+					}
+					unconfirmed = nil
+				}
+			} else if err != nil {
+				return fmt.Errorf("reset outcome unknown; run the command again to retry: %w", err)
+			} else {
+				unspent, err := pendingCreditUnspent(ctx, origin, client, credentials, pending)
+				if err != nil {
+					return fmt.Errorf("reset outcome unknown; run the command again to retry: %w", err)
+				}
+				if !unspent {
+					if unconfirmed == nil || unconfirmed.CreditID != pending.CreditID {
+						// Another build began this reset. It wrote the file just before
+						// it asked, so the reset came after the file's time.
+						info, err := os.Stat(pendingPath)
+						if err != nil {
+							return err
+						}
+						if err := writeUnconfirmedReset(directory, unconfirmedReset{account.Key, pending.CreditID, info.ModTime().UTC()}); err != nil {
+							return err
+						}
+					}
+					return completeReset(ctx, directory, origin, client, pendingPath, pending, "it retries a reset whose reply was lost", &decision)
+				}
+				// The lost request never spent the credit, so the pool may no longer
+				// need it: decide again from current allowance.
+				if err := os.Remove(pendingPath); err != nil {
 					return err
 				}
-				unconfirmed = nil
+				if unconfirmed != nil && unconfirmed.CreditID == pending.CreditID {
+					if err := removeUnconfirmedReset(directory); err != nil {
+						return err
+					}
+					unconfirmed = nil
+				}
 			}
 		} else if !os.IsNotExist(readErr) {
 			return readErr
@@ -451,6 +463,8 @@ func resetRefusedAt(directory, filename string, wait time.Duration, now time.Tim
 	return info.ModTime(), true
 }
 
+var errPendingResetAccountRemoved = errors.New("pending reset account is no longer in the pool")
+
 // readCodexAccountsForReset reads every Codex account's credits and allowance
 // from OpenAI.
 func readCodexAccountsForReset(ctx context.Context, directory string, origin *url.URL, client *http.Client) ([]codexAccountReading, error) {
@@ -463,7 +477,8 @@ func readCodexAccountsForReset(ctx context.Context, directory string, origin *ur
 		if account.Provider != ProviderCodex {
 			continue
 		}
-		credentials, err := newSavedLogin(filepath.Join(directory, account.Folder), client).Credentials(ctx)
+		login := newSavedLogin(filepath.Join(directory, account.Folder), client)
+		credentials, err := login.Credentials(ctx)
 		if requiresSignIn(err) {
 			readings = append(readings, codexAccountReading{account: account, signedOut: true})
 			continue
@@ -474,12 +489,35 @@ func readCodexAccountsForReset(ctx context.Context, directory string, origin *ur
 		var list struct {
 			Credits []ResetCredit `json:"credits"`
 		}
-		if err := resetRequest(ctx, client, origin, credentials, http.MethodGet, "/backend-api/wham/rate-limit-reset-credits", nil, &list); err != nil {
-			return nil, fmt.Errorf("%s: cannot check reset credits: %w", account.DisplayName, err)
-		}
 		var usage usageResponse
-		if err := resetRequest(ctx, client, origin, credentials, http.MethodGet, "/backend-api/wham/usage", nil, &usage); err != nil {
-			return nil, fmt.Errorf("%s: cannot check allowance: %w", account.DisplayName, err)
+		readAccount := func(creds Credentials) error {
+			if err := resetRequest(ctx, client, origin, creds, http.MethodGet, "/backend-api/wham/rate-limit-reset-credits", nil, &list); err != nil {
+				return fmt.Errorf("cannot check reset credits: %w", err)
+			}
+			if err := resetRequest(ctx, client, origin, creds, http.MethodGet, "/backend-api/wham/usage", nil, &usage); err != nil {
+				return fmt.Errorf("cannot check allowance: %w", err)
+			}
+			return nil
+		}
+		err = readAccount(credentials)
+		if errors.Is(err, errWhamUsageUnauthorized) {
+			refreshed, refreshErr := login.RefreshAfterUnauthorized(ctx, credentials)
+			if requiresSignIn(refreshErr) {
+				readings = append(readings, codexAccountReading{account: account, signedOut: true})
+				continue
+			}
+			if refreshErr != nil {
+				return nil, fmt.Errorf("%s: cannot refresh credentials: %w", account.DisplayName, refreshErr)
+			}
+			credentials = refreshed
+			err = readAccount(credentials)
+			if errors.Is(err, errWhamUsageUnauthorized) {
+				readings = append(readings, codexAccountReading{account: account, signedOut: true})
+				continue
+			}
+		}
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", account.DisplayName, err)
 		}
 		sample, err := usage.Sample(credentials.AccountID, time.Now())
 		if err != nil {
@@ -501,7 +539,7 @@ func pendingResetAccount(ctx context.Context, directory string, client *http.Cli
 			return account, credentials, err
 		}
 	}
-	return PoolAccount{}, Credentials{}, fmt.Errorf("pending reset account is no longer in the pool")
+	return PoolAccount{}, Credentials{}, errPendingResetAccountRemoved
 }
 
 // pendingCreditUnspent reports whether the credit of a reset whose response
@@ -575,6 +613,9 @@ func resetRequest(ctx context.Context, client *http.Client, origin *url.URL, cre
 		return err
 	}
 	defer response.Body.Close()
+	if response.StatusCode == http.StatusUnauthorized {
+		return fmt.Errorf("provider returned HTTP 401: %w", errWhamUsageUnauthorized)
+	}
 	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("provider returned HTTP %d", response.StatusCode)
 	}

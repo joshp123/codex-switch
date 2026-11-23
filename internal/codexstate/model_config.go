@@ -104,6 +104,9 @@ func (r LocalReader) readModelConfig(ctx context.Context) (EffectiveModelConfig,
 		return EffectiveModelConfig{}, fmt.Errorf("Codex executable is unavailable")
 	}
 	cmd := exec.CommandContext(ctx, r.CodexExecutable, "app-server", "--listen", "stdio://")
+	if r.CodexHome != "" {
+		cmd.Env = append(os.Environ(), "CODEX_HOME="+r.CodexHome)
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return EffectiveModelConfig{}, fmt.Errorf("open stdin: %w", err)

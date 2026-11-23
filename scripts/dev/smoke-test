@@ -30,7 +30,7 @@ def main():
         if rig.RUN.exists():
             previous = rig.RUN.with_name(f'smoke-test.previous.{time.time_ns()}')
             os.rename(rig.RUN, previous)
-            subprocess.Popen(['rm', '-rf', str(previous)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            subprocess.Popen(['/usr/bin/trash', str(previous)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         rig.build()
         rig.prepare_real_services()
         rig.start_proxy()
@@ -41,7 +41,7 @@ def main():
             checks.append(('Pi', rig.run_pi('smoke-pi', 'Reply with the word ready only.', session), rig.database_rows(rig.pi_task_id(session))))
         session = str(uuid.uuid4())
         result = rig.run_claude(session, must_succeed=False)
-        checks.append(('Claude Code', result.get('result', ''), rig.database_rows('claude:code:' + session)))
+        checks.append(('Claude Code', result.get('result') or '', rig.database_rows('claude:code:' + session)))
     except Failure as error:
         failure = error
         print(f'FAIL  {failure}')

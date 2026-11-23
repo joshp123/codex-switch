@@ -24,7 +24,7 @@ func (r LocalReader) UpdatedThreadRollouts(ctx context.Context, sinceMS int64) (
 	if path == "" {
 		return "", nil, fmt.Errorf("Codex thread index is absent")
 	}
-	databaseURL := url.URL{Scheme: "file", Path: path, RawQuery: "mode=ro"}
+	databaseURL := url.URL{Scheme: "file", Path: path, RawQuery: "mode=ro&_pragma=busy_timeout(5000)"}
 	database, err := sql.Open("sqlite", databaseURL.String())
 	if err != nil {
 		return path, nil, err

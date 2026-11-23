@@ -16,8 +16,13 @@ plist="$HOME/Library/LaunchAgents/$label.plist"
 # Stops the menu app installed at $app, if it is running.
 quit_menu_app() {
   menu_executable=$(/bin/realpath "$app/Contents/MacOS/CodexSwitchMenu" 2>/dev/null) || return 0
-  menu_pids=$(/bin/ps -axo pid=,comm= | /usr/bin/awk -v executable="$menu_executable" '$2 == executable {print $1}')
+  menu_pids=$(/bin/ps -axo pid=,comm= | /usr/bin/awk -v executable="$menu_executable" '{pid=$1; sub(/^[[:space:]]*[0-9]+[[:space:]]+/, ""); if ($0 == executable) print pid}')
   [ -n "$menu_pids" ] || return 0
-  kill $menu_pids
-  while /bin/ps -p "$(echo $menu_pids | tr ' ' ',')" >/dev/null; do sleep 0.2; done
+  kill $menu_pids 2>/dev/null || true
+  quit_waited=0
+  while /bin/ps -p "$(echo $menu_pids | tr ' ' ',')" >/dev/null 2>&1; do
+    quit_waited=$((quit_waited + 1))
+    [ "$quit_waited" -lt 50 ] || break
+    sleep 0.2
+  done
 }

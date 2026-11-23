@@ -28,10 +28,11 @@ func keepShownTaskRows(snapshot *menupb.MenuSnapshot) {
 }
 
 type menuTaskRow struct {
-	task     *menupb.CompletedTask
-	tokens   int64
-	cost     int64
-	accounts []string
+	task      *menupb.CompletedTask
+	tokens    int64
+	cost      int64
+	costKnown bool
+	accounts  []string
 }
 
 func shownTaskRows(tasks []*menupb.CompletedTask, providers map[string]menupb.Provider) []*menupb.CompletedTask {
@@ -50,11 +51,18 @@ func shownTaskRows(tasks []*menupb.CompletedTask, providers map[string]menupb.Pr
 		id := providers[accounts[0]].String() + " " + title
 		row := rows[id]
 		if row == nil {
-			row = &menuTaskRow{task: &menupb.CompletedTask{TaskId: task.TaskId, Title: &title, LastCompletedAt: task.LastCompletedAt}}
+			row = &menuTaskRow{
+				task:      &menupb.CompletedTask{TaskId: task.TaskId, Title: &title, LastCompletedAt: task.LastCompletedAt},
+				costKnown: true,
+			}
 			rows[id] = row
 		}
 		row.tokens += task.GetTokens()
-		row.cost += task.GetCostNanoUsd()
+		if task.CostNanoUsd == nil {
+			row.costKnown = false
+		} else if row.costKnown {
+			row.cost += *task.CostNanoUsd
+		}
 		for _, key := range accounts {
 			if !slices.Contains(row.accounts, key) {
 				row.accounts = append(row.accounts, key)
@@ -78,13 +86,24 @@ func shownTaskRows(tasks []*menupb.CompletedTask, providers map[string]menupb.Pr
 		return slices.Clone(all[:min(menuTaskRows, len(all))])
 	}
 	var shown []*menupb.CompletedTask
-	for _, row := range append(largest(func(row *menuTaskRow) int64 { return row.tokens }), largest(func(row *menuTaskRow) int64 { return row.cost })...) {
+	for _, row := range append(largest(func(row *menuTaskRow) int64 { return row.tokens }), largest(func(row *menuTaskRow) int64 {
+		if !row.costKnown {
+			return -1
+		}
+		return row.cost
+	})...) {
 		if slices.Contains(shown, row.task) {
 			continue
 		}
-		tokens, cost := row.tokens, row.cost
+		tokens := row.tokens
 		slices.Sort(row.accounts)
-		row.task.Tokens, row.task.CostNanoUsd, row.task.AccountKeys = &tokens, &cost, row.accounts
+		row.task.Tokens, row.task.AccountKeys = &tokens, row.accounts
+		if row.costKnown {
+			cost := row.cost
+			row.task.CostNanoUsd = &cost
+		} else {
+			row.task.CostNanoUsd = nil
+		}
 		shown = append(shown, row.task)
 	}
 	return shown

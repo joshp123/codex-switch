@@ -48,7 +48,7 @@ func dollarsPerPercent(credits []accounts.OpenAIModelDayCredits, localStandardCo
 	agreeing := make(map[string][]float64)
 	for _, day := range credits {
 		cost := localStandardCost[modelDay{day.Date, day.Model, false}]
-		if day.Fast || cost <= 0 {
+		if day.Fast || cost <= 0 || day.PercentOfBusiestDay <= 0 {
 			continue
 		}
 		value := float64(cost) / day.PercentOfBusiestDay

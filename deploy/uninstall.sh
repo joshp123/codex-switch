@@ -12,10 +12,10 @@ for installed_plist in "$plist" "$HOME/Library/LaunchAgents/$label.a.plist" "$HO
   fi
 done
 
-# Codex and Pi would fail every request once the proxy is gone.
-if [ -f "$data/client-capability" ] &&
-  /usr/bin/grep -qsF "$(cat "$data/client-capability")" "$HOME/.codex/config.toml" "$HOME/.pi/agent/models.json"; then
-  echo "Codex or Pi still uses Codex Switch. Remove its URL from ~/.codex/config.toml and ~/.pi/agent/models.json, restart them, then run this again." >&2
+# Codex, Pi and Claude Code would fail every request once the proxy is gone.
+if [ -s "$data/client-capability" ] &&
+  /usr/bin/grep -qsF "$(cat "$data/client-capability")" "$HOME/.codex/config.toml" "$HOME/.pi/agent/models.json" "$HOME/.claude/settings.json"; then
+  echo "Codex, Pi or Claude Code still uses Codex Switch. Remove its URL from ~/.codex/config.toml, ~/.pi/agent/models.json and ~/.claude/settings.json, restart them, then run this again." >&2
   exit 1
 fi
 

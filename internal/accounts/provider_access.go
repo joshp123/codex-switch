@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
 )
 
 // CheckProviderAccess reads each signed-in account's allowance from the provider.
@@ -19,8 +18,7 @@ func (monitor *Monitor) CheckProviderAccess(ctx context.Context) error {
 		go func() {
 			readContext, cancel := context.WithTimeout(ctx, accountReadTimeout)
 			defer cancel()
-			login := newSavedLogin(filepath.Join(monitor.dataDirectory, account.Folder), monitor.httpClient)
-			login.provider = account.Provider
+			login := monitor.newSavedLogin(account)
 			var storedLoginError error
 			if account.Provider == ProviderClaude {
 				_, storedLoginError = login.readClaudeAuth()

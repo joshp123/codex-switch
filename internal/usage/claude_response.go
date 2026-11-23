@@ -84,6 +84,9 @@ func mergeClaudeUsage(usage *claudeMessageUsage, delta claudeMessageUsage) {
 	}
 	if delta.CacheWrite != nil {
 		usage.CacheWrite = delta.CacheWrite
+		if delta.CacheCreation == nil && usage.CacheCreation != nil && usage.CacheCreation.FiveMinutes+usage.CacheCreation.OneHour != *delta.CacheWrite {
+			usage.CacheCreation = nil
+		}
 	}
 	if delta.CacheCreation != nil {
 		usage.CacheCreation = delta.CacheCreation

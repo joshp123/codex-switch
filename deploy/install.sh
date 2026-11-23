@@ -12,19 +12,26 @@ repository=$(CDPATH='' cd -P "$(dirname "$0")/.." && pwd)
 
 build=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/codex-switch-build.XXXXXX")
 trap '/usr/bin/trash "$build"' EXIT
+trap 'exit 1' HUP INT TERM
 "$repository/macos/CodexSwitchMenu/package_app.sh" --live --destination "$build/CodexSwitchMenu.app"
 
 "$repository/deploy/install-proxy.sh" "$build/CodexSwitchMenu.app/Contents/Helpers/codex-switch"
 binary=$(/bin/realpath "$command_link")
 case "$binary" in
-  *.a) active_slot=a ;;
-  *.b) active_slot=b ;;
-  *) echo 'could not identify the serving proxy slot' >&2; exit 1 ;;
+  *.a) active_plist="$HOME/Library/LaunchAgents/$label.a.plist" ;;
+  *.b) active_plist="$HOME/Library/LaunchAgents/$label.b.plist" ;;
+  *)
+    if [ -f "$plist" ]; then
+      active_plist="$plist"
+    else
+      echo 'could not identify the serving proxy slot' >&2
+      exit 1
+    fi
+    ;;
 esac
-active_plist="$HOME/Library/LaunchAgents/$label.$active_slot.plist"
 data=$(/usr/bin/plutil -extract EnvironmentVariables.CODEX_SWITCH_DATA_DIR raw "$active_plist")
 listen=$(/usr/bin/plutil -extract ProgramArguments.3 raw "$active_plist")
-config_line=$("$binary" print-codex-config --listen "$listen")
+config_line=$(CODEX_SWITCH_DATA_DIR="$data" "$binary" print-codex-config --listen "$listen")
 
 quit_menu_app
 if [ -e "$app" ]; then

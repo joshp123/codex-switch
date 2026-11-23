@@ -123,10 +123,11 @@ WHERE account_key IS NOT ` + folderKey + ` AND ` + folderKey + ` IS NOT NULL`)
 
 // NextAccountNumber is called under the pool mutation lock, after remembering existing accounts.
 func (database *StoreDatabase) NextAccountNumber() (int, error) {
-	rows, err := database.sqlDatabase.Query(`
-SELECT account_name FROM account_identities
-UNION SELECT account_name FROM completed_responses
-UNION SELECT account_name FROM task_account_pins`)
+	query := "SELECT account_name FROM account_identities"
+	for _, table := range accountKeyTables {
+		query += "\nUNION SELECT account_name FROM " + table
+	}
+	rows, err := database.sqlDatabase.Query(query)
 	if err != nil {
 		return 0, fmt.Errorf("read allocated account folders: %w", err)
 	}

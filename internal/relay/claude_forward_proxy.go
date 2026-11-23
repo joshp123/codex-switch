@@ -109,7 +109,11 @@ func (proxy *ClaudeForwardProxy) ServeHTTP(writer http.ResponseWriter, request *
 		http.Error(writer, "proxy authentication required", http.StatusProxyAuthRequired)
 		return
 	}
-	if _, _, err := net.SplitHostPort(request.Host); err != nil {
+	target := request.URL.Host
+	if target == "" {
+		target = request.Host
+	}
+	if _, _, err := net.SplitHostPort(target); err != nil {
 		http.Error(writer, "CONNECT requires a host and port", http.StatusBadRequest)
 		return
 	}
@@ -117,7 +121,7 @@ func (proxy *ClaudeForwardProxy) ServeHTTP(writer http.ResponseWriter, request *
 	defer proxy.relay.finishActiveRelayRequest()
 	dialContext, cancelDial := context.WithCancel(request.Context())
 	defer cancelDial()
-	tracked := &claudeProxyConnection{clientAddress: request.RemoteAddr, host: request.Host, cancelDial: cancelDial, lastRequest: "TLS handshake"}
+	tracked := &claudeProxyConnection{clientAddress: request.RemoteAddr, host: target, cancelDial: cancelDial, lastRequest: "TLS handshake"}
 	tracked.lastTraffic.Store(time.Now().UnixNano())
 	proxy.mutex.Lock()
 	proxy.connections[tracked] = struct{}{}
@@ -132,12 +136,12 @@ func (proxy *ClaudeForwardProxy) ServeHTTP(writer http.ResponseWriter, request *
 	}()
 
 	var upstream net.Conn
-	if request.Host != "api.anthropic.com:443" {
+	if !isAnthropicTarget(target) {
 		var err error
-		upstream, err = (&net.Dialer{}).DialContext(dialContext, "tcp", request.Host)
+		upstream, err = (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext(dialContext, "tcp", target)
 		if err != nil {
 			if dialContext.Err() == nil {
-				log.Printf("Claude tunnel to %s failed: %v", request.Host, err)
+				log.Printf("Claude tunnel to %s failed: %v", target, err)
 			}
 			http.Error(writer, "upstream service unavailable", http.StatusBadGateway)
 			return
@@ -263,7 +267,7 @@ func (proxy *ClaudeForwardProxy) drainConnectionsWithin(grace time.Duration) {
 	models, otherAnthropic := 0, 0
 	tunnels := make(map[string]int)
 	for connection := range proxy.connections {
-		if connection.host != "api.anthropic.com:443" {
+		if !isAnthropicTarget(connection.host) {
 			tunnels[connection.host]++
 		} else if connection.modelInProgress {
 			models++
@@ -284,9 +288,24 @@ func (proxy *ClaudeForwardProxy) drainConnectionsWithin(grace time.Duration) {
 	}
 	log.Printf("Claude connections stopping: model requests in progress %d; other Anthropic connections %d; tunnels %s; connections doing no work close after %s", models, otherAnthropic, strings.Join(tunnelSummary, ", "), grace)
 	go func() {
-		time.Sleep(grace)
-		for now := range time.Tick(grace / 10) {
-			proxy.closeConnectionsDoingNoWork(now.Add(-grace))
+		timer := time.NewTimer(grace)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			proxy.closeConnectionsDoingNoWork(time.Now().Add(-grace))
+		case <-proxy.relay.drainComplete:
+			return
+		}
+		interval := max(grace/10, time.Millisecond)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case now := <-ticker.C:
+				proxy.closeConnectionsDoingNoWork(now.Add(-grace))
+			case <-proxy.relay.drainComplete:
+				return
+			}
 		}
 	}()
 }
@@ -295,7 +314,7 @@ func (proxy *ClaudeForwardProxy) closeConnectionsDoingNoWork(quietSince time.Tim
 	proxy.mutex.Lock()
 	defer proxy.mutex.Unlock()
 	for connection := range proxy.connections {
-		transferring := connection.host != "api.anthropic.com:443" && connection.lastTraffic.Load() > quietSince.UnixNano()
+		transferring := !isAnthropicTarget(connection.host) && connection.lastTraffic.Load() > quietSince.UnixNano()
 		if !connection.modelInProgress && !transferring {
 			proxy.closeConnectionForUpdate(connection)
 		}
@@ -306,7 +325,7 @@ func (proxy *ClaudeForwardProxy) closeConnectionsDoingNoWork(quietSince time.Tim
 func (proxy *ClaudeForwardProxy) closeConnectionForUpdate(connection *claudeProxyConnection) {
 	if !connection.closing {
 		connection.closing = true
-		if connection.host == "api.anthropic.com:443" {
+		if isAnthropicTarget(connection.host) {
 			log.Printf("Claude Anthropic connection from %s (%s) closes for the update after the grace period with no model request in progress; the client reconnects", connection.clientAddress, connection.lastRequest)
 		} else {
 			log.Printf("Claude tunnel to %s from %s closes for the update after the grace period with no traffic; the client reconnects on its next request", connection.host, connection.clientAddress)
@@ -319,6 +338,14 @@ func (proxy *ClaudeForwardProxy) closeConnectionForUpdate(connection *claudeProx
 	if connection.upstream != nil {
 		_ = connection.upstream.Close()
 	}
+}
+
+func isAnthropicTarget(target string) bool {
+	host, port, err := net.SplitHostPort(target)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSuffix(host, "."), "api.anthropic.com") && port == "443"
 }
 
 type tunnelTrafficReader struct {

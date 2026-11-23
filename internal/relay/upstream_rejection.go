@@ -37,13 +37,22 @@ func (handler *TrafficRelayHandler) observeRejectedResponse(routedRequest *route
 	responseObserver.settleModelRequest("", store.ModelRequestFailed)
 	responseObserver.admittedRequests = 0
 
-	body, err := io.ReadAll(upstreamResponse.Body)
-	upstreamResponse.Body.Close()
+	const maxRejectionReadBytes = 1 << 20
+	body, err := io.ReadAll(io.LimitReader(upstreamResponse.Body, maxRejectionReadBytes))
 	if err != nil {
+		upstreamResponse.Body.Close()
 		log.Printf("%s: OpenAI rejected %s with HTTP %d and its reason could not be read: %v", subject, routedRequest.modelSlug, upstreamResponse.StatusCode, err)
 		return fmt.Errorf("read rejected upstream response: %w", err)
 	}
-	upstreamResponse.Body = io.NopCloser(bytes.NewReader(body))
+	if len(body) < maxRejectionReadBytes {
+		upstreamResponse.Body.Close()
+		upstreamResponse.Body = io.NopCloser(bytes.NewReader(body))
+	} else {
+		upstreamResponse.Body = struct {
+			io.Reader
+			io.Closer
+		}{io.MultiReader(bytes.NewReader(body), upstreamResponse.Body), upstreamResponse.Body}
+	}
 	var rejected httpJSONResponseWire
 	_ = json.Unmarshal(body, &rejected)
 	if limitOutcome, limited := responseObserver.reportProviderUsageLimit(rejected.Error); limited {
@@ -87,9 +96,10 @@ func describeRejectionText(header http.Header, body []byte) string {
 	if !strings.Contains(strings.ToLower(header.Get("Content-Type")), "html") {
 		return describeProviderReason(httpJSONResponseWire{Detail: text})
 	}
-	if start := strings.Index(strings.ToLower(text), "<title>"); start >= 0 {
-		if end := strings.Index(strings.ToLower(text[start:]), "</title>"); end >= 0 {
-			return describeProviderReason(httpJSONResponseWire{Detail: "an HTML page titled " + text[start+len("<title>"):start+end]})
+	lower := strings.ToLower(text)
+	if start := strings.Index(lower, "<title>"); start >= 0 {
+		if end := strings.Index(lower[start:], "</title>"); end >= 0 {
+			return describeProviderReason(httpJSONResponseWire{Detail: "an HTML page titled " + lower[start+len("<title>"):start+end]})
 		}
 	}
 	return ": an HTML page instead of an API error"

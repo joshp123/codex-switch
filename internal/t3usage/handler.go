@@ -137,13 +137,21 @@ func write(w http.ResponseWriter, message proto.Message) {
 }
 func codexUsage(sample accounts.AllowanceSample) *t3pb.CodexUsage {
 	limits := &t3pb.CodexRateLimit{}
-	for index, window := range sample.Windows {
-		w := &t3pb.CodexWindow{UsedPercent: window.UsedPercent, LimitWindowSeconds: int32(window.DurationSeconds), ResetAt: float64(window.ResetsAt.Unix())}
-		if index == 0 {
+	slot := 0
+	for _, window := range sample.Windows {
+		if window.ModelID != "" || window.ModelName != "" {
+			continue
+		}
+		w := &t3pb.CodexWindow{UsedPercent: window.UsedPercent, LimitWindowSeconds: int32(window.DurationSeconds)}
+		if !window.ResetsAt.IsZero() {
+			w.ResetAt = float64(window.ResetsAt.Unix())
+		}
+		if slot == 0 {
 			limits.PrimaryWindow = w
-		} else if index == 1 {
+		} else if slot == 1 {
 			limits.SecondaryWindow = w
 		}
+		slot++
 	}
 	return &t3pb.CodexUsage{PlanType: sample.Plan, RateLimit: limits}
 }
@@ -154,8 +162,12 @@ func claudeUsage(sample accounts.AllowanceSample) *t3pb.ClaudeUsage {
 			continue
 		}
 		reset := window.ResetsAt.UTC().Format(time.RFC3339)
-		if window.ModelName != "" {
-			usage.Limits = append(usage.Limits, &t3pb.ClaudeLimit{Kind: "weekly_scoped", Percent: window.UsedPercent, ResetsAt: reset, Scope: &t3pb.ClaudeScope{Model: &t3pb.ClaudeModel{DisplayName: window.ModelName}}})
+		if window.ModelName != "" || window.ModelID != "" {
+			display := window.ModelName
+			if display == "" {
+				display = window.ModelID
+			}
+			usage.Limits = append(usage.Limits, &t3pb.ClaudeLimit{Kind: "weekly_scoped", Percent: window.UsedPercent, ResetsAt: reset, Scope: &t3pb.ClaudeScope{Model: &t3pb.ClaudeModel{DisplayName: display}}})
 		} else if window.DurationSeconds == 5*3600 {
 			usage.FiveHour = &t3pb.ClaudeWindow{Utilization: window.UsedPercent, ResetsAt: reset}
 		} else if window.DurationSeconds == 7*86400 {

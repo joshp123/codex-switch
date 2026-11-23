@@ -2,6 +2,7 @@ package accounts
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"os"
 	"path/filepath"
@@ -135,11 +136,11 @@ func (monitor *Monitor) creditMayExpireWithinTheHour(now time.Time) bool {
 // show the pool out with a credit to spend; see choosePoolOutCredit. It reads
 // no network, so routing can ask it.
 func (monitor *Monitor) ResetCreditComesFirst() bool {
-	if _, err := os.Stat(filepath.Join(monitor.dataDirectory, "pending-reset.json")); err == nil {
-		return true
-	}
 	now := time.Now()
 	readings := monitor.latestCodexReadings()
+	if pendingResetExpected(monitor.dataDirectory, readings, now) {
+		return true
+	}
 	// A reset OpenAI's reading does not show yet holds usage credits back
 	// only while the reading can be expected: for 30 minutes, with the
 	// account signed in. It still stops another reset for as long as it takes.
@@ -160,6 +161,34 @@ func (monitor *Monitor) ResetCreditComesFirst() bool {
 	}
 	_, found, _ := choosePoolOutCredit(readings, now)
 	return found
+}
+
+// pendingResetExpected reports whether a pending reset file belongs to a
+// signed-in account in readings and was started recently enough to still expect
+// its outcome or usage reading.
+func pendingResetExpected(directory string, readings []codexAccountReading, now time.Time) bool {
+	path := filepath.Join(directory, "pending-reset.json")
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	if now.Sub(info.ModTime()) >= readingLagWarning {
+		return false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var pending pendingReset
+	if err := json.Unmarshal(data, &pending); err != nil {
+		return false
+	}
+	for _, reading := range readings {
+		if reading.account.Folder == pending.Folder && reading.account.AccountID == pending.AccountID {
+			return !reading.signedOut
+		}
+	}
+	return false
 }
 
 // latestCodexReadings is every Codex account as the monitor last read it.

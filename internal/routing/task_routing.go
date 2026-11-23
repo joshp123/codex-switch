@@ -249,6 +249,10 @@ func (router *TaskRouter) reportExhaustedTaskPin(taskID store.TaskID, servedAcco
 	}
 	if served, found := factForAccount(facts, servedAccountKey); found {
 		facts = factsForProvider(facts, served.Provider)
+	} else if provider, ok := providerForAccountKey(servedAccountKey); ok {
+		facts = factsForProvider(facts, provider)
+	} else {
+		facts = nil
 	}
 	selected, found, err := router.selectAccountForNewWork(facts, servedAccountKey, "")
 	if err != nil {
@@ -368,6 +372,10 @@ func (router *TaskRouter) ReportUnsupportedModel(taskID store.TaskID, accountKey
 	}
 	if served, found := factForAccount(facts, accountKey); found {
 		facts = factsForProvider(facts, served.Provider)
+	} else if provider, ok := providerForAccountKey(accountKey); ok {
+		facts = factsForProvider(facts, provider)
+	} else {
+		return false
 	}
 	selected, found, err := router.selectAccountForNewWork(accountsWithKnownModels(facts), accountKey, modelSlug)
 	if err != nil {
@@ -382,18 +390,37 @@ func (router *TaskRouter) ReportUnsupportedModel(taskID store.TaskID, accountKey
 		for _, fact := range facts {
 			if fact.AccountKey == accountKey {
 				rejectedAccountExcluded = fact.SupportedModelSlugs != nil && !accountSupportsModel(fact, modelSlug)
-			} else if accountCredentialsUsable(fact.Credentials) && fact.SupportedModelSlugs != nil && accountSupportsModel(fact, modelSlug) {
+			} else if fact.AccountState != accounts.AccountSignInRequired && fact.AccountState != accounts.AccountCredentialsUnavailable &&
+				accountCredentialsUsable(fact.Credentials) && fact.SupportedModelSlugs != nil && accountSupportsModel(fact, modelSlug) {
 				supportedAccountExists = true
 			}
 		}
 		return rejectedAccountExcluded && supportedAccountExists
+	}
+	if taskID == "" {
+		return true
 	}
 	moved, err := router.storeDatabase.CompareAndSwapTaskAccountPin(taskID, accountKey, selected.AccountKey, router.currentTime().UTC())
 	if err != nil {
 		log.Printf("move unsupported model task pin: %v", err)
 		return false
 	}
-	return moved
+	if !moved {
+		pinned, hasPin, pinErr := router.storeDatabase.ReadTaskAccountPin(taskID)
+		return pinErr == nil && hasPin && pinned.AccountKey != accountKey
+	}
+	return true
+}
+
+func providerForAccountKey(key store.AccountKey) (accounts.Provider, bool) {
+	switch {
+	case strings.HasPrefix(string(key), "claude:"):
+		return accounts.ProviderClaude, true
+	case strings.HasPrefix(string(key), "chatgpt:"):
+		return accounts.ProviderChatGPT, true
+	default:
+		return "", false
+	}
 }
 
 func accountsWithKnownModels(facts []accounts.AccountRoutingFact) []accounts.AccountRoutingFact {
@@ -416,7 +443,8 @@ func (router *TaskRouter) RouteForModelCatalogue() (RouteDecision, error) {
 	var selected *accounts.AccountRoutingFact
 	for index := range facts {
 		fact := &facts[index]
-		if fact.Provider != accounts.ProviderChatGPT || !accountCredentialsUsable(fact.Credentials) || fact.SupportedModelSlugs == nil {
+		if fact.Provider != accounts.ProviderChatGPT || fact.AccountState == accounts.AccountSignInRequired || fact.AccountState == accounts.AccountCredentialsUnavailable ||
+			!accountCredentialsUsable(fact.Credentials) || fact.SupportedModelSlugs == nil {
 			continue
 		}
 		if selected == nil || len(fact.SupportedModelSlugs) > len(selected.SupportedModelSlugs) {

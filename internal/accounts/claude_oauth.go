@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/joshp123/codex-switch/internal/heldcredentials"
 	"github.com/joshp123/codex-switch/internal/store"
 )
 
@@ -26,11 +27,13 @@ import (
 func SignInClaude(dataDirectory string, replacing store.AccountKey) (PoolAccount, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
-	var randomBytes [32]byte
+	var randomBytes [64]byte
 	if _, err := rand.Read(randomBytes[:]); err != nil {
 		return PoolAccount{}, err
 	}
-	verifier := base64.RawURLEncoding.EncodeToString(randomBytes[:])
+	verifier := base64.RawURLEncoding.EncodeToString(randomBytes[:32])
+	heldcredentials.Remember(verifier)
+	oauthState := base64.RawURLEncoding.EncodeToString(randomBytes[32:])
 	challengeBytes := sha256.Sum256([]byte(verifier))
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -40,7 +43,7 @@ func SignInClaude(dataDirectory string, replacing store.AccountKey) (PoolAccount
 	codeReady := make(chan string, 1)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/callback", func(response http.ResponseWriter, request *http.Request) {
-		if request.URL.Query().Get("state") != verifier {
+		if request.URL.Query().Get("state") != oauthState {
 			http.Error(response, "Login state does not match.", http.StatusBadRequest)
 			return
 		}
@@ -59,7 +62,7 @@ func SignInClaude(dataDirectory string, replacing store.AccountKey) (PoolAccount
 	go server.Serve(listener)
 	defer server.Close()
 	parameters := url.Values{"code": {"true"}, "client_id": {claudeOAuthClientID}, "response_type": {"code"}, "redirect_uri": {redirectURI},
-		"scope": {claudeOAuthScopes}, "code_challenge": {base64.RawURLEncoding.EncodeToString(challengeBytes[:])}, "code_challenge_method": {"S256"}, "state": {verifier}}
+		"scope": {claudeOAuthScopes}, "code_challenge": {base64.RawURLEncoding.EncodeToString(challengeBytes[:])}, "code_challenge_method": {"S256"}, "state": {oauthState}}
 	authorizeURL := "https://claude.ai/oauth/authorize?" + parameters.Encode()
 	fmt.Fprintf(os.Stderr, "Sign in to Claude:\n%s\n\nWaiting for the browser. You can also paste the final redirect URL or code#state here.\n", authorizeURL)
 	if err := exec.Command("open", authorizeURL).Run(); err != nil {
@@ -87,7 +90,7 @@ func SignInClaude(dataDirectory string, replacing store.AccountKey) (PoolAccount
 		} else {
 			code = input
 		}
-		if state != "" && state != verifier {
+		if state != "" && state != oauthState {
 			return PoolAccount{}, errors.New("Claude login state does not match")
 		}
 	}
@@ -96,7 +99,7 @@ func SignInClaude(dataDirectory string, replacing store.AccountKey) (PoolAccount
 	}
 	client := &http.Client{Timeout: 30 * time.Second}
 	var token claudeTokenResponse
-	if err := postClaudeOAuth(ctx, client, claudeOAuthTokenURL, map[string]string{"grant_type": "authorization_code", "code": code, "state": verifier,
+	if err := postClaudeOAuth(ctx, client, claudeOAuthTokenURL, map[string]string{"grant_type": "authorization_code", "code": code, "state": oauthState,
 		"client_id": claudeOAuthClientID, "redirect_uri": redirectURI, "code_verifier": verifier}, &token); err != nil {
 		return PoolAccount{}, err
 	}

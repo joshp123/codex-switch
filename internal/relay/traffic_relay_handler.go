@@ -92,15 +92,17 @@ type TrafficRelayHandler struct {
 	upstreamTransport    http.RoundTripper
 	reverseProxy         *httputil.ReverseProxy
 
-	drainMutex         sync.Mutex
-	activeRequestCount int
-	drainStarted       bool
-	drainComplete      chan struct{}
-	openWebSockets     map[*terminalResponseObserver]struct{}
-	closingWebSockets  bool
-	stopping           chan struct{}
-	onFailure          func()
-	onModelRequest     func()
+	drainMutex            sync.Mutex
+	activeRequestCount    int
+	drainStarted          bool
+	drainComplete         chan struct{}
+	openWebSockets        map[*terminalResponseObserver]struct{}
+	closingWebSockets     bool
+	stopping              chan struct{}
+	onFailure             func()
+	onModelRequest        func()
+	wsModelMutex          sync.Mutex
+	pendingWebSocketModel map[store.TaskID]string
 }
 
 // CreateTrafficRelayHandler leaves listener ownership and signal handling with the command layer.
@@ -142,11 +144,12 @@ func CreateTrafficRelayHandler(options RelayHandlerOptions) (*TrafficRelayHandle
 		accountObserver:      options.AccountObserver,
 		cacheAffinity:        options.CacheAffinity,
 		upstreamTransport:    upstreamTransport,
-		drainComplete:        make(chan struct{}),
-		openWebSockets:       make(map[*terminalResponseObserver]struct{}),
-		stopping:             make(chan struct{}),
-		onFailure:            options.OnFailure,
-		onModelRequest:       options.OnModelRequest,
+		drainComplete:         make(chan struct{}),
+		openWebSockets:        make(map[*terminalResponseObserver]struct{}),
+		stopping:              make(chan struct{}),
+		onFailure:             options.OnFailure,
+		onModelRequest:        options.OnModelRequest,
+		pendingWebSocketModel: make(map[store.TaskID]string),
 	}
 	relayHandler.reverseProxy = relayHandler.createBytePreservingReverseProxy()
 	relayHandler.authenticatedHandler = clientcapability.RequirePathPrefix(options.ClientCapability, http.HandlerFunc(relayHandler.serveAuthenticatedTraffic))
@@ -255,6 +258,9 @@ func (handler *TrafficRelayHandler) serveAuthenticatedTraffic(response http.Resp
 			}
 		}
 	}
+	if modelSlug == "" && workKind == store.ModelTurnWorkKind && taskID != "" && isWebSocketUpgrade(request) {
+		modelSlug = handler.consumePendingWebSocketModel(taskID)
+	}
 	var routeDecision routing.RouteDecision
 	var err error
 	if provider == accounts.ProviderChatGPT && request.Method == http.MethodGet && request.URL.Path == "/backend-api/codex/models" {
@@ -326,6 +332,7 @@ func (handler *TrafficRelayHandler) serveAuthenticatedTraffic(response http.Resp
 			}
 		}
 		observer.onModelRequest = handler.onModelRequest
+		observer.onWebSocketWait = handler.rememberPendingWebSocketModel
 		routedRequest.responseObserver = observer
 		if request.Method == http.MethodPost {
 			observer.startModelRequest(warmup)
@@ -500,6 +507,40 @@ func (handler *TrafficRelayHandler) closeIdleUpstreamConnections() {
 	if idleConnectionCloser, ok := handler.upstreamTransport.(interface{ CloseIdleConnections() }); ok {
 		idleConnectionCloser.CloseIdleConnections()
 	}
+}
+
+func (handler *TrafficRelayHandler) rememberPendingWebSocketModel(taskID store.TaskID, model string) {
+	if taskID == "" || model == "" {
+		return
+	}
+	handler.wsModelMutex.Lock()
+	if handler.pendingWebSocketModel == nil {
+		handler.pendingWebSocketModel = make(map[store.TaskID]string)
+	}
+	handler.pendingWebSocketModel[taskID] = model
+	handler.wsModelMutex.Unlock()
+}
+
+func (handler *TrafficRelayHandler) consumePendingWebSocketModel(taskID store.TaskID) string {
+	handler.wsModelMutex.Lock()
+	defer handler.wsModelMutex.Unlock()
+	model := handler.pendingWebSocketModel[taskID]
+	delete(handler.pendingWebSocketModel, taskID)
+	return model
+}
+
+func isWebSocketUpgrade(request *http.Request) bool {
+	if !strings.EqualFold(request.Header.Get("Upgrade"), "websocket") {
+		return false
+	}
+	for _, value := range request.Header.Values("Connection") {
+		for _, token := range strings.Split(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(token), "upgrade") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 var _ http.Handler = (*TrafficRelayHandler)(nil)

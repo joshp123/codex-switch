@@ -71,7 +71,6 @@ func (monitor *Monitor) ObserveClaudeResponse(key store.AccountKey, model string
 			incoming.Windows = append(incoming.Windows, window)
 		}
 	}
-	monitor.recordWeeklyAllowance(key, incoming)
 	fact.AllowanceSample = mergeClaudeAllowance(fact.AllowanceSample, incoming)
 	fact.ClaudeRestrictions = mergeClaudeRestrictions(nil, fact.ClaudeRestrictions)
 	if status == http.StatusTooManyRequests {
@@ -83,6 +82,7 @@ func (monitor *Monitor) ObserveClaudeResponse(key store.AccountKey, model string
 	availabilityChange := describeAccountAvailabilityChange(monitored.fact, fact, "")
 	monitored.fact = fact
 	monitor.mutex.Unlock()
+	monitor.recordWeeklyAllowance(key, incoming)
 	if availabilityChange != "" {
 		log.Print(availabilityChange)
 	}

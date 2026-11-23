@@ -19,6 +19,10 @@ func profileOrRelay(capability string, next http.Handler) http.Handler {
 	profiles.HandleFunc("/debug/pprof/trace", pprof.Trace)
 	privateProfiles := http.StripPrefix(prefix, profiles)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == prefix+"/debug/pprof" {
+			http.Redirect(w, r, r.URL.Path+"/", http.StatusMovedPermanently)
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, prefix+"/debug/pprof/") {
 			privateProfiles.ServeHTTP(w, r)
 			return

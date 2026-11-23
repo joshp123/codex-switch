@@ -58,8 +58,13 @@ func createObservedWebSocketConnection(
 
 func (connection *observedWebSocketConnection) Read(destination []byte) (int, error) {
 	if connection.readyFrames != nil && connection.readyFrames.Len() > 0 {
-		return connection.readyFrames.Read(destination)
+		n, err := connection.readyFrames.Read(destination)
+		if connection.readyFrames.Len() == 0 {
+			connection.readyFrames = nil
+		}
+		return n, err
 	}
+	connection.readyFrames = nil
 	for {
 		frame, err := readUpstreamWebSocketFrame(connection.ReadWriteCloser)
 		if err != nil {
@@ -70,7 +75,11 @@ func (connection *observedWebSocketConnection) Read(destination []byte) (int, er
 		}
 		if frame[0]&0x08 != 0 {
 			connection.readyFrames = bytes.NewReader(frame)
-			return connection.readyFrames.Read(destination)
+			n, err := connection.readyFrames.Read(destination)
+			if connection.readyFrames.Len() == 0 {
+				connection.readyFrames = nil
+			}
+			return n, err
 		}
 		connection.pendingFrames.Write(frame)
 		if err := connection.frameObserver.ObserveFrames(frame); err != nil && connection.reportReadError != nil {
@@ -85,7 +94,11 @@ func (connection *observedWebSocketConnection) Read(destination []byte) (int, er
 		if !connection.frameObserver.messageActive {
 			connection.readyFrames = bytes.NewReader(connection.pendingFrames.Bytes())
 			connection.pendingFrames = bytes.Buffer{}
-			return connection.readyFrames.Read(destination)
+			n, err := connection.readyFrames.Read(destination)
+			if connection.readyFrames.Len() == 0 {
+				connection.readyFrames = nil
+			}
+			return n, err
 		}
 	}
 }
@@ -118,6 +131,9 @@ func readUpstreamWebSocketFrame(source io.Reader) ([]byte, error) {
 		}
 	}
 	if header[1]&0x80 != 0 {
+		if payloadLength > (1<<63-1)-4 {
+			return nil, errors.New("invalid WebSocket payload length")
+		}
 		payloadLength += 4
 	}
 	if _, err := io.CopyN(&frame, source, payloadLength); err != nil {

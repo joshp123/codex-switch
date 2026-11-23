@@ -30,20 +30,23 @@ func prepareClaudeHeaders(headers http.Header) {
 	if headers.Get("Anthropic-Version") == "" {
 		headers.Set("Anthropic-Version", "2023-06-01")
 	}
+	existingRaw := strings.Join(headers.Values("Anthropic-Beta"), ",")
 	for _, beta := range []string{"oauth-2025-04-20", "claude-code-20250219"} {
 		found := false
-		for _, existing := range strings.Split(headers.Get("Anthropic-Beta"), ",") {
+		for _, existing := range strings.Split(existingRaw, ",") {
 			if strings.TrimSpace(existing) == beta {
 				found = true
 			}
 		}
 		if !found {
-			value := headers.Get("Anthropic-Beta")
-			if value != "" {
-				value += ","
+			if existingRaw != "" {
+				existingRaw += ","
 			}
-			headers.Set("Anthropic-Beta", value+beta)
+			existingRaw += beta
 		}
+	}
+	if existingRaw != "" {
+		headers.Set("Anthropic-Beta", existingRaw)
 	}
 }
 
@@ -157,7 +160,22 @@ func describeClaudeLimitHeaders(header http.Header) string {
 	return strings.Join(named, " ")
 }
 
+func claudeStreamEventType(payload []byte) string {
+	var envelope struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(payload, &envelope) != nil {
+		return ""
+	}
+	return envelope.Type
+}
+
 func (observer *terminalResponseObserver) observeClaudeUsage(payload []byte) {
+	if claudeStreamEventType(payload) == "error" {
+		observer.settleModelRequest("", store.ModelRequestFailed)
+		observer.admittedRequests = 0
+		return
+	}
 	complete, err := observer.claudeUsage.Observe(payload)
 	if err != nil {
 		log.Printf("%s: read Claude usage: %v", observer.describe(), err)
@@ -166,13 +184,13 @@ func (observer *terminalResponseObserver) observeClaudeUsage(payload []byte) {
 	if !complete {
 		return
 	}
+	observer.settleModelRequest("", store.ModelRequestSuccessful)
+	observer.admittedRequests = 0
 	record, err := observer.claudeUsage.Record(observer.taskID, observer.accountKey, time.Now().UTC())
 	if err != nil {
 		log.Printf("%s: price Claude usage: %v", observer.describe(), err)
 		return
 	}
-	observer.settleModelRequest("", store.ModelRequestSuccessful)
-	observer.admittedRequests = 0
 	if err := observer.completionLedger.RecordCompletedResponse(record); err != nil {
 		log.Printf("%s: record Claude usage: %v", observer.describe(), err)
 	}

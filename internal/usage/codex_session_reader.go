@@ -31,6 +31,9 @@ func discoverCodexSessions(home string, since time.Time, importedByPath map[stri
 				return nil
 			}
 			info, err := entry.Info()
+			if os.IsNotExist(err) {
+				return nil
+			}
 			if err != nil {
 				return err
 			}
@@ -46,6 +49,9 @@ func discoverCodexSessions(home string, since time.Time, importedByPath map[stri
 				return nil
 			}
 			file, err := os.Open(path)
+			if os.IsNotExist(err) {
+				return nil
+			}
 			if err != nil {
 				return err
 			}
@@ -272,6 +278,9 @@ func readCodexSession(ctx context.Context, source sessionFile, cursor sessionRea
 		payload := event.Payload
 		if event.Type == "turn_context" {
 			result.Cursor.Model = payload.Model
+			if payload.Tier != nil {
+				result.Cursor.ServiceTier = payload.Tier
+			}
 			if payload.TurnID != "" {
 				result.Cursor.TurnID = payload.TurnID
 			}

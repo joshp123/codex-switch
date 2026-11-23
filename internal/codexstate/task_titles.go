@@ -26,29 +26,38 @@ func (r LocalReader) TaskTitles(ctx context.Context, taskIDs []string) (map[stri
 	if err != nil || databasePath == "" {
 		return result, err
 	}
-	databaseURL := url.URL{Scheme: "file", Path: databasePath, RawQuery: "mode=ro"}
+	databaseURL := url.URL{Scheme: "file", Path: databasePath, RawQuery: "mode=ro&_pragma=busy_timeout(5000)"}
 	database, err := sql.Open("sqlite", databaseURL.String())
 	if err != nil {
 		return nil, err
 	}
 	defer database.Close()
-	parameters := make([]any, len(taskIDs))
-	for index, id := range taskIDs {
-		parameters[index] = id
-	}
-	rows, err := database.QueryContext(ctx, "SELECT id,COALESCE(name,''),source,cwd,COALESCE(git_origin_url,'') FROM threads WHERE id IN ("+strings.TrimSuffix(strings.Repeat("?,", len(taskIDs)), ",")+")", parameters...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var id, name, source, directory, origin string
-		if err := rows.Scan(&id, &name, &source, &directory, &origin); err != nil {
+	const batchSize = 500
+	for start := 0; start < len(taskIDs); start += batchSize {
+		batch := taskIDs[start:min(start+batchSize, len(taskIDs))]
+		parameters := make([]any, len(batch))
+		for index, id := range batch {
+			parameters[index] = id
+		}
+		rows, err := database.QueryContext(ctx, "SELECT id,COALESCE(name,''),source,cwd,COALESCE(git_origin_url,'') FROM threads WHERE id IN ("+strings.TrimSuffix(strings.Repeat("?,", len(batch)), ",")+")", parameters...)
+		if err != nil {
 			return nil, err
 		}
-		result[id] = taskTitle(name, source, directory, origin)
+		for rows.Next() {
+			var id, name, source, directory, origin string
+			if err := rows.Scan(&id, &name, &source, &directory, &origin); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			result[id] = taskTitle(name, source, directory, origin)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
 	}
-	return result, rows.Err()
+	return result, nil
 }
 
 // TaskTitleInputs identifies Codex's thread database and its write-ahead log,
@@ -74,6 +83,9 @@ func (r LocalReader) taskTitleDatabase() (string, error) {
 	for _, path := range paths {
 		info, err := os.Stat(path)
 		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
 			return "", err
 		}
 		if newest == nil || info.ModTime().After(newest.ModTime()) {
@@ -96,7 +108,7 @@ func taskTitle(name, source, directory, origin string) string {
 	if origin == "" || project == "." || project == "/" {
 		project = filepath.Base(filepath.Clean(directory))
 	}
-	if directory == "" || project == "." || project == string(filepath.Separator) {
+	if project == "" || project == "." || project == string(filepath.Separator) {
 		return launcher
 	}
 	return launcher + " · " + project

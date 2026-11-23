@@ -341,14 +341,19 @@ func (monitor *Monitor) RefreshAccountCredentialsAfterUnauthorized(accountKey st
 	return nil
 }
 
+func (monitor *Monitor) newSavedLogin(account PoolAccount) *savedLogin {
+	login := newSavedLogin(filepath.Join(monitor.dataDirectory, account.Folder), monitor.httpClient)
+	login.provider = account.Provider
+	if account.Provider == ProviderClaude {
+		login.token = monitor.claudeTokenURL
+	}
+	return login
+}
+
 func (monitor *Monitor) monitoredAccountLocked(account PoolAccount) *monitoredAccount {
 	monitored, known := monitor.accounts[account.Key]
 	if !known || monitored.savedLogin.home != filepath.Join(monitor.dataDirectory, account.Folder) {
-		monitored = &monitoredAccount{savedLogin: newSavedLogin(filepath.Join(monitor.dataDirectory, account.Folder), monitor.httpClient)}
-		monitored.savedLogin.provider = account.Provider
-		if account.Provider == ProviderClaude {
-			monitored.savedLogin.token = monitor.claudeTokenURL
-		}
+		monitored = &monitoredAccount{savedLogin: monitor.newSavedLogin(account)}
 		monitor.accounts[account.Key] = monitored
 	}
 	return monitored

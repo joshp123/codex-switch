@@ -36,6 +36,9 @@ func creditsPerMillionTokens(input, cached, output float64) tokenRates {
 }
 
 var apiEquivalentTokenRates = map[string]tokenRates{
+	"gpt-6.2-astra": creditsPerMillionTokens(200, 10, 1000),
+	"gpt-6.2-sol":   creditsPerMillionTokens(50, 2.5, 250),
+	"gpt-6.1-terra": creditsPerMillionTokens(25, 1.25, 125),
 	"gpt-6-astra":   creditsPerMillionTokens(250, 25, 1250),
 	"gpt-6.1-sol":   creditsPerMillionTokens(50, 2.5, 250),
 	"gpt-6-sol":     creditsPerMillionTokens(50, 5, 250),

@@ -38,6 +38,7 @@ type terminalResponseObserver struct {
 	requestCounters ModelRequestCounters
 	onFailure       func()
 	onModelRequest  func()
+	onWebSocketWait func(store.TaskID, string)
 	requests        []*observedModelRequest
 
 	// A WebSocket's state during an update; see in_flight_request_drain.go.
@@ -143,6 +144,9 @@ func (observer *terminalResponseObserver) observeStructuredEvent(eventBytes []by
 		observer.settleModelRequest(event.Response.ID, store.ModelRequestFailed)
 		observer.admittedRequests = max(0, observer.admittedRequests-1)
 		observer.logProviderFailure(event.Response.failureReason())
+		if event.Type == "response.incomplete" && event.Response.Usage != nil {
+			observer.recordCompletedResponse(event.Response)
+		}
 		observer.activeResponses = max(0, observer.activeResponses-1)
 		observer.noteResponseEnded()
 		return false
@@ -188,6 +192,9 @@ func (observer *terminalResponseObserver) observeHTTPJSONBody(bodyBytes []byte) 
 		observer.settleModelRequest(response.ID, store.ModelRequestFailed)
 		observer.admittedRequests = 0
 		observer.logProviderFailure(response.failureReason())
+		if response.Status == "incomplete" && response.Usage != nil {
+			observer.recordCompletedResponse(response.completedResponseWire)
+		}
 		return
 	}
 	if response.ID != "" && (response.Status == "completed" || response.Usage != nil) {
@@ -353,9 +360,14 @@ func (observer *terminalResponseObserver) routeClientMessage(message []byte) boo
 	if observer.taskID != "" {
 		decision, err := observer.taskRouter.RouteForTask(observer.taskID, store.ModelTurnWorkKind, request.Model)
 		if err != nil {
-			if !errors.Is(err, routing.ErrNoAvailableAccount) && observer.onFailure != nil {
+			if errors.Is(err, routing.ErrNoAvailableAccount) {
+				if observer.onWebSocketWait != nil && request.Model != "" {
+					observer.onWebSocketWait(observer.taskID, request.Model)
+				}
+			} else if observer.onFailure != nil {
 				observer.onFailure()
 			}
+			observer.webSocketClosed = true
 			log.Printf("%s: the socket closes so the client reconnects, because routing its next %s request failed: %v", observer.describe(), request.Model, err)
 			return true
 		}
@@ -365,6 +377,7 @@ func (observer *terminalResponseObserver) routeClientMessage(message []byte) boo
 		if decision.AccountKey != observer.accountKey {
 			// Closing the socket before forwarding makes Codex reconnect and send
 			// this message again, now routed to the chosen account.
+			observer.webSocketClosed = true
 			return true
 		}
 	}

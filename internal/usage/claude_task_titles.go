@@ -176,7 +176,7 @@ func (ledger *UsageLedger) claudeCodeTaskTitles(sessions map[string]bool) (map[s
 		if err != nil {
 			return nil, err
 		}
-		if known && (!active || previous.Source == current.Source) {
+		if known && previous.Title != "" && (!active || previous.Source == current.Source) {
 			titles[session] = previous.Title
 			continue
 		}
@@ -205,7 +205,7 @@ func (ledger *UsageLedger) claudeCodeTaskTitles(sessions map[string]bool) (map[s
 			}
 		}
 		titles[session] = current.Title
-		if len(paths[session]) != 0 {
+		if current.Title != "" {
 			if err := ledger.rememberClaudeTaskTitle(directory, session, current); err != nil {
 				return nil, err
 			}
