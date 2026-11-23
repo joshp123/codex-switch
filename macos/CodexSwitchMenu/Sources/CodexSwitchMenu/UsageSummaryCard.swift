@@ -11,7 +11,7 @@ struct UsageSummaryCard: View {
     @Environment(\.panelDensity) private var density
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: density.summaryGap) {
             HStack(alignment: .firstTextBaseline) {
                 MetricMenu(
                     selection: selectedMetric,

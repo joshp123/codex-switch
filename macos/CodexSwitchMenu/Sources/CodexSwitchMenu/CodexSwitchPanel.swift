@@ -16,8 +16,8 @@ struct CodexSwitchPanel: View {
     /// once per opening, from the first layout.
     @State private var density = PanelDensity.regular
 
-    private static let topInset: CGFloat = 12
-    private static let bottomInset: CGFloat = 10
+    private var topInset: CGFloat { density == .regular ? 12 : 8 }
+    private var bottomInset: CGFloat { density == .regular ? 10 : 6 }
 
     init(
         store: OverviewStore,
@@ -33,13 +33,14 @@ struct CodexSwitchPanel: View {
         self.updates = updates
         self.onRefresh = onRefresh
         _selectedPeriod = State(initialValue: initialPeriod)
+        _density = State(initialValue: PanelDensity.initial(for: store.latestSnapshot, maximumHeight: maximumHeight))
     }
 
     /// The open top tasks list takes the height the screen leaves after the
     /// pool, so the whole panel fits without scrolling.
     private var taskRows: Int {
         guard topTasksExpanded, heightAboveTasks > 0 else { return 0 }
-        let room = maximumHeight - PanelSizing.footerHeight - Self.topInset - Self.bottomInset
+        let room = maximumHeight - PanelSizing.footerHeight - topInset - bottomInset
             - heightAboveTasks - density.sectionGap
         return RoutedTasksSection.rows(fitting: room, density: density)
     }
@@ -118,8 +119,8 @@ struct CodexSwitchPanel: View {
                         }
                     }
                     .padding(.horizontal, UsageTheme.outerInset)
-                    .padding(.top, Self.topInset)
-                    .padding(.bottom, Self.bottomInset)
+                    .padding(.top, topInset)
+                    .padding(.bottom, bottomInset)
                     .environment(\.panelDensity, density)
                     .background {
                         GeometryReader { proxy in
@@ -138,11 +139,13 @@ struct CodexSwitchPanel: View {
                     ) ? .automatic : .hidden
                 )
                 .scrollBounceBehavior(.basedOnSize)
-                .frame(height: PanelSizing.scrollHeight(
+                .frame(height: contentHeight > 0 ? PanelSizing.scrollHeight(
                     contentHeight: contentHeight,
                     maximumPanelHeight: maximumHeight
-                ))
+                ) : nil)
+                .frame(maxHeight: max(maximumHeight - PanelSizing.footerHeight, 120))
                 .onPreferenceChange(PanelContentHeightKey.self) { height in
+                    guard store.latestSnapshot != nil || contentHeight == 0 else { return }
                     contentHeight = height
                     updateDensity()
                 }
@@ -165,10 +168,10 @@ struct CodexSwitchPanel: View {
         .focusEffectDisabled()
         .background(UsageTheme.traySurface.ignoresSafeArea())
         .onChange(of: openGeneration) { _, _ in
-            density = .regular
+            density = PanelDensity.initial(for: store.latestSnapshot, maximumHeight: maximumHeight)
         }
-        .onChange(of: maximumHeight) { _, _ in
-            density = .regular
+        .onChange(of: maximumHeight) { _, newHeight in
+            density = PanelDensity.initial(for: store.latestSnapshot, maximumHeight: newHeight)
         }
         .onChange(of: store.latestSnapshot, initial: true) { _, snapshot in
             guard let snapshot else { return }
@@ -193,7 +196,7 @@ struct CodexSwitchPanel: View {
             : 0
         let poolHeight = topTasksExpanded
             ? (heightAboveTasks > 0
-                ? heightAboveTasks + Self.topInset + Self.bottomInset + taskHeaderHeight
+                ? heightAboveTasks + topInset + bottomInset + taskHeaderHeight
                 : 0)
             : contentHeight
         if poolHeight >= limit {

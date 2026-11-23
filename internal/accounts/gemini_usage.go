@@ -48,6 +48,7 @@ type GeminiAccountUsage struct {
 type GeminiUsageMonitor struct {
 	homeDir       string
 	agyExecutable string
+	storeDatabase *store.StoreDatabase
 	interval      time.Duration
 	now           func() time.Time
 	onChange      func()
@@ -59,11 +60,12 @@ type GeminiUsageMonitor struct {
 
 // NewGeminiUsageMonitor constructs a background reader for native Antigravity
 // CLI usage. Setting CODEX_SWITCH_AGY_BIN=none disables it completely.
-func NewGeminiUsageMonitor(onChange func()) *GeminiUsageMonitor {
+func NewGeminiUsageMonitor(storeDatabase *store.StoreDatabase, onChange func()) *GeminiUsageMonitor {
 	home, _ := os.UserHomeDir()
 	return &GeminiUsageMonitor{
 		homeDir:       home,
 		agyExecutable: findAgyExecutable(home),
+		storeDatabase: storeDatabase,
 		interval:      defaultGeminiUsageInterval,
 		now:           time.Now,
 		onChange:      onChange,
@@ -180,6 +182,8 @@ func (m *GeminiUsageMonitor) readNativeCLI(ctx context.Context, prev *GeminiAcco
 		return GeminiAccountUsage{}, false, err
 	}
 
+	recordGeminiWeeklyAllowance(m.storeDatabase, key, sample)
+
 	state := AccountReady
 	if sample.LimitReached {
 		state = AccountLimited
@@ -191,6 +195,25 @@ func (m *GeminiUsageMonitor) readNativeCLI(ctx context.Context, prev *GeminiAcco
 		UnavailableReason: "usage only",
 		AllowanceSample:   sample,
 	}, true, nil
+}
+
+func recordGeminiWeeklyAllowance(database *store.StoreDatabase, accountKey store.AccountKey, sample AllowanceSample) {
+	if database == nil {
+		return
+	}
+	for _, window := range sample.Windows {
+		if window.DurationSeconds != 7*86400 || window.ModelID != "" || window.ModelName != "" || window.ResetsAt.IsZero() {
+			continue
+		}
+		if err := database.RecordWeeklyAllowanceReading(store.WeeklyAllowanceReading{
+			AccountKey:  accountKey,
+			ResetsAt:    window.ResetsAt,
+			UsedPercent: window.UsedPercent,
+			ObservedAt:  sample.ObservedAt,
+		}); err != nil {
+			log.Printf("Gemini usage: could not record weekly allowance: %v", err)
+		}
+	}
 }
 
 func runAgyUsageCLI(parent context.Context, agyBin string) ([]byte, error) {

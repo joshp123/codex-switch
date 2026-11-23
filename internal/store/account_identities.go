@@ -87,6 +87,23 @@ ORDER BY CAST(SUBSTR(account_name, LENGTH('account-') + 1) AS INTEGER) DESC LIMI
 	return folder, nil
 }
 
+// accountFolderOrKey returns the account's folder name when it belongs to the
+// local account pool, or its canonical key for read-only accounts (such as
+// local CLI usage) that have no credential folder.
+func (database *StoreDatabase) accountFolderOrKey(key AccountKey) (string, error) {
+	var folder string
+	err := database.sqlDatabase.QueryRow(`
+SELECT account_name FROM account_identities WHERE account_key = ?
+ORDER BY CAST(SUBSTR(account_name, LENGTH('account-') + 1) AS INTEGER) DESC LIMIT 1`, key).Scan(&folder)
+	if errors.Is(err, sql.ErrNoRows) {
+		return string(key), nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read the folder of account %s: %w", key, err)
+	}
+	return folder, nil
+}
+
 // accountKeyTables are the tables with a row per account or per account event.
 var accountKeyTables = []string{"task_account_pins", "account_reported_resets", "completed_responses", "model_request_counts", "weekly_allowance_readings"}
 

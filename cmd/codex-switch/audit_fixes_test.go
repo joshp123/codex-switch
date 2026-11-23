@@ -2,11 +2,13 @@ package main
 
 import (
 	"bytes"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/joshp123/codex-switch/internal/menupb"
+	"github.com/joshp123/codex-switch/internal/store"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -92,5 +94,64 @@ func TestWriteCurrentStatusHandlesGeminiUsageOnly(t *testing.T) {
 	}
 	if !strings.Contains(text, "weekly · Claude & GPT") {
 		t.Fatalf("expected 3p window line, got:\n%s", text)
+	}
+}
+
+func TestReadProviderBurnsAndStatusIncludeGemini(t *testing.T) {
+	database, err := store.OpenStoreDatabase(filepath.Join(t.TempDir(), "codex-switch.db"))
+	if err != nil {
+		t.Fatalf("OpenStoreDatabase: %v", err)
+	}
+	defer database.CloseStoreDatabase()
+
+	start := time.Date(2026, 11, 21, 10, 0, 0, 0, time.UTC)
+	resetAt := start.Add(5 * 24 * time.Hour)
+	if err := database.RecordWeeklyAllowanceReading(store.WeeklyAllowanceReading{
+		AccountKey: "gemini:local", ResetsAt: resetAt, UsedPercent: 20, ObservedAt: start,
+	}); err != nil {
+		t.Fatalf("RecordWeeklyAllowanceReading(1): %v", err)
+	}
+	now := start.Add(24 * time.Hour)
+	if err := database.RecordWeeklyAllowanceReading(store.WeeklyAllowanceReading{
+		AccountKey: "gemini:local", ResetsAt: resetAt, UsedPercent: 30, ObservedAt: now,
+	}); err != nil {
+		t.Fatalf("RecordWeeklyAllowanceReading(2): %v", err)
+	}
+
+	snapshot := &menupb.MenuSnapshot{
+		GeneratedAt: timestamppb.New(now),
+		Connection:  &menupb.Connection{NewTasksConfigured: true},
+		Accounts: []*menupb.Account{
+			{
+				Key: "gemini:local", AccountNumber: 1, Plan: "Antigravity",
+				Provider: menupb.Provider_PROVIDER_GEMINI, State: menupb.AccountState_ACCOUNT_STATE_READY,
+				Usable: false, UnavailableReason: "usage only", OffersConfiguredModel: true,
+			},
+		},
+	}
+	if err := readProviderBurns(database, snapshot); err != nil {
+		t.Fatalf("readProviderBurns: %v", err)
+	}
+	if len(snapshot.ProviderBurns) != 1 || snapshot.ProviderBurns[0].Provider != menupb.Provider_PROVIDER_GEMINI {
+		t.Fatalf("unexpected ProviderBurns: %+v", snapshot.ProviderBurns)
+	}
+
+	var out bytes.Buffer
+	writeCurrentStatus(&out, snapshot)
+	if !strings.Contains(out.String(), "Gemini: burning 0.7 accounts a week, 1 in the pool") {
+		t.Fatalf("expected Gemini weekly burn line in status output, got:\n%s", out.String())
+	}
+}
+
+func TestServedListenAddressPrefersListenAddressFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := writeMenuSnapshotURL(dir, "http://127.0.0.1:54321/client/abc/codex-switch/menu-snapshot"); err != nil {
+		t.Fatalf("writeMenuSnapshotURL: %v", err)
+	}
+	if err := writeListenAddress(dir, "127.0.0.1:2455"); err != nil {
+		t.Fatalf("writeListenAddress: %v", err)
+	}
+	if got := servedListenAddress(dir); got != "127.0.0.1:2455" {
+		t.Fatalf("servedListenAddress = %q, want 127.0.0.1:2455", got)
 	}
 }

@@ -70,20 +70,33 @@ enum UsageTheme {
 enum PanelDensity {
     case regular, compact
 
-    var cardInset: CGFloat { self == .regular ? 12 : 10 }
-    var sectionGap: CGFloat { self == .regular ? 10 : 6 }
+    /// Pick compact up front on laptop-height screens when the pool already has
+    /// enough accounts or providers to overflow regular density, avoiding a
+    /// visible resize jump right after the panel opens.
+    static func initial(for snapshot: CSSwitch_MenuSnapshot?, maximumHeight: CGFloat) -> PanelDensity {
+        guard let snapshot, maximumHeight < 1_050 else { return .regular }
+        if snapshot.accounts.count >= 5 || snapshot.providers.count >= 3 {
+            return .compact
+        }
+        return .regular
+    }
+
+    var cardInset: CGFloat { self == .regular ? 12 : 7 }
+    var sectionGap: CGFloat { self == .regular ? 10 : 5 }
     /// Between the identity group and the first window block, and between blocks.
-    var groupGap: CGFloat { self == .regular ? 18 : 10 }
-    var blockTitleGap: CGFloat { self == .regular ? 8 : 6 }
+    var groupGap: CGFloat { self == .regular ? 18 : 7 }
+    var blockTitleGap: CGFloat { self == .regular ? 8 : 3 }
+    var headerGap: CGFloat { self == .regular ? 6 : 3 }
+    var summaryGap: CGFloat { self == .regular ? 10 : 6 }
     var identityFont: Font { .system(size: self == .regular ? 12 : 11) }
     var identityGap: CGFloat { self == .regular ? 4 : 2 }
     var rowFont: Font { .system(size: self == .regular ? 12 : 11) }
     var rowEmphasisFont: Font { .system(size: self == .regular ? 12 : 11, weight: .medium) }
-    var rowHeight: CGFloat { self == .regular ? 18 : 16 }
-    var rowGap: CGFloat { self == .regular ? 9 : 6 }
+    var rowHeight: CGFloat { self == .regular ? 18 : 14 }
+    var rowGap: CGFloat { self == .regular ? 9 : 3 }
     var barHeight: CGFloat { 5 }
     var legendGap: CGFloat { self == .regular ? 5 : 2 }
-    var ringSize: CGFloat { self == .regular ? 96 : 92 }
+    var ringSize: CGFloat { self == .regular ? 96 : 78 }
     /// Grid columns sized to the widest real strings: a dot and one digit,
     /// "100% left", and "Resets Wed 18:00" (a flame only ever comes with the
     /// shorter "Limit in …").

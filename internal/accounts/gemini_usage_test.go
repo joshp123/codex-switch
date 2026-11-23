@@ -2,10 +2,14 @@ package accounts
 
 import (
 	"context"
+	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/joshp123/codex-switch/internal/store"
 )
 
 func TestParseAgyUsageJSON(t *testing.T) {
@@ -143,5 +147,54 @@ func TestParseAgyUsageJSONSkipsMissingRemainingFraction(t *testing.T) {
 	}
 	if len(sample.Windows) != 1 || sample.LimitReached {
 		t.Fatalf("expected missing remaining_fraction skipped without limitReached, got %+v", sample)
+	}
+}
+
+func TestGeminiUsageMonitorRecordsWeeklyAllowanceBurn(t *testing.T) {
+	database, err := store.OpenStoreDatabase(filepath.Join(t.TempDir(), "codex-switch.db"))
+	if err != nil {
+		t.Fatalf("OpenStoreDatabase: %v", err)
+	}
+	defer database.CloseStoreDatabase()
+
+	fakeAgy := filepath.Join(t.TempDir(), "agy")
+	script := `#!/bin/sh
+cat <<'EOF'
+{"status":"SUCCESS","command":{"name":"usage","data":{"groups":[{"name":"Gemini Models","buckets":[{"id":"gemini-5h","window":"5h","remaining_fraction":0.9,"reset_time":"2026-11-23T20:00:00Z"},{"id":"gemini-weekly","window":"weekly","remaining_fraction":0.7,"reset_time":"2026-11-28T10:00:00Z"}]},{"name":"Claude & GPT","buckets":[{"id":"3p-weekly","window":"weekly","remaining_fraction":0.5,"reset_time":"2026-11-29T10:00:00Z"}]}]}}}
+EOF
+`
+	if err := os.WriteFile(fakeAgy, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Date(2026, 11, 21, 10, 0, 0, 0, time.UTC)
+	now := start
+	monitor := &GeminiUsageMonitor{
+		homeDir:       t.TempDir(),
+		agyExecutable: fakeAgy,
+		storeDatabase: database,
+		interval:      time.Minute,
+		now:           func() time.Time { return now },
+	}
+	monitor.refreshOnce(context.Background())
+
+	// Second observation 24h later with 45% used (15% increase over 30% baseline).
+	script2 := strings.Replace(script, `"remaining_fraction":0.7`, `"remaining_fraction":0.55`, 1)
+	if err := os.WriteFile(fakeAgy, []byte(script2), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	now = start.Add(24 * time.Hour)
+	monitor.refreshOnce(context.Background())
+
+	burn, err := database.ReadWeeklyAllowanceBurn([]store.AccountKey{"gemini:local"}, now)
+	if err != nil {
+		t.Fatalf("ReadWeeklyAllowanceBurn: %v", err)
+	}
+	if burn == nil {
+		t.Fatalf("expected non-nil Gemini weekly burn after 24h")
+	}
+	// 15% over 1 day = 1.05 accounts/week.
+	if math.Abs(*burn-1.05) > 0.01 {
+		t.Fatalf("Gemini weekly burn = %.4f, want ~1.05", *burn)
 	}
 }

@@ -40,6 +40,12 @@ fi
 workspace=$CODEX_SWITCH_LOCKED_WORKSPACE
 unset CODEX_SWITCH_LOCKED_WORKSPACE
 switch_in_progress=false
+restore_menu_snapshot_url() {
+  if [ -f "$workspace/previous-menu-snapshot-url" ]; then
+    /bin/cp "$workspace/previous-menu-snapshot-url" "$data/menu-snapshot-url.restore.$$" 2>/dev/null || return 0
+    /bin/mv -f "$data/menu-snapshot-url.restore.$$" "$data/menu-snapshot-url" 2>/dev/null || true
+  fi
+}
 cleanup() {
   if [ "$switch_in_progress" = true ]; then
     if [ "${active:-none}" != none ] && [ -n "${active_binary:-}" ]; then
@@ -48,6 +54,7 @@ cleanup() {
     if [ -n "${next_label:-}" ] && [ -n "${next_binary:-}" ]; then
       stop_job "$next_label" "$next_binary" 2>/dev/null || true
     fi
+    restore_menu_snapshot_url
     [ ! -e "$data/switch-started" ] || /usr/bin/trash "$data/switch-started" 2>/dev/null || true
   fi
   /usr/bin/trash "$workspace" 2>/dev/null || true
@@ -283,6 +290,9 @@ else
   /usr/bin/plutil -insert StandardOutPath -string "$data/launchd.log" "$temporary_plist"
   /usr/bin/plutil -insert StandardErrorPath -string "$data/launchd.log" "$temporary_plist"
 fi
+if [ -f "$data/menu-snapshot-url" ]; then
+  /bin/cp "$data/menu-snapshot-url" "$workspace/previous-menu-snapshot-url"
+fi
 switch_started=$(/bin/date +%s)
 printf '%s\n' "$switch_started" > "$data/switch-started"
 switch_in_progress=true
@@ -291,6 +301,7 @@ readiness_result=0
 wait_for_job "$next_label" true || readiness_result=$?
 if [ "$readiness_result" -ne 0 ]; then
   stop_job "$next_label" "$next_binary"
+  restore_menu_snapshot_url
   /usr/bin/trash "$data/switch-started"
   switch_in_progress=false
   if [ "$readiness_result" -eq 2 ] && [ "$active" != none ] && [ "$manual" = false ]; then printf '%s\n' "$chosen_build" >> "$data/skipped-builds"; echo "build $chosen_build was skipped"; exit 0; fi
@@ -304,6 +315,7 @@ if [ "$active" != none ]; then
   step_aside() {
     /bin/ln -sf "$active_binary" "$command_link"
     stop_job "$next_label" "$next_binary"
+    restore_menu_snapshot_url
     /usr/bin/trash "$data/switch-started"
     switch_in_progress=false
   }

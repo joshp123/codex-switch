@@ -146,8 +146,11 @@ func writeCurrentStatus(output io.Writer, snapshot *menupb.MenuSnapshot) {
 	fmt.Fprintf(output, "%d of %d accounts can take new work.\n", available, routedTotal)
 	for _, burn := range snapshot.ProviderBurns {
 		providerName := "Codex"
-		if burn.Provider == menupb.Provider_PROVIDER_CLAUDE {
+		switch burn.Provider {
+		case menupb.Provider_PROVIDER_CLAUDE:
 			providerName = "Claude"
+		case menupb.Provider_PROVIDER_GEMINI:
+			providerName = "Gemini"
 		}
 		poolSize := 0
 		for _, account := range snapshot.Accounts {

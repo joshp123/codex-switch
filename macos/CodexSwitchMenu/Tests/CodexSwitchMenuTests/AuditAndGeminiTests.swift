@@ -103,4 +103,57 @@ final class AuditAndGeminiTests: XCTestCase {
         failed.state = .usageCheckFailed
         XCTAssertEqual(MenuBarAccountValue.values(for: [failed]), [])
     }
+
+    @MainActor
+    func testOutsideClickDismissIgnoresStatusButtonAndPanel() {
+        let buttonFrame = NSRect(x: 1000, y: 950, width: 170, height: 24)
+        let panelFrame = NSRect(x: 700, y: 100, width: 500, height: 840)
+
+        XCTAssertFalse(StatusBarController.shouldDismissForOutsideClick(
+            at: NSPoint(x: 1050, y: 960), buttonFrame: buttonFrame, panelFrame: panelFrame
+        ))
+        XCTAssertFalse(StatusBarController.shouldDismissForOutsideClick(
+            at: NSPoint(x: 800, y: 500), buttonFrame: buttonFrame, panelFrame: panelFrame
+        ))
+        XCTAssertTrue(StatusBarController.shouldDismissForOutsideClick(
+            at: NSPoint(x: 200, y: 500), buttonFrame: buttonFrame, panelFrame: panelFrame
+        ))
+    }
+
+    func testInitialPanelDensityAndGeminiWeeklyPace() {
+        var snapshot = CSSwitch_MenuSnapshot()
+        for idx in 1...2 {
+            var a = CSSwitch_Account()
+            a.key = "chatgpt:c\(idx)@example.com"
+            a.accountNumber = UInt32(idx)
+            a.provider = .chatgpt
+            a.offersConfiguredModel = true
+            snapshot.accounts.append(a)
+        }
+        var claude = CSSwitch_Account()
+        claude.key = "claude:cl@example.com"
+        claude.accountNumber = 1
+        claude.provider = .claude
+        claude.offersConfiguredModel = true
+        snapshot.accounts.append(claude)
+
+        var gemini = CSSwitch_Account()
+        gemini.key = "gemini:local"
+        gemini.accountNumber = 1
+        gemini.provider = .gemini
+        gemini.offersConfiguredModel = true
+        snapshot.accounts.append(gemini)
+
+        var burn = CSSwitch_ProviderBurn()
+        burn.provider = .gemini
+        burn.accountsPerWeek = 0.8
+        snapshot.providerBurns = [burn]
+
+        XCTAssertEqual(PanelDensity.initial(for: snapshot, maximumHeight: 929), .compact)
+        XCTAssertEqual(PanelDensity.initial(for: snapshot, maximumHeight: 1400), .regular)
+        XCTAssertEqual(
+            WeeklyPace.lines(snapshot, locale: Locale(identifier: "en_US_POSIX")),
+            ["Gemini: burning 0.8 accounts a week, 1 in the pool"]
+        )
+    }
 }

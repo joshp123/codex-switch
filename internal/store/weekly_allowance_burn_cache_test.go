@@ -100,7 +100,7 @@ func TestWeeklyAllowanceBurnCacheWindowBoundaries(t *testing.T) {
 	for _, now := range times {
 		for _, selection := range selections {
 			assertWeeklyBurnMatchesUncached(t, database, selection, now)
-			if len(database.weeklyAllowanceBurns) > 2 {
+			if len(database.weeklyAllowanceBurns) > 3 {
 				t.Fatal("cache retained historical account selections")
 			}
 		}

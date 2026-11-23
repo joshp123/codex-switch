@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -161,7 +162,7 @@ func serveRelay(tcpListenAddress string) {
 	if interval, set := secondsFromEnvironment("CODEX_SWITCH_MENU_SNAPSHOT_SECONDS"); set {
 		snapshots.interval = interval
 	}
-	geminiMonitor := accountapi.NewGeminiUsageMonitor(snapshots.notifyWorkDone)
+	geminiMonitor := accountapi.NewGeminiUsageMonitor(storeDatabase, snapshots.notifyWorkDone)
 	if interval, set := secondsFromEnvironment("CODEX_SWITCH_GEMINI_USAGE_READ_SECONDS"); set {
 		geminiMonitor.SetInterval(interval)
 	}
@@ -215,7 +216,26 @@ func serveRelay(tcpListenAddress string) {
 	snapshots.codexBaseURL = clientURL + "/backend-api/codex"
 	background.Add(1)
 	go func() { defer background.Done(); snapshots.Run(factsContext) }()
-	if err := writeMenuSnapshotURL(dataDir(), clientURL+menuSnapshotEndpoint); err != nil {
+	if err := writeListenAddress(dataDir(), listener.Addr().String()); err != nil {
+		log.Fatalf("publish the proxy listen address: %v", err)
+	}
+	// Serve menu snapshots on an exclusive loopback port (without SO_REUSEPORT)
+	// so the menu and status command never alternate between two generations
+	// sharing the relay port during a blue-green update.
+	menuListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		log.Fatalf("listen for menu snapshots: %v", err)
+	}
+	menuServer := &http.Server{
+		Handler: snapshots.serveOrRelay(capability, deployStatusOrRelay(capability, http.NotFoundHandler(), activity)),
+	}
+	go func() {
+		if err := menuServer.Serve(menuListener); err != nil && err != http.ErrServerClosed {
+			log.Printf("menu snapshot server failed: %v", err)
+		}
+	}()
+	menuSnapshotURL := "http://" + menuListener.Addr().String() + clientcapability.PathPrefix(capability) + menuSnapshotEndpoint
+	if err := writeMenuSnapshotURL(dataDir(), menuSnapshotURL); err != nil {
 		log.Fatalf("publish the menu snapshot URL: %v", err)
 	}
 
@@ -236,6 +256,7 @@ func serveRelay(tcpListenAddress string) {
 		defer cancelDrain()
 		log.Printf("process %d stopping: it accepts no new requests and finishes model work in progress", os.Getpid())
 		snapshots.StopWaiting()
+		_ = menuServer.Close()
 		relayHandler.CloseWebSocketsOnceIdle()
 		forwardProxy.DrainConnections()
 		if err := server.Shutdown(drainContext); err != nil {
@@ -251,6 +272,7 @@ func serveRelay(tcpListenAddress string) {
 			log.Printf("process %d stopped after %s: admitted work finished and connections closed", os.Getpid(), time.Since(drainStarted).Round(time.Second))
 		}
 	case err := <-serveFailed:
+		_ = menuServer.Close()
 		if err != nil && err != http.ErrServerClosed {
 			log.Fatal(err)
 		}

@@ -14,23 +14,45 @@ struct ProviderSection: View {
 
     var body: some View {
         let accounts = snapshot.accounts.filter { $0.menuProvider == provider }.sorted { $0.accountNumber < $1.accountNumber }
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: density.headerGap) {
             ProviderHeader(provider: provider)
                 .padding(.horizontal, density.cardInset)
             VStack(alignment: .leading, spacing: density.groupGap) {
                 AccountIdentities(accounts: accounts, snapshot: snapshot, hideIdentity: hideIdentity, now: now)
-                ForEach(IndicatorBlock.blocks(for: accounts, provider: provider)) { block in
-                    VStack(alignment: .leading, spacing: density.blockTitleGap) {
-                        Text(block.title)
-                            .font(UsageTheme.labelFont)
-                        Grid(alignment: .leading, horizontalSpacing: density.columnGap, verticalSpacing: density.rowGap) {
-                            ForEach(block.rows, id: \.account.key) { row in
-                                AllowanceGridRow(
-                                    number: Int(row.account.accountNumber),
-                                    colour: snapshot.colour(of: row.account),
+                let blocks = IndicatorBlock.blocks(for: accounts, provider: provider)
+                if accounts.count == 1, let only = accounts.first, blocks.count > 1 {
+                    let orderedBlocks = blocks.sorted { left, right in
+                        let lModel = left.rows.first?.window.modelID ?? ""
+                        let rModel = right.rows.first?.window.modelID ?? ""
+                        if lModel != rModel { return lModel < rModel }
+                        return (left.rows.first?.window.periodSeconds ?? 0) < (right.rows.first?.window.periodSeconds ?? 0)
+                    }
+                    Grid(alignment: .leading, horizontalSpacing: density.columnGap, verticalSpacing: density.rowGap) {
+                        ForEach(orderedBlocks) { block in
+                            if let row = block.rows.first {
+                                SingleAccountAllowanceRow(
+                                    label: row.window.compactInlineTitle(for: provider),
                                     allowance: row.window,
+                                    accountNumber: Int(only.accountNumber),
                                     now: now
                                 )
+                            }
+                        }
+                    }
+                } else {
+                    ForEach(blocks) { block in
+                        VStack(alignment: .leading, spacing: density.blockTitleGap) {
+                            Text(block.title)
+                                .font(UsageTheme.labelFont)
+                            Grid(alignment: .leading, horizontalSpacing: density.columnGap, verticalSpacing: density.rowGap) {
+                                ForEach(block.rows, id: \.account.key) { row in
+                                    AllowanceGridRow(
+                                        number: Int(row.account.accountNumber),
+                                        colour: snapshot.colour(of: row.account),
+                                        allowance: row.window,
+                                        now: now
+                                    )
+                                }
                             }
                         }
                     }
@@ -158,8 +180,66 @@ extension CSSwitch_AllowanceWindow {
         return periodTitle
     }
 
+    /// Shorter inline label used when a single-account provider stacks multiple
+    /// allowance windows in one grid.
+    func compactInlineTitle(for provider: CSSwitch_Provider) -> String {
+        let shortPeriod: String = switch periodSeconds {
+        case 18_000 where provider == .claude: "Session"
+        case 18_000: "5h"
+        case 604_800: "Weekly"
+        case let seconds where seconds % 86_400 == 0: "\(seconds / 86_400)d"
+        case let seconds where seconds % 3_600 == 0: "\(seconds / 3_600)h"
+        default: "\(periodSeconds / 60)m"
+        }
+        guard modelID.isEmpty && modelName.isEmpty else {
+            let model = modelName.isEmpty ? modelID : modelName
+            return provider == .gemini ? "\(model) · \(shortPeriod)" : model
+        }
+        return title(for: provider)
+    }
+
     /// Nothing left to use before the reset.
     var isEmpty: Bool { usedPercent >= 100 }
+}
+
+private struct SingleAccountAllowanceRow: View {
+    let label: String
+    let allowance: CSSwitch_AllowanceWindow
+    let accountNumber: Int
+    let now: Date
+    @Environment(\.panelDensity) private var density
+
+    var body: some View {
+        let isLow = allowance.isEmpty || allowance.freePercent < 10
+        GridRow {
+            Text(label)
+                .font(density.rowEmphasisFont)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+            AllowanceBar(freeFraction: min(max(allowance.freePercent / 100, 0), 1), low: isLow, height: density.barHeight)
+                .frame(maxWidth: .infinity)
+            Text(allowance.isEmpty ? "Empty" : "\(UsageFormatting.percent(allowance.freePercent)) left")
+                .font(density.rowEmphasisFont)
+                .foregroundStyle(allowance.isEmpty ? AnyShapeStyle(UsageTheme.runOutColour) : AnyShapeStyle(.primary))
+                .monospacedDigit()
+                .lineLimit(1)
+                .frame(width: density.percentWidth, alignment: .trailing)
+            Text(resetText)
+                .font(density.rowFont)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .lineLimit(1)
+                .frame(width: density.timeWidth, alignment: .trailing)
+        }
+        .frame(height: density.rowHeight)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(label), Account \(accountNumber): \(allowance.isEmpty ? "empty" : "\(UsageFormatting.percent(allowance.freePercent)) left"), \(resetText)")
+    }
+
+    private var resetText: String {
+        guard allowance.hasResetAt, allowance.resetAt.date > now else { return "" }
+        return UsageFormatting.resetLabel(allowance.resetAt.date, now: now)
+    }
 }
 
 extension CSSwitch_Account {

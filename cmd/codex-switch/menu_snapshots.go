@@ -32,7 +32,10 @@ const menuSnapshotEndpoint = "/codex-switch/menu-snapshot"
 // menuSnapshotURLFilename is the file in the data directory that holds the
 // serving proxy's private menu snapshot URL. The menu app and the status
 // command read it; each generation writes it once it listens.
-const menuSnapshotURLFilename = "menu-snapshot-url"
+const (
+	menuSnapshotURLFilename = "menu-snapshot-url"
+	listenAddressFilename   = "listen-address"
+)
 
 // The snapshot is composed once a minute, and menuSnapshotAfterWork after the
 // proxy finishes a response when the last snapshot is older than that, so
@@ -209,9 +212,6 @@ func (snapshots *menuSnapshots) compose(ctx context.Context) error {
 		return err
 	}
 	snapshot.Connection.NewTasksConfigured = config.Provider == "openai" && config.OpenAIBaseURL != nil && strings.TrimRight(*config.OpenAIBaseURL, "/") == snapshots.codexBaseURL
-	if err := readProviderBurns(snapshots.database, snapshot); err != nil {
-		return err
-	}
 	var accountKeys []string
 	for _, account := range snapshot.Accounts {
 		accountKeys = append(accountKeys, account.Key)
@@ -228,6 +228,9 @@ func (snapshots *menuSnapshots) compose(ctx context.Context) error {
 		for index, account := range snapshots.gemini.ReadAccounts() {
 			snapshot.Accounts = append(snapshot.Accounts, menuGeminiAccount(account, uint32(index+1)))
 		}
+	}
+	if err := readProviderBurns(snapshots.database, snapshot); err != nil {
+		return err
 	}
 	keepShownTaskRows(snapshot)
 	// Status and the menu show what providers report, which may quote a credential.
@@ -257,7 +260,7 @@ func (snapshots *menuSnapshots) compose(ctx context.Context) error {
 }
 
 func readProviderBurns(database *store.StoreDatabase, snapshot *menupb.MenuSnapshot) error {
-	for _, provider := range []menupb.Provider{menupb.Provider_PROVIDER_CHATGPT, menupb.Provider_PROVIDER_CLAUDE} {
+	for _, provider := range []menupb.Provider{menupb.Provider_PROVIDER_CHATGPT, menupb.Provider_PROVIDER_CLAUDE, menupb.Provider_PROVIDER_GEMINI} {
 		var accountKeys []store.AccountKey
 		for _, account := range snapshot.Accounts {
 			if account.Provider == provider {
@@ -530,9 +533,31 @@ func menuAccountState(state accountapi.AccountState) menupb.AccountState {
 	}
 }
 
+func writeListenAddress(dataDirectory, address string) error {
+	temporary, err := os.CreateTemp(dataDirectory, ".listen-address-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(temporary.Name())
+	if _, err := temporary.WriteString(strings.TrimSpace(address) + "\n"); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	return os.Rename(temporary.Name(), filepath.Join(dataDirectory, listenAddressFilename))
+}
+
 // servedListenAddress is where clients reach this installation: the address
 // its proxy last served on, or the default before it first serves.
 func servedListenAddress(dataDirectory string) string {
+	if published, err := os.ReadFile(filepath.Join(dataDirectory, listenAddressFilename)); err == nil {
+		address := strings.TrimSpace(string(published))
+		if validateLocalListenAddress(address) == nil {
+			return address
+		}
+	}
 	published, err := os.ReadFile(filepath.Join(dataDirectory, menuSnapshotURLFilename))
 	if err != nil {
 		return listenAddress

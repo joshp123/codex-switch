@@ -36,7 +36,7 @@ func (database *StoreDatabase) RecordWeeklyAllowanceReading(reading WeeklyAllowa
 		math.IsNaN(reading.UsedPercent) || math.IsInf(reading.UsedPercent, 0) || reading.UsedPercent < 0 {
 		return errors.New("weekly allowance reading requires an account, reset, observation time, and nonnegative usage")
 	}
-	folder, err := database.accountFolder(reading.AccountKey)
+	folder, err := database.accountFolderOrKey(reading.AccountKey)
 	if err != nil {
 		return err
 	}
@@ -115,8 +115,9 @@ func (database *StoreDatabase) ReadWeeklyAllowanceBurn(accountKeys []AccountKey,
 			continue
 		}
 		if !now.Before(burn.computedAt) && (burn.expiresAt.IsZero() || now.Before(burn.expiresAt)) {
-			if index == 0 && len(database.weeklyAllowanceBurns) == 2 {
-				database.weeklyAllowanceBurns[0], database.weeklyAllowanceBurns[1] = database.weeklyAllowanceBurns[1], burn
+			if index < len(database.weeklyAllowanceBurns)-1 {
+				copy(database.weeklyAllowanceBurns[index:], database.weeklyAllowanceBurns[index+1:])
+				database.weeklyAllowanceBurns[len(database.weeklyAllowanceBurns)-1] = burn
 			}
 			return burn.value(now), nil
 		}
@@ -127,13 +128,14 @@ func (database *StoreDatabase) ReadWeeklyAllowanceBurn(accountKeys []AccountKey,
 	if err != nil {
 		return nil, err
 	}
+	const maxCachedBurns = 3
 	if cachedIndex >= 0 {
 		database.weeklyAllowanceBurns[cachedIndex] = burn
-	} else if len(database.weeklyAllowanceBurns) == 2 {
-		// The menu reads ChatGPT and Claude separately. Keep their two most
-		// recent selections without retaining historical pool combinations.
-		database.weeklyAllowanceBurns[0] = database.weeklyAllowanceBurns[1]
-		database.weeklyAllowanceBurns[1] = burn
+	} else if len(database.weeklyAllowanceBurns) == maxCachedBurns {
+		// The menu reads ChatGPT, Claude and Gemini separately. Keep the three
+		// most recent selections without retaining historical pool combinations.
+		copy(database.weeklyAllowanceBurns, database.weeklyAllowanceBurns[1:])
+		database.weeklyAllowanceBurns[maxCachedBurns-1] = burn
 	} else {
 		database.weeklyAllowanceBurns = append(database.weeklyAllowanceBurns, burn)
 	}

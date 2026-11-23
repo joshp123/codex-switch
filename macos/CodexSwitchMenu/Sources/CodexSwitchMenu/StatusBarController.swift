@@ -97,7 +97,7 @@ final class StatusBarController: NSObject {
         guard let button = statusItem.button else { return }
         button.target = self
         button.action = #selector(togglePanel)
-        button.sendAction(on: [.leftMouseUp])
+        button.sendAction(on: [.leftMouseDown])
         updateStatusItem()
 
         // The proxy answers when its snapshot changes, so the menu does
@@ -236,11 +236,33 @@ final class StatusBarController: NSObject {
             monitors.append(local)
         }
         if let global = NSEvent.addGlobalMonitorForEvents(matching: clicks, handler: { [weak self] _ in
-            Task { @MainActor [weak self] in self?.closePanel() }
+            let location = NSEvent.mouseLocation
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let buttonFrame: NSRect? = self.statusItem.button.flatMap { button in
+                    button.window.map { $0.convertToScreen(button.convert(button.bounds, to: nil)) }
+                }
+                if Self.shouldDismissForOutsideClick(at: location, buttonFrame: buttonFrame, panelFrame: self.panel.frame) {
+                    self.closePanel()
+                }
+            }
         }) {
             monitors.append(global)
         }
         return monitors
+    }
+
+    /// Global monitors also observe mouse-down events on a non-activating menu
+    /// bar app's own status item or panel. Ignore clicks on either so the status
+    /// item's own toggle action handles open/close once without flickering.
+    static func shouldDismissForOutsideClick(
+        at location: NSPoint,
+        buttonFrame: NSRect?,
+        panelFrame: NSRect
+    ) -> Bool {
+        if panelFrame.contains(location) { return false }
+        if let buttonFrame, buttonFrame.contains(location) { return false }
+        return true
     }
 
     private func updateStatusItem() {
