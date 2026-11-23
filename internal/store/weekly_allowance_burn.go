@@ -246,6 +246,19 @@ ORDER BY 1, observed_at_unix_nano`, cutoff, cutoff)
 	return burn, rows.Err()
 }
 
+// HasReadOnlyWeeklyAllowanceReading reports whether this database has ever
+// observed a weekly reading for the given folderless read-only account.
+func (database *StoreDatabase) HasReadOnlyWeeklyAllowanceReading(accountKey AccountKey) bool {
+	if database == nil || accountKey == "" {
+		return false
+	}
+	var exists bool
+	if err := database.sqlDatabase.QueryRow(`SELECT EXISTS (SELECT 1 FROM read_only_weekly_allowance_readings WHERE account_key = ?)`, accountKey).Scan(&exists); err != nil {
+		return false
+	}
+	return exists
+}
+
 // sameAllowanceWindow reports whether two readings of an account belong to
 // the same allowance window.
 func sameAllowanceWindow(previous, reading WeeklyAllowanceReading) bool {

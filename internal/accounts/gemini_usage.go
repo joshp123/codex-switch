@@ -24,6 +24,7 @@ import (
 
 const (
 	defaultGeminiUsageInterval = 5 * time.Minute
+	geminiTransientRetryDelay  = 5 * time.Second
 	geminiCLIReadTimeout       = 15 * time.Second
 	geminiCLIOutputLimit       = 1 << 20
 )
@@ -127,9 +128,13 @@ func (m *GeminiUsageMonitor) Run(ctx context.Context) {
 		return
 	}
 	for {
-		m.refreshOnce(ctx)
+		transientErr := m.refreshOnce(ctx)
 		m.markFirstReadDone()
-		timer := time.NewTimer(m.interval)
+		wait := m.interval
+		if transientErr {
+			wait = min(m.interval, geminiTransientRetryDelay)
+		}
+		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
@@ -139,9 +144,9 @@ func (m *GeminiUsageMonitor) Run(ctx context.Context) {
 	}
 }
 
-func (m *GeminiUsageMonitor) refreshOnce(ctx context.Context) {
+func (m *GeminiUsageMonitor) refreshOnce(ctx context.Context) (transientFailure bool) {
 	if m.agyExecutable == "" || ctx.Err() != nil {
-		return
+		return false
 	}
 	previous := m.ReadAccounts()
 	var prevAccount *GeminiAccountUsage
@@ -155,9 +160,10 @@ func (m *GeminiUsageMonitor) refreshOnce(ctx context.Context) {
 	}
 	if !present {
 		m.storeAccounts(nil)
-		return
+		return err != nil && !errors.Is(err, errGeminiAuthRequired)
 	}
 	m.storeAccounts([]GeminiAccountUsage{account})
+	return err != nil && !errors.Is(err, errGeminiAuthRequired)
 }
 
 func (m *GeminiUsageMonitor) storeAccounts(accounts []GeminiAccountUsage) {
@@ -195,6 +201,14 @@ func (m *GeminiUsageMonitor) readNativeCLI(ctx context.Context, prev *GeminiAcco
 			stale.UnavailableReason = "Antigravity usage check failed"
 			return stale, true, err
 		}
+		if m.storeDatabase != nil && m.storeDatabase.HasReadOnlyWeeklyAllowanceReading(key) {
+			return GeminiAccountUsage{
+				Key:               key,
+				Plan:              "Antigravity",
+				State:             AccountUsageCheckFailed,
+				UnavailableReason: "Antigravity usage check failed",
+			}, true, err
+		}
 		return GeminiAccountUsage{}, false, err
 	}
 
@@ -205,6 +219,14 @@ func (m *GeminiUsageMonitor) readNativeCLI(ctx context.Context, prev *GeminiAcco
 			stale.State = AccountUsageCheckFailed
 			stale.UnavailableReason = "Antigravity usage check failed"
 			return stale, true, err
+		}
+		if m.storeDatabase != nil && m.storeDatabase.HasReadOnlyWeeklyAllowanceReading(key) {
+			return GeminiAccountUsage{
+				Key:               key,
+				Plan:              "Antigravity",
+				State:             AccountUsageCheckFailed,
+				UnavailableReason: "Antigravity usage check failed",
+			}, true, err
 		}
 		return GeminiAccountUsage{}, false, err
 	}

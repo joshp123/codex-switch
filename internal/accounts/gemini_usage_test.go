@@ -205,4 +205,25 @@ EOF
 	if nextNum != 1 {
 		t.Fatalf("NextAccountNumber = %d, want 1", nextNum)
 	}
+
+	// A fresh monitor whose first CLI read fails transiently keeps Gemini visible
+	// when this database already observed Gemini previously, and flags retry.
+	failingAgy := filepath.Join(t.TempDir(), "agy-fail")
+	if err := os.WriteFile(failingAgy, []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	restarted := &GeminiUsageMonitor{
+		homeDir:       t.TempDir(),
+		agyExecutable: failingAgy,
+		storeDatabase: database,
+		interval:      time.Minute,
+		now:           func() time.Time { return now },
+	}
+	if !restarted.refreshOnce(context.Background()) {
+		t.Fatalf("expected transient failure flag true on failed read")
+	}
+	accounts := restarted.ReadAccounts()
+	if len(accounts) != 1 || accounts[0].State != AccountUsageCheckFailed {
+		t.Fatalf("expected failed Gemini placeholder retained across restart, got %+v", accounts)
+	}
 }
