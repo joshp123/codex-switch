@@ -105,19 +105,120 @@ final class AuditAndGeminiTests: XCTestCase {
     }
 
     @MainActor
-    func testOutsideClickDismissIgnoresStatusButtonAndPanel() {
-        let buttonFrame = NSRect(x: 1000, y: 950, width: 170, height: 24)
+    func testOutsideClickDismissIgnoresStatusButtonWindowsAndPanel() {
+        let primaryWindowFrame = NSRect(x: 1000, y: 946, width: 186, height: 37)
+        let secondaryWindowFrame = NSRect(x: 2400, y: 1043, width: 186, height: 37)
         let panelFrame = NSRect(x: 700, y: 100, width: 500, height: 840)
 
+        // Click in the outer 7.5pt top/bottom and 8pt side padding of a 37pt menu bar item.
         XCTAssertFalse(StatusBarController.shouldDismissForOutsideClick(
-            at: NSPoint(x: 1050, y: 960), buttonFrame: buttonFrame, panelFrame: panelFrame
+            at: NSPoint(x: 1002, y: 948),
+            statusItemFrames: [primaryWindowFrame, secondaryWindowFrame],
+            panelFrame: panelFrame
         ))
+        // Click on a secondary display's replicated status bar window.
         XCTAssertFalse(StatusBarController.shouldDismissForOutsideClick(
-            at: NSPoint(x: 800, y: 500), buttonFrame: buttonFrame, panelFrame: panelFrame
+            at: NSPoint(x: 2450, y: 1060),
+            statusItemFrames: [primaryWindowFrame, secondaryWindowFrame],
+            panelFrame: panelFrame
         ))
+        // Click inside panel.
+        XCTAssertFalse(StatusBarController.shouldDismissForOutsideClick(
+            at: NSPoint(x: 800, y: 500),
+            statusItemFrames: [primaryWindowFrame, secondaryWindowFrame],
+            panelFrame: panelFrame
+        ))
+        // True outside click.
         XCTAssertTrue(StatusBarController.shouldDismissForOutsideClick(
-            at: NSPoint(x: 200, y: 500), buttonFrame: buttonFrame, panelFrame: panelFrame
+            at: NSPoint(x: 200, y: 500),
+            statusItemFrames: [primaryWindowFrame, secondaryWindowFrame],
+            panelFrame: panelFrame
         ))
+    }
+
+    @MainActor
+    func testToggleReopenSuppressedAfterSameClickOrImmediateExternalDismiss() {
+        let now = ContinuousClock.now
+        let clickEvent = StatusBarController.EventIdentity(eventNumber: 42, timestamp: 100.5)
+        let sameClickLater = StatusBarController.EventIdentity(eventNumber: 42, timestamp: 100.52)
+        let sameTimestampZeroEventNum = StatusBarController.EventIdentity(eventNumber: 0, timestamp: 100.51)
+        let nextClick = StatusBarController.EventIdentity(eventNumber: 43, timestamp: 101.2)
+
+        let recentDismiss = StatusBarController.ExternalDismiss(event: clickEvent, dismissedAt: now)
+        XCTAssertTrue(StatusBarController.shouldIgnoreToggleReopen(
+            currentEvent: sameClickLater, externalDismiss: recentDismiss, now: now + .milliseconds(400)
+        ))
+        XCTAssertTrue(StatusBarController.shouldIgnoreToggleReopen(
+            currentEvent: sameTimestampZeroEventNum, externalDismiss: recentDismiss, now: now + .milliseconds(400)
+        ))
+        XCTAssertTrue(StatusBarController.shouldIgnoreToggleReopen(
+            currentEvent: nextClick, externalDismiss: recentDismiss, now: now + .milliseconds(100)
+        ))
+        XCTAssertFalse(StatusBarController.shouldIgnoreToggleReopen(
+            currentEvent: nextClick, externalDismiss: recentDismiss, now: now + .milliseconds(300)
+        ))
+        // Direct toggle close clears externalDismiss, so rapid reopen on next click works immediately.
+        XCTAssertFalse(StatusBarController.shouldIgnoreToggleReopen(
+            currentEvent: nextClick, externalDismiss: nil, now: now
+        ))
+    }
+
+    @MainActor
+    func testEventIdentityIgnoresKeyEventsWithoutCrashing() {
+        let keyEvent = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: 42.0,
+            windowNumber: 0,
+            context: nil,
+            characters: "\u{1b}",
+            charactersIgnoringModifiers: "\u{1b}",
+            isARepeat: false,
+            keyCode: 53
+        )
+        XCTAssertNil(StatusBarController.EventIdentity(keyEvent))
+
+        let mouseEvent = NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: NSPoint(x: 10, y: 10),
+            modifierFlags: [],
+            timestamp: 42.5,
+            windowNumber: 0,
+            context: nil,
+            eventNumber: 77,
+            clickCount: 1,
+            pressure: 1
+        )
+        XCTAssertEqual(
+            StatusBarController.EventIdentity(mouseEvent),
+            StatusBarController.EventIdentity(eventNumber: 77, timestamp: 42.5)
+        )
+    }
+
+    @MainActor
+    func testIsOwnWindowRecognizesReplicatedStatusBarWindowsAndMenus() {
+        final class FakeStatusBarWindow: NSWindow {}
+        final class FakeContextMenuWindow: NSWindow {}
+
+        let panel = NSWindow(contentRect: .zero, styleMask: [.borderless], backing: .buffered, defer: true)
+        let primaryStatus = FakeStatusBarWindow(contentRect: .zero, styleMask: [.borderless], backing: .buffered, defer: true)
+        let replicatedStatus = FakeStatusBarWindow(contentRect: .zero, styleMask: [.borderless], backing: .buffered, defer: true)
+        let menuWindow = FakeContextMenuWindow(contentRect: .zero, styleMask: [.borderless], backing: .buffered, defer: true)
+        let otherWindow = NSWindow(contentRect: .zero, styleMask: [.titled], backing: .buffered, defer: true)
+
+        XCTAssertTrue(StatusBarController.isOwnWindow(nil, panel: panel, statusButtonWindow: primaryStatus))
+        XCTAssertTrue(StatusBarController.isOwnWindow(panel, panel: panel, statusButtonWindow: primaryStatus))
+        XCTAssertTrue(StatusBarController.isOwnWindow(primaryStatus, panel: panel, statusButtonWindow: primaryStatus))
+        XCTAssertTrue(StatusBarController.isOwnWindow(replicatedStatus, panel: panel, statusButtonWindow: primaryStatus))
+        XCTAssertTrue(StatusBarController.isOwnWindow(menuWindow, panel: panel, statusButtonWindow: primaryStatus))
+        XCTAssertFalse(StatusBarController.isOwnWindow(otherWindow, panel: panel, statusButtonWindow: primaryStatus))
+
+        let onScreen = FakeStatusBarWindow(contentRect: NSRect(x: 1200, y: 1050, width: 140, height: 30), styleMask: [.borderless], backing: .buffered, defer: true)
+        let offScreen = FakeStatusBarWindow(contentRect: NSRect(x: 0, y: -30, width: 140, height: 30), styleMask: [.borderless], backing: .buffered, defer: true)
+        XCTAssertTrue(StatusBarController.anchorStatusBarWindow(currentEventWindow: onScreen, buttonWindow: offScreen) === onScreen)
+        XCTAssertTrue(StatusBarController.anchorStatusBarWindow(currentEventWindow: offScreen, buttonWindow: primaryStatus) === primaryStatus)
+        XCTAssertTrue(StatusBarController.anchorStatusBarWindow(currentEventWindow: otherWindow, buttonWindow: primaryStatus) === primaryStatus)
     }
 
     func testInitialPanelDensityAndGeminiWeeklyPace() {
