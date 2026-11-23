@@ -13,10 +13,11 @@ import (
 
 // StoreDatabase is shared by old and new proxy generations during a live drain.
 type StoreDatabase struct {
-	sqlDatabase              *sql.DB
-	weeklyAllowanceBurnMutex sync.Mutex
-	weeklyAllowanceBurnRowID int64
-	weeklyAllowanceBurns     []weeklyAllowanceBurn
+	sqlDatabase                      *sql.DB
+	weeklyAllowanceBurnMutex         sync.Mutex
+	weeklyAllowanceBurnRowID         int64
+	readOnlyWeeklyAllowanceBurnRowID int64
+	weeklyAllowanceBurns             []weeklyAllowanceBurn
 }
 
 // OpenStoreDatabase enables WAL before exposing the database to concurrent proxy generations.

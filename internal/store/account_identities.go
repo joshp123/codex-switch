@@ -73,30 +73,15 @@ func StoredAccountKey(table string) string {
 // accountFolder is the folder that holds the account now. Folder numbers are
 // never reused, so an account removed and signed in again is in its
 // highest-numbered folder.
+var errNoAccountFolder = errors.New("no folder is recorded for account")
+
 func (database *StoreDatabase) accountFolder(key AccountKey) (string, error) {
 	var folder string
 	err := database.sqlDatabase.QueryRow(`
 SELECT account_name FROM account_identities WHERE account_key = ?
 ORDER BY CAST(SUBSTR(account_name, LENGTH('account-') + 1) AS INTEGER) DESC LIMIT 1`, key).Scan(&folder)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", fmt.Errorf("no folder is recorded for account %s", key)
-	}
-	if err != nil {
-		return "", fmt.Errorf("read the folder of account %s: %w", key, err)
-	}
-	return folder, nil
-}
-
-// accountFolderOrKey returns the account's folder name when it belongs to the
-// local account pool, or its canonical key for read-only accounts (such as
-// local CLI usage) that have no credential folder.
-func (database *StoreDatabase) accountFolderOrKey(key AccountKey) (string, error) {
-	var folder string
-	err := database.sqlDatabase.QueryRow(`
-SELECT account_name FROM account_identities WHERE account_key = ?
-ORDER BY CAST(SUBSTR(account_name, LENGTH('account-') + 1) AS INTEGER) DESC LIMIT 1`, key).Scan(&folder)
-	if errors.Is(err, sql.ErrNoRows) {
-		return string(key), nil
+		return "", fmt.Errorf("%w %s", errNoAccountFolder, key)
 	}
 	if err != nil {
 		return "", fmt.Errorf("read the folder of account %s: %w", key, err)

@@ -48,13 +48,13 @@ restore_menu_snapshot_url() {
 }
 cleanup() {
   if [ "$switch_in_progress" = true ]; then
+    restore_menu_snapshot_url
     if [ "${active:-none}" != none ] && [ -n "${active_binary:-}" ]; then
       /bin/ln -sf "$active_binary" "$command_link" 2>/dev/null || true
     fi
     if [ -n "${next_label:-}" ] && [ -n "${next_binary:-}" ]; then
       stop_job "$next_label" "$next_binary" 2>/dev/null || true
     fi
-    restore_menu_snapshot_url
     [ ! -e "$data/switch-started" ] || /usr/bin/trash "$data/switch-started" 2>/dev/null || true
   fi
   /usr/bin/trash "$workspace" 2>/dev/null || true
@@ -163,8 +163,12 @@ if [ "$active" != none ]; then
 else
   listen=$new_install_listen
 fi
-# A candidate left by an interrupted installer was never promoted. Stop it;
-# the promoted slot remains the only persistent job.
+# A candidate left by an interrupted installer was never promoted. Restore the
+# promoted menu snapshot pointer before stopping the unpromoted candidate.
+if [ -f "$data/switch-started" ] && [ -f "$data/promoted-menu-snapshot-url" ]; then
+  /bin/cp "$data/promoted-menu-snapshot-url" "$data/menu-snapshot-url.restore.$$" 2>/dev/null || true
+  [ ! -f "$data/menu-snapshot-url.restore.$$" ] || /bin/mv -f "$data/menu-snapshot-url.restore.$$" "$data/menu-snapshot-url" 2>/dev/null || true
+fi
 switch_started=$(cat "$data/switch-started" 2>/dev/null || /bin/date +%s)
 for slot in a b; do
   [ "$slot" = "$active" ] && continue
@@ -292,6 +296,10 @@ else
 fi
 if [ -f "$data/menu-snapshot-url" ]; then
   /bin/cp "$data/menu-snapshot-url" "$workspace/previous-menu-snapshot-url"
+  if [ ! -f "$data/promoted-menu-snapshot-url" ]; then
+    /bin/cp "$data/menu-snapshot-url" "$data/promoted-menu-snapshot-url.next"
+    /bin/mv -f "$data/promoted-menu-snapshot-url.next" "$data/promoted-menu-snapshot-url"
+  fi
 fi
 switch_started=$(/bin/date +%s)
 printf '%s\n' "$switch_started" > "$data/switch-started"
@@ -300,8 +308,8 @@ bootstrap_job "$temporary_plist"
 readiness_result=0
 wait_for_job "$next_label" true || readiness_result=$?
 if [ "$readiness_result" -ne 0 ]; then
-  stop_job "$next_label" "$next_binary"
   restore_menu_snapshot_url
+  stop_job "$next_label" "$next_binary"
   /usr/bin/trash "$data/switch-started"
   switch_in_progress=false
   if [ "$readiness_result" -eq 2 ] && [ "$active" != none ] && [ "$manual" = false ]; then printf '%s\n' "$chosen_build" >> "$data/skipped-builds"; echo "build $chosen_build was skipped"; exit 0; fi
@@ -313,9 +321,9 @@ candidate_pid=$pid
 /bin/ln -sf "$next_binary" "$command_link"
 if [ "$active" != none ]; then
   step_aside() {
+    restore_menu_snapshot_url
     /bin/ln -sf "$active_binary" "$command_link"
     stop_job "$next_label" "$next_binary"
-    restore_menu_snapshot_url
     /usr/bin/trash "$data/switch-started"
     switch_in_progress=false
   }
@@ -373,6 +381,10 @@ fi
 /bin/mv -f "$next_plist.next" "$next_plist"
 printf '%s\n' "$next" > "$state.next"
 /bin/mv -f "$state.next" "$state"
+if [ -f "$data/menu-snapshot-url" ]; then
+  /bin/cp "$data/menu-snapshot-url" "$data/promoted-menu-snapshot-url.next"
+  /bin/mv -f "$data/promoted-menu-snapshot-url.next" "$data/promoted-menu-snapshot-url"
+fi
 switch_in_progress=false
 if [ "$manual" = true ] && [ "${active_build:-0}" -gt 0 ] && [ "$active_build" -ne "$chosen_build" ]; then
   printf '%s\n' "$active_build" >> "$data/skipped-builds"

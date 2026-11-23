@@ -214,8 +214,6 @@ func serveRelay(tcpListenAddress string) {
 
 	clientURL := "http://" + listener.Addr().String() + clientcapability.PathPrefix(capability)
 	snapshots.codexBaseURL = clientURL + "/backend-api/codex"
-	background.Add(1)
-	go func() { defer background.Done(); snapshots.Run(factsContext) }()
 	if err := writeListenAddress(dataDir(), listener.Addr().String()); err != nil {
 		log.Fatalf("publish the proxy listen address: %v", err)
 	}
@@ -234,10 +232,27 @@ func serveRelay(tcpListenAddress string) {
 			log.Printf("menu snapshot server failed: %v", err)
 		}
 	}()
+	menuPublishContext, stopMenuPublish := context.WithCancel(factsContext)
+	defer stopMenuPublish()
 	menuSnapshotURL := "http://" + menuListener.Addr().String() + clientcapability.PathPrefix(capability) + menuSnapshotEndpoint
-	if err := writeMenuSnapshotURL(dataDir(), menuSnapshotURL); err != nil {
-		log.Fatalf("publish the menu snapshot URL: %v", err)
-	}
+	background.Add(1)
+	go func() {
+		defer background.Done()
+		// Wait for the initial Gemini check before composing the first snapshot
+		// so publishing menu-snapshot-url never briefly drops Gemini or serves 503.
+		geminiMonitor.WaitForFirstRead(menuPublishContext)
+		snapshots.Run(menuPublishContext)
+	}()
+	background.Add(1)
+	go func() {
+		defer background.Done()
+		if !snapshots.WaitForFirstSnapshot(menuPublishContext) || menuPublishContext.Err() != nil {
+			return
+		}
+		if err := writeMenuSnapshotURL(dataDir(), menuSnapshotURL); err != nil {
+			log.Printf("publish the menu snapshot URL: %v", err)
+		}
+	}()
 
 	server := &http.Server{Handler: forwardProxy}
 	serveFailed := make(chan error, 1)
@@ -255,6 +270,7 @@ func serveRelay(tcpListenAddress string) {
 		drainContext, cancelDrain := context.WithTimeout(context.Background(), 25*time.Minute)
 		defer cancelDrain()
 		log.Printf("process %d stopping: it accepts no new requests and finishes model work in progress", os.Getpid())
+		stopMenuPublish()
 		snapshots.StopWaiting()
 		_ = menuServer.Close()
 		relayHandler.CloseWebSocketsOnceIdle()

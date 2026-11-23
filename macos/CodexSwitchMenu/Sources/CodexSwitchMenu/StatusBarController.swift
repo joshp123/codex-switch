@@ -235,10 +235,11 @@ final class StatusBarController: NSObject {
         }) {
             monitors.append(local)
         }
+        let openingGeneration = openGeneration
         if let global = NSEvent.addGlobalMonitorForEvents(matching: clicks, handler: { [weak self] _ in
             let location = NSEvent.mouseLocation
             Task { @MainActor [weak self] in
-                guard let self else { return }
+                guard let self, self.openGeneration == openingGeneration else { return }
                 let buttonFrame: NSRect? = self.statusItem.button.flatMap { button in
                     button.window.map { $0.convertToScreen(button.convert(button.bounds, to: nil)) }
                 }

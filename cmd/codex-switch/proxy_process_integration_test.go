@@ -479,6 +479,7 @@ func startRealBinaryProxy(t *testing.T, binary, data, upstream string, extraEnv 
 			"CODEX_SWITCH_DATA_DIR=" + data,
 			"CODEX_SWITCH_UPSTREAM_ORIGIN=" + upstream,
 			"CODEX_SWITCH_USAGE_URL=" + upstream + "/usage",
+			"CODEX_SWITCH_AGY_BIN=none",
 		}, extraEnv...)...,
 	)
 	stdout, err := process.command.StdoutPipe()

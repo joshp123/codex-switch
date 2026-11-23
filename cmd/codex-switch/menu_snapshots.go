@@ -74,9 +74,11 @@ type menuSnapshots struct {
 	// version is unique to this process, so a menu that held a snapshot from
 	// the previous generation never takes this one's for the same version.
 	generation int64
-	version    uint64
-	changed    chan struct{}
-	stopping   chan struct{}
+	version           uint64
+	changed           chan struct{}
+	stopping          chan struct{}
+	firstSnapshotOnce sync.Once
+	firstSnapshotDone chan struct{}
 	// workDone asks for a snapshot soon, because the proxy finished a response.
 	workDone chan struct{}
 	// lastCodexConfig is Codex's effective config as last read, and
@@ -103,7 +105,16 @@ func newMenuSnapshots(dataDirectory string, router *routing.TaskRouter, database
 	return &menuSnapshots{
 		dataDirectory: dataDirectory, router: router, database: database, usageLedger: usageLedger, codex: codex,
 		generation: time.Now().UnixNano(), interval: menuSnapshotInterval,
-		changed: make(chan struct{}), stopping: make(chan struct{}), workDone: make(chan struct{}, 1),
+		changed: make(chan struct{}), stopping: make(chan struct{}), firstSnapshotDone: make(chan struct{}), workDone: make(chan struct{}, 1),
+	}
+}
+
+func (snapshots *menuSnapshots) WaitForFirstSnapshot(ctx context.Context) bool {
+	select {
+	case <-snapshots.firstSnapshotDone:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 
@@ -248,13 +259,18 @@ func (snapshots *menuSnapshots) compose(ctx context.Context) error {
 		return err
 	}
 	snapshots.mutex.Lock()
-	defer snapshots.mutex.Unlock()
 	snapshots.encoded = encoded
 	if !bytes.Equal(content, snapshots.content) {
 		snapshots.content = content
 		snapshots.version++
 		close(snapshots.changed)
 		snapshots.changed = make(chan struct{})
+	}
+	snapshots.mutex.Unlock()
+	if snapshots.firstSnapshotDone != nil {
+		snapshots.firstSnapshotOnce.Do(func() {
+			close(snapshots.firstSnapshotDone)
+		})
 	}
 	return nil
 }

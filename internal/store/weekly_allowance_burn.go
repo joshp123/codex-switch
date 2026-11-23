@@ -27,6 +27,14 @@ CREATE TABLE IF NOT EXISTS weekly_allowance_readings (
     observed_at_unix_nano INTEGER NOT NULL,
     account_key TEXT,
     PRIMARY KEY (account_name, observed_at_unix_nano)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS read_only_weekly_allowance_readings (
+    account_key TEXT NOT NULL,
+    resets_at_unix INTEGER NOT NULL,
+    used_percent REAL NOT NULL,
+    observed_at_unix_nano INTEGER NOT NULL,
+    PRIMARY KEY (account_key, observed_at_unix_nano)
 ) STRICT;`)
 	return err
 }
@@ -36,7 +44,31 @@ func (database *StoreDatabase) RecordWeeklyAllowanceReading(reading WeeklyAllowa
 		math.IsNaN(reading.UsedPercent) || math.IsInf(reading.UsedPercent, 0) || reading.UsedPercent < 0 {
 		return errors.New("weekly allowance reading requires an account, reset, observation time, and nonnegative usage")
 	}
-	folder, err := database.accountFolderOrKey(reading.AccountKey)
+	folder, err := database.accountFolder(reading.AccountKey)
+	if errors.Is(err, errNoAccountFolder) {
+		if _, err := database.sqlDatabase.Exec(`DELETE FROM read_only_weekly_allowance_readings WHERE observed_at_unix_nano < ?`,
+			reading.ObservedAt.Add(-8*24*time.Hour).UnixNano()); err != nil {
+			return fmt.Errorf("prune read-only weekly allowance readings: %w", err)
+		}
+		_, err = database.sqlDatabase.Exec(`
+WITH latest AS (
+    SELECT resets_at_unix, used_percent, observed_at_unix_nano
+    FROM read_only_weekly_allowance_readings WHERE account_key = ?
+    ORDER BY observed_at_unix_nano DESC LIMIT 1
+)
+INSERT INTO read_only_weekly_allowance_readings
+    (account_key, resets_at_unix, used_percent, observed_at_unix_nano)
+SELECT ?, ?, ?, ?
+WHERE NOT EXISTS (SELECT 1 FROM latest)
+   OR EXISTS (SELECT 1 FROM latest WHERE observed_at_unix_nano < ?
+              AND (resets_at_unix != ? OR used_percent != ?))`,
+			reading.AccountKey, reading.AccountKey, reading.ResetsAt.Unix(), reading.UsedPercent,
+			reading.ObservedAt.UnixNano(), reading.ObservedAt.UnixNano(), reading.ResetsAt.Unix(), reading.UsedPercent)
+		if err != nil {
+			return fmt.Errorf("record read-only weekly allowance reading: %w", err)
+		}
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -101,13 +133,14 @@ func (burn weeklyAllowanceBurn) value(now time.Time) *float64 {
 func (database *StoreDatabase) ReadWeeklyAllowanceBurn(accountKeys []AccountKey, now time.Time) (*float64, error) {
 	database.weeklyAllowanceBurnMutex.Lock()
 	defer database.weeklyAllowanceBurnMutex.Unlock()
-	var latestRowID sql.NullInt64
-	if err := database.sqlDatabase.QueryRow(`SELECT MAX(rowid) FROM weekly_allowance_readings`).Scan(&latestRowID); err != nil {
+	var latestRowID, latestReadOnlyRowID sql.NullInt64
+	if err := database.sqlDatabase.QueryRow(`SELECT (SELECT MAX(rowid) FROM weekly_allowance_readings), (SELECT MAX(rowid) FROM read_only_weekly_allowance_readings)`).Scan(&latestRowID, &latestReadOnlyRowID); err != nil {
 		return nil, fmt.Errorf("read weekly allowance changes: %w", err)
 	}
-	if latestRowID.Int64 != database.weeklyAllowanceBurnRowID {
+	if latestRowID.Int64 != database.weeklyAllowanceBurnRowID || latestReadOnlyRowID.Int64 != database.readOnlyWeeklyAllowanceBurnRowID {
 		database.weeklyAllowanceBurns = nil
 		database.weeklyAllowanceBurnRowID = latestRowID.Int64
+		database.readOnlyWeeklyAllowanceBurnRowID = latestReadOnlyRowID.Int64
 	}
 	cachedIndex := -1
 	for index, burn := range database.weeklyAllowanceBurns {
@@ -148,11 +181,18 @@ func (database *StoreDatabase) readWeeklyAllowanceBurn(accountKeys []AccountKey,
 	for _, accountKey := range accountKeys {
 		selectedAccounts[accountKey] = true
 	}
+	cutoff := now.Add(-8 * 24 * time.Hour).UnixNano()
 	rows, err := database.sqlDatabase.Query(`
-SELECT `+StoredAccountKey("weekly_allowance_readings")+`, resets_at_unix, used_percent, observed_at_unix_nano
-FROM weekly_allowance_readings
-WHERE observed_at_unix_nano >= ?
-ORDER BY 1, observed_at_unix_nano`, now.Add(-8*24*time.Hour).UnixNano())
+SELECT account_key, resets_at_unix, used_percent, observed_at_unix_nano FROM (
+    SELECT `+StoredAccountKey("weekly_allowance_readings")+` AS account_key, resets_at_unix, used_percent, observed_at_unix_nano
+    FROM weekly_allowance_readings
+    WHERE observed_at_unix_nano >= ?
+    UNION ALL
+    SELECT account_key, resets_at_unix, used_percent, observed_at_unix_nano
+    FROM read_only_weekly_allowance_readings
+    WHERE observed_at_unix_nano >= ?
+)
+ORDER BY 1, observed_at_unix_nano`, cutoff, cutoff)
 	if err != nil {
 		return burn, fmt.Errorf("read weekly allowance burn: %w", err)
 	}

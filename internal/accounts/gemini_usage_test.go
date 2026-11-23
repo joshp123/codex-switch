@@ -197,4 +197,12 @@ EOF
 	if math.Abs(*burn-1.05) > 0.01 {
 		t.Fatalf("Gemini weekly burn = %.4f, want ~1.05", *burn)
 	}
+	// Recording Gemini readings must never break NextAccountNumber for pooled accounts.
+	nextNum, err := database.NextAccountNumber()
+	if err != nil {
+		t.Fatalf("NextAccountNumber after Gemini weekly readings: %v", err)
+	}
+	if nextNum != 1 {
+		t.Fatalf("NextAccountNumber = %d, want 1", nextNum)
+	}
 }

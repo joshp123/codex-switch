@@ -53,6 +53,9 @@ type GeminiUsageMonitor struct {
 	now           func() time.Time
 	onChange      func()
 
+	firstReadOnce sync.Once
+	firstReadDone chan struct{}
+
 	mu            sync.RWMutex
 	accounts      []GeminiAccountUsage
 	lastSignature string
@@ -69,6 +72,28 @@ func NewGeminiUsageMonitor(storeDatabase *store.StoreDatabase, onChange func()) 
 		interval:      defaultGeminiUsageInterval,
 		now:           time.Now,
 		onChange:      onChange,
+		firstReadDone: make(chan struct{}),
+	}
+}
+
+func (m *GeminiUsageMonitor) markFirstReadDone() {
+	if m.firstReadDone == nil {
+		return
+	}
+	m.firstReadOnce.Do(func() {
+		close(m.firstReadDone)
+	})
+}
+
+// WaitForFirstRead waits for the initial Gemini CLI check to finish (or until
+// ctx expires) so the first published menu snapshot already includes Gemini.
+func (m *GeminiUsageMonitor) WaitForFirstRead(ctx context.Context) {
+	if m == nil || m.agyExecutable == "" || m.firstReadDone == nil {
+		return
+	}
+	select {
+	case <-m.firstReadDone:
+	case <-ctx.Done():
 	}
 }
 
@@ -97,11 +122,13 @@ func (m *GeminiUsageMonitor) ReadAccounts() []GeminiAccountUsage {
 // Run refreshes Gemini usage immediately in the background and then on each
 // interval until ctx is cancelled.
 func (m *GeminiUsageMonitor) Run(ctx context.Context) {
+	defer m.markFirstReadDone()
 	if m.agyExecutable == "" {
 		return
 	}
 	for {
 		m.refreshOnce(ctx)
+		m.markFirstReadDone()
 		timer := time.NewTimer(m.interval)
 		select {
 		case <-ctx.Done():
